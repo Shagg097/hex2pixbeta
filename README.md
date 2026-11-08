@@ -66,6 +66,16 @@ with the standard Windows Python installer. On Linux, install the distribution's
 The packaged executable is built for Windows. Build instructions are
 [below](#build-the-executable).
 
+## Virus scan
+
+The `hex2pixbeta-main.zip` source archive was scanned by Jotti's malware
+scan: **0 of 13 engines reported malware**
+([full report](https://virusscan.jotti.org/en-US/filescanjob/jvfzv768vy)).
+
+<p align="center">
+  <a href="https://virusscan.jotti.org/en-US/filescanjob/jvfzv768vy"><img src="docs/jotti-malware-scan.png" width="560" alt="Jotti malware scan report for hex2pixbeta-main.zip: scan finished, 0 of 13 scanners reported malware"></a>
+</p>
+
 ## The hex idea
 
 ### Paint by typing
