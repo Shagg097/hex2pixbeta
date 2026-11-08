@@ -1,0 +1,17 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Built executable (rebuilt with build_exe.cmd)
+hex2pix.exe
+
+# Editor and OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
