@@ -1,0 +1,5 @@
+# Runtime dependency of the editor.
+Pillow>=10.0
+
+# Build-time only: produces dist\hex2pix.exe through build_exe.cmd / hex2pix.spec.
+pyinstaller>=6.0

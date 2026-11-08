@@ -46,7 +46,9 @@ This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
 
 ## Quick start
 
-Download or build `hex2pix.exe`, then run it directly:
+Download the latest `hex2pix.exe` from the
+[Releases page](https://github.com/Shagg097/hex2pixbeta/releases), or build it
+yourself, then run it directly:
 
 ```text
 hex2pix.exe                 # start page: presets and recent documents
@@ -356,9 +358,9 @@ restarts.
   protected locations such as `Program Files` do not.
 - Source checkouts never replace themselves; a manual check offers the release
   page instead.
-- To publish an update, attach the built `hex2pix.exe` to a GitHub Release and
-  use a version tag such as `v1.3.0b1`. Releases without an executable asset are
-  ignored.
+- To publish an update, push a version tag such as `v1.3.0b1`; the release
+  workflow builds `hex2pix.exe` and attaches it as that release's executable.
+  Releases without the asset are ignored.
 
 The update check contacts only `api.github.com` and sends no usage telemetry.
 
