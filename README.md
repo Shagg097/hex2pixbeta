@@ -543,7 +543,7 @@ hex2pixmain/
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
 │  └─ tests/              354 unit tests
-└─ docs/                   README screenshots and example artwork
+└─ docs/                   screenshots, artwork; logo source in logo/
 ```
 
 ## Limits
