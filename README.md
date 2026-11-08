@@ -45,12 +45,39 @@ This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
   <img src="docs/night-signal.png" width="420" alt="Night Signal: a 64 by 64 pixel-art lighthouse, moonlit sea, sailboat and pine trees">
 </p>
 
-## Quick start
+## Install on Windows
 
-Download the latest release from the
-[Releases page](https://github.com/Shagg097/hex2pixbeta/releases) — either
-`hex2pix.exe` (single file) or `hex2pix-portable.zip` (folder build) — or build
-it yourself, then run it:
+**You do not need Python, pip or any other runtime installed.** The release
+executable is a self-contained Windows program: PyInstaller bundles CPython
+3.10 (64-bit), Tcl/Tk and Pillow together with the hex2pix code, so it runs on a
+machine that has never had Python on it. There is no installer and nothing to
+add to `PATH` — it is an ordinary windowed `.exe`.
+
+Download from the
+[Releases page](https://github.com/Shagg097/hex2pixbeta/releases):
+
+| File | Size | Use it when |
+| --- | --- | --- |
+| `hex2pix.exe` | ~18 MB | the usual choice: one file, no console window |
+| `hex2pix-portable.zip` | ~18 MB | antivirus blocks the single file (see below) |
+
+Put the executable (or the unzipped folder) anywhere you can write — Desktop,
+`D:\Tools`, a USB stick — and double-click it. No administrator rights are
+needed.
+
+- **Requirements:** 64-bit Windows 10 or 11.
+- **First start takes a few seconds:** the single file unpacks its bundled
+  runtime into `%TEMP%\_MEIxxxxxx` on each start and removes it on exit.
+- **SmartScreen:** the download is not code-signed, so Windows may show
+  "Windows protected your PC". Choose **More info** → **Run anyway**.
+- **No console window:** the executable is built as a GUI program, so no
+  terminal opens beside the editor.
+
+Python is only needed to run or build from source; see
+[Run from source](#run-from-source) and
+[Build the executable](#build-the-executable).
+
+## Quick start
 
 ```text
 hex2pix.exe                 # start page: presets and recent documents
@@ -75,7 +102,9 @@ DLLs on disk beside the executable and never extracts to `%TEMP%`. If you want
 to keep using the single file, adding an antivirus exclusion for it clears the
 same error.
 
-To run from source:
+### Run from source
+
+Only this path needs Python installed:
 
 ```bash
 py -3 run_hex2pix.py

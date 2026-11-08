@@ -6,7 +6,10 @@ blocks, and select *bytes of pixel data* with art-program selection tools
 drawing and selecting; the keyboard is the primary instrument.
 
 Ships as a single Windows executable, `hex2pix.exe`, built from the Python
-package in this folder.
+package in this folder. That executable is self-contained — CPython 3.10,
+Tcl/Tk and Pillow are bundled inside it — so **the released build runs on
+Windows without Python installed**. Python is only needed for the source
+checkout below.
 
 ## Run
 
@@ -15,7 +18,12 @@ hex2pix.exe                  # home page: presets, recent files
 hex2pix.exe art.bmp          # open a file straight in the editor
 ```
 
-From source, without building:
+The release also includes `hex2pix-portable.zip`: the same program as a folder,
+with the runtime in `_internal\`, for machines whose antivirus blocks the
+single file's `%TEMP%` unpacking. Both need 64-bit Windows 10 or 11; neither
+needs an installer, administrator rights or Python.
+
+From source, without building (this path does need Python):
 
 ```
 py -3 run_hex2pix.py
