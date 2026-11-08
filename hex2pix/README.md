@@ -231,9 +231,18 @@ Aseprite-style drawing aids on top of the brush:
 - **Mirror** (left panel) mirrors brush strokes, shapes and erasing across the
   X axis, Y axis or both, like Aseprite's symmetry.
 - **Tip** switches the brush between a square and a circle.
-- **Palette** keeps a swatch grid: PICO-8, DB16 and Grayscale presets, `+ FG`
-  to add the current colour, and Save/Load for GIMP `.gpl` palettes, the format
-  Aseprite also reads and writes.
+- **Palette** keeps a scrolling swatch grid: PICO-8, DB16, Grayscale and the
+  256-colour **256 Cube** preset. Left-click a swatch to use its colour,
+  right-click to edit it, and **New...** builds a palette from scratch (name,
+  1-256 slots, black/white/foreground/gray fill). **+ FG**, **Set** and
+  **Del** refine it; Save/Load handle `.256` hex lists, GIMP `.gpl` and JASC
+  `.pal` files, capped at 256 colours. **Map to palette** (or **Map +
+  dither**, also under Image) recolours the layer or selection to the palette,
+  diffusing the error Floyd-Steinberg style when dithering.
+- **Colour wheel** above the hex field: click the hue ring or the
+  saturation/value square for the foreground, right-click either for the
+  background; the hex and alpha fields follow along. GIF export already
+  writes a 256-colour adaptive palette.
 - Only the visible part of the canvas is drawn, so painting stays responsive on
   large sprites. The canvas is centred when it is smaller than the workspace;
   use the zoom buttons, **Zoom to fit**, the mouse wheel (which zooms around

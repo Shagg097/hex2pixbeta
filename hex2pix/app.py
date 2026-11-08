@@ -5,6 +5,7 @@ placement, byte operations, recolor, byte dump, export). Everything edits the
 `Document` from `hex2pix.model`; this module only draws and routes input.
 """
 
+import colorsys
 import io
 import json
 import math
@@ -12,13 +13,16 @@ import os
 import sys
 import tempfile
 import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
+from tkinter import (colorchooser, filedialog, font as tkfont, messagebox,
+                     simpledialog, ttk)
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import __version__, dither, filters, formats, icons
 from .macro import Macro, Recorder
-from .palette import PALETTES, format_gpl, parse_gpl, preset_colors
+from .palette import (MAX_PALETTE_COLORS, PALETTE_FILETYPES, PALETTES,
+                      format_palette, make_palette, parse_palette,
+                      preset_colors, quantize_bitmap)
 from .pattern import PatternSpec, apply_pattern, block_from_grid
 from .bitmapfont import text_size
 from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
@@ -381,6 +385,207 @@ class HomeView(tk.Frame):
             self.app.report_error("Manual: %s" % path)
 
 
+class ColorWheel(tk.Canvas):
+    """Hue ring around a saturation/value square.
+
+    Left-click sets the foreground colour and right-click the background;
+    alpha stays with the app's existing swatches.
+    """
+
+    def __init__(self, parent, size=140, command=None, **kwargs):
+        super().__init__(parent, width=size, height=size, bd=0,
+                         highlightthickness=0, bg="#ffffff", **kwargs)
+        self.size = int(size)
+        self.command = command
+        self.outer = self.size / 2.0 - 2
+        self.inner = self.outer * 0.64
+        self.square = int(self.inner * 1.414) - 4
+        self.left = int((self.size - self.square) / 2.0)
+        self.top = int((self.size - self.square) / 2.0)
+        self._hue = 0.92
+        self._sat = 1.0
+        self._val = 1.0
+        self._ring_photo = None
+        self._square_photo = None
+        self._render_ring()
+        self.create_image(0, 0, anchor="nw", image=self._ring_photo,
+                          tags="ring")
+        self._square_item = self.create_image(self.left, self.top,
+                                               anchor="nw", tags="square")
+        self._render_square()
+        self._ring_dot = self.create_oval(0, 0, 0, 0, outline="#ffffff",
+                                          width=2, tags="marker")
+        self._square_dot = self.create_oval(0, 0, 0, 0, outline="#ffffff",
+                                            width=2, tags="marker")
+        self.bind("<Button-1>", lambda event: self._pick(event, False))
+        self.bind("<B1-Motion>", lambda event: self._pick(event, False))
+        self.bind("<Button-3>", lambda event: self._pick(event, True))
+        self.bind("<B3-Motion>", lambda event: self._pick(event, True))
+        self.set_color((255, 0, 128, 255))
+
+    def _render_ring(self):
+        scale = 4
+        big = self.size * scale
+        image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        box = [0, 0, big - 1, big - 1]
+        for step in range(360):
+            red, green, blue = colorsys.hsv_to_rgb(step / 360.0, 1.0, 1.0)
+            draw.pieslice(box, step, step + 1,
+                          fill=(int(red * 255), int(green * 255),
+                                int(blue * 255), 255))
+        mask = Image.new("L", (big, big), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        center = big / 2.0
+        outer = self.outer * scale
+        inner = self.inner * scale
+        mask_draw.ellipse([center - outer, center - outer,
+                           center + outer, center + outer], fill=255)
+        mask_draw.ellipse([center - inner, center - inner,
+                           center + inner, center + inner], fill=0)
+        image.putalpha(mask)
+        image = image.resize((self.size, self.size), Image.LANCZOS)
+        self._ring_photo = ImageTk.PhotoImage(image)
+
+    def _render_square(self):
+        side = max(4, self.square)
+        scale = 2
+        big = side * scale
+        image = Image.new("RGBA", (big, big), (0, 0, 0, 255))
+        pixels = image.load()
+        for y in range(big):
+            value = 1.0 - y / float(big - 1)
+            for x in range(big):
+                saturation = x / float(big - 1)
+                red, green, blue = colorsys.hsv_to_rgb(self._hue,
+                                                       saturation, value)
+                pixels[x, y] = (int(red * 255 + 0.5),
+                                int(green * 255 + 0.5),
+                                int(blue * 255 + 0.5), 255)
+        image = image.resize((side, side), Image.LANCZOS)
+        self._square_photo = ImageTk.PhotoImage(image)
+        self.itemconfig(self._square_item, image=self._square_photo)
+
+    def set_color(self, color):
+        red, green, blue = [channel / 255.0 for channel in color[:3]]
+        hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+        if saturation > 0.001:
+            self._hue = hue
+        self._sat = saturation
+        self._val = value
+        self._render_square()
+        self._place_markers()
+
+    def _place_markers(self):
+        angle = self._hue * 2.0 * math.pi
+        radius = (self.outer + self.inner) / 2.0
+        center = self.size / 2.0
+        dot_x = center + math.cos(angle) * radius
+        dot_y = center + math.sin(angle) * radius
+        self.coords(self._ring_dot, dot_x - 5, dot_y - 5,
+                    dot_x + 5, dot_y + 5)
+        square_x = self.left + self._sat * self.square
+        square_y = self.top + (1.0 - self._val) * self.square
+        self.coords(self._square_dot, square_x - 5, square_y - 5,
+                    square_x + 5, square_y + 5)
+        self.tag_raise("marker")
+
+    def _pick(self, event, secondary):
+        center = self.size / 2.0
+        distance = math.hypot(event.x - center, event.y - center)
+        changed = False
+        if self.inner <= distance <= self.outer:
+            self._hue = (math.atan2(event.y - center, event.x - center)
+                         / (2.0 * math.pi)) % 1.0
+            if self._sat < 0.05:
+                self._sat = 1.0
+            self._render_square()
+            changed = True
+        elif (self.left <= event.x < self.left + self.square
+              and self.top <= event.y < self.top + self.square):
+            self._sat = max(0.0, min(1.0, (event.x - self.left)
+                                     / float(self.square)))
+            self._val = max(0.0, min(1.0, 1.0 - (event.y - self.top)
+                                     / float(self.square)))
+            changed = True
+        if not changed:
+            return
+        self._place_markers()
+        if self.command is not None:
+            red, green, blue = colorsys.hsv_to_rgb(self._hue, self._sat,
+                                                   self._val)
+            self.command((int(red * 255 + 0.5), int(green * 255 + 0.5),
+                          int(blue * 255 + 0.5), 255), secondary)
+
+
+class PaletteDialog(tk.Toplevel):
+    """Ask for a new palette's name, size and starting fill."""
+
+    FILLS = ("Black", "White", "Foreground", "Grayscale ramp")
+
+    def __init__(self, parent, fg=(255, 255, 255, 255),
+                 name="Untitled palette"):
+        super().__init__(parent)
+        self.title("New palette")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.result = None
+        self.fg = tuple(fg)
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Name").grid(row=0, column=0, sticky="w",
+                                          pady=2)
+        self.name_var = tk.StringVar(value=name)
+        self.name_entry = ttk.Entry(body, textvariable=self.name_var,
+                                    width=24)
+        self.name_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(body, text="Colors").grid(row=1, column=0, sticky="w",
+                                            pady=2)
+        self.count_var = tk.IntVar(value=16)
+        ttk.Spinbox(body, from_=1, to=MAX_PALETTE_COLORS, width=6,
+                    textvariable=self.count_var).grid(row=1, column=1,
+                                                       sticky="w", pady=2)
+        ttk.Label(body, text="Start with").grid(row=2, column=0, sticky="w",
+                                                pady=2)
+        self.fill_var = tk.StringVar(value=self.FILLS[0])
+        ttk.Combobox(body, values=self.FILLS, state="readonly", width=14,
+                     textvariable=self.fill_var).grid(row=2, column=1,
+                                                      sticky="w", pady=2)
+        buttons = ttk.Frame(body)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=self.cancel).pack(
+            side="right")
+        ttk.Button(buttons, text="Create", command=self.ok).pack(
+            side="right", padx=4)
+        self.bind("<Return>", lambda event: self.ok())
+        self.bind("<Escape>", lambda event: self.cancel())
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.name_entry.focus_set()
+
+    def build(self):
+        name = self.name_var.get().strip() or "Untitled palette"
+        try:
+            count = int(self.count_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            count = 16
+        fill = {"black": "black", "white": "white",
+                "foreground": "color",
+                "grayscale ramp": "grayscale"}.get(
+                    self.fill_var.get().lower(), "black")
+        return make_palette(name, count, fill, self.fg)
+
+    def ok(self):
+        self.result = self.build()
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.destroy()
+
+
 class hex2pixApp(tk.Tk):
     """The editor window."""
 
@@ -460,6 +665,9 @@ class hex2pixApp(tk.Tk):
         self.gradient_anchor = None
         self.gradient_before = None
         self.palette = preset_colors("PICO-8")
+        self.palette_name = "PICO-8"
+        self.palette_selected = None
+        self.palette_chips = []
         self.fullscreen = False
         self._saved_geometry = None
 
@@ -580,6 +788,11 @@ class hex2pixApp(tk.Tk):
                                command=lambda: self.rotate_image(True))
         image_menu.add_command(label="Rotate 90 counter-clockwise",
                                command=lambda: self.rotate_image(False))
+        image_menu.add_separator()
+        image_menu.add_command(label="Map to palette",
+                               command=lambda: self.apply_palette(False))
+        image_menu.add_command(label="Map to palette (dithered)",
+                               command=lambda: self.apply_palette(True))
         image_menu.add_separator()
         image_menu.add_command(label="Canvas properties...",
                                command=self.canvas_properties)
@@ -704,6 +917,9 @@ class hex2pixApp(tk.Tk):
         self.bg_swatch.pack(side="left")
         self.bg_swatch.bind("<Button-1>", lambda e: self.ask_color("bg"))
 
+        self.wheel = ColorWheel(left, size=140, command=self.wheel_color)
+        self.wheel.pack(anchor="w", pady=(4, 2))
+
         self.hex_entry = tk.StringVar(value=hex_str(*self.fg))
         entry = ttk.Entry(left, textvariable=self.hex_entry, width=12)
         entry.pack(anchor="w", pady=(4, 2))
@@ -795,22 +1011,55 @@ class hex2pixApp(tk.Tk):
         ttk.Separator(left).pack(fill="x", pady=6)
         self._heading(left, "Palette")
         self.palette_var = tk.StringVar(value="PICO-8")
-        palette_combo = ttk.Combobox(left, values=list(PALETTES),
+        palette_combo = ttk.Combobox(left, values=list(PALETTES) + ["Custom"],
                                      state="readonly", width=14,
                                      textvariable=self.palette_var)
         palette_combo.pack(fill="x")
         palette_combo.bind("<<ComboboxSelected>>",
                            lambda event: self.load_preset_palette())
-        self.palette_frame = ttk.Frame(left)
-        self.palette_frame.pack(anchor="w", pady=2)
+        self.palette_frame = tk.Frame(left, bg="#ffffff",
+                                      highlightthickness=1,
+                                      highlightbackground="#d9dde5")
+        self.palette_frame.pack(anchor="w", pady=(2, 0), fill="x")
+        self.palette_canvas = tk.Canvas(self.palette_frame, height=92,
+                                        bg="#ffffff", highlightthickness=0,
+                                        bd=0)
+        palette_scroll = ttk.Scrollbar(self.palette_frame, orient="vertical",
+                                       command=self.palette_canvas.yview)
+        self.palette_canvas.configure(yscrollcommand=palette_scroll.set)
+        self.palette_canvas.pack(side="left", fill="both", expand=True)
+        palette_scroll.pack(side="right", fill="y")
+        self.palette_grid = tk.Frame(self.palette_canvas, bg="#ffffff")
+        self.palette_canvas.create_window((0, 0), window=self.palette_grid,
+                                          anchor="nw")
+        self.palette_grid.bind("<Configure>",
+                               lambda event: self._update_palette_scroll())
+        self.palette_count_var = tk.StringVar(value="")
+        ttk.Label(left, textvariable=self.palette_count_var,
+                  foreground="#6b7280").pack(anchor="w")
         palette_buttons = ttk.Frame(left)
-        palette_buttons.pack(fill="x")
-        ttk.Button(palette_buttons, text="+ FG", width=6,
+        palette_buttons.pack(fill="x", pady=(2, 0))
+        ttk.Button(palette_buttons, text="New...", width=6,
+                   command=self.new_palette).pack(side="left")
+        ttk.Button(palette_buttons, text="Set", width=5,
+                   command=self.set_palette_color).pack(side="left", padx=2)
+        ttk.Button(palette_buttons, text="Del", width=5,
+                   command=self.delete_palette_color).pack(side="left")
+        palette_buttons2 = ttk.Frame(left)
+        palette_buttons2.pack(fill="x", pady=(2, 0))
+        ttk.Button(palette_buttons2, text="+ FG", width=6,
                    command=self.add_palette_color).pack(side="left")
-        ttk.Button(palette_buttons, text="Save", width=6,
+        ttk.Button(palette_buttons2, text="Save", width=6,
                    command=self.save_palette).pack(side="left", padx=2)
-        ttk.Button(palette_buttons, text="Load", width=6,
+        ttk.Button(palette_buttons2, text="Load", width=6,
                    command=self.load_palette).pack(side="left")
+        palette_buttons3 = ttk.Frame(left)
+        palette_buttons3.pack(fill="x", pady=(2, 0))
+        ttk.Button(palette_buttons3, text="Map to palette",
+                   command=lambda: self.apply_palette(False)).pack(fill="x")
+        ttk.Button(palette_buttons3, text="Map + dither",
+                   command=lambda: self.apply_palette(True)).pack(
+            fill="x", pady=(2, 0))
         self.draw_palette()
 
         ttk.Separator(left).pack(fill="x", pady=6)
@@ -2896,55 +3145,161 @@ class hex2pixApp(tk.Tk):
         self.redraw()
 
     # ----------------------------------------------------------------- palette
+    def _update_palette_scroll(self):
+        box = self.palette_canvas.bbox("all")
+        if box:
+            self.palette_canvas.configure(scrollregion=box)
+
     def draw_palette(self):
-        if not hasattr(self, "palette_frame"):
+        if not hasattr(self, "palette_grid"):
             return
-        for child in self.palette_frame.winfo_children():
+        for child in self.palette_grid.winfo_children():
             child.destroy()
+        self.palette_chips = []
+        if self.palette_selected is not None \
+                and self.palette_selected >= len(self.palette):
+            self.palette_selected = None
         for index, color in enumerate(self.palette):
-            chip = tk.Canvas(self.palette_frame, width=20, height=20,
-                             highlightthickness=1, highlightbackground="#555",
+            selected = index == self.palette_selected
+            chip = tk.Canvas(self.palette_grid, width=18, height=18,
+                             highlightthickness=2,
+                             highlightbackground=("#2f8fd0" if selected
+                                                  else "#9aa0aa"),
                              bg="#%02x%02x%02x" % color[:3])
             chip.grid(row=index // 7, column=index % 7, padx=1, pady=1)
-            chip.bind("<Button-1>", lambda e, c=color: self.set_fg(c))
+            chip.bind("<Button-1>", lambda event, i=index, c=color:
+                      self.pick_palette_color(i, c))
+            chip.bind("<Button-3>", lambda event, i=index:
+                      self.edit_palette_color(i))
+            self.palette_chips.append(chip)
+        self.palette_count_var.set("%d / %d colours"
+                                   % (len(self.palette), MAX_PALETTE_COLORS))
+        self._update_palette_scroll()
+        self.after_idle(self._update_palette_scroll)
+
+    def pick_palette_color(self, index, color):
+        self.palette_selected = index
+        self.set_fg(color)
+        self.draw_palette()
+
+    def edit_palette_color(self, index):
+        if not (0 <= index < len(self.palette)):
+            return
+        color = self.palette[index]
+        rgb, _hex = colorchooser.askcolor(
+            color="#%02x%02x%02x" % color[:3], parent=self,
+            title="Palette colour %d" % (index + 1))
+        if not rgb:
+            return
+        self.palette[index] = (int(rgb[0]), int(rgb[1]), int(rgb[2]),
+                               color[3])
+        self.palette_selected = index
+        self.palette_var.set("Custom")
+        self.draw_palette()
+
+    def new_palette(self):
+        dialog = PaletteDialog(self, self.fg, self.palette_name)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        self.palette_name, self.palette = dialog.result
+        self.palette_selected = None
+        self.palette_var.set("Custom")
+        self.draw_palette()
 
     def load_preset_palette(self):
-        self.palette = preset_colors(self.palette_var.get())
+        name = self.palette_var.get()
+        if name not in PALETTES:
+            return
+        self.palette = preset_colors(name)
+        self.palette_name = name
+        self.palette_selected = None
         self.draw_palette()
 
     def add_palette_color(self):
-        if self.fg not in self.palette:
-            self.palette.append(self.fg)
-            self.draw_palette()
+        if len(self.palette) >= MAX_PALETTE_COLORS:
+            self.report_error("A palette holds at most %d colours."
+                              % MAX_PALETTE_COLORS)
+            return
+        color = tuple(self.fg)
+        if color in self.palette:
+            self.palette_selected = self.palette.index(color)
+        else:
+            self.palette.append(color)
+            self.palette_selected = len(self.palette) - 1
+        self.palette_var.set("Custom")
+        self.draw_palette()
+
+    def set_palette_color(self):
+        if self.palette_selected is None:
+            self.report_error("Click a swatch to select it first.")
+            return
+        self.palette[self.palette_selected] = tuple(self.fg)
+        self.palette_var.set("Custom")
+        self.draw_palette()
+
+    def delete_palette_color(self):
+        if self.palette_selected is None:
+            self.report_error("Click a swatch to select it first.")
+            return
+        if len(self.palette) <= 1:
+            self.report_error("A palette needs at least one colour.")
+            return
+        del self.palette[self.palette_selected]
+        self.palette_selected = min(self.palette_selected,
+                                    len(self.palette) - 1)
+        self.palette_var.set("Custom")
+        self.draw_palette()
 
     def save_palette(self):
+        if not self.palette:
+            self.report_error("The palette is empty.")
+            return
         path = filedialog.asksaveasfilename(
-            parent=self, title="Save palette", defaultextension=".gpl",
-            filetypes=[("GIMP palette", "*.gpl"), ("All files", "*.*")])
+            parent=self, title="Save palette", defaultextension=".256",
+            initialfile=(self.palette_name or "palette"),
+            filetypes=list(PALETTE_FILETYPES))
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8") as handle:
-                handle.write(format_gpl(self.palette_var.get(), self.palette))
+                handle.write(format_palette(path, self.palette_name,
+                                            self.palette))
         except OSError as exc:
             self.report_error("Could not save the palette: %s" % exc)
 
     def load_palette(self):
         path = filedialog.askopenfilename(
             parent=self, title="Load palette",
-            filetypes=[("GIMP palette", "*.gpl"), ("All files", "*.*")])
+            filetypes=list(PALETTE_FILETYPES))
         if not path:
             return
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                name, colors, _columns = parse_gpl(handle.read())
+                name, colors, _columns = parse_palette(handle.read(), path)
         except (OSError, HexError) as exc:
             self.report_error("Could not load the palette: %s" % exc)
             return
         self.palette = colors
-        if name:
-            self.palette_var.set(name)
+        self.palette_name = name
+        self.palette_selected = None
+        self.palette_var.set("Custom")
         self.draw_palette()
+
+    def apply_palette(self, dither=False):
+        if not self.palette:
+            self.report_error("Create or load a palette first.")
+            return
+        before = self.doc.begin()
+        painted = quantize_bitmap(self.doc.bitmap, self.palette, dither,
+                                  self.doc.mask())
+        self.doc.commit(before)
+        self.refresh_bytes()
+        self.refresh_status()
+        self.redraw()
+        self.status.set("mapped %d pixels to %s%s"
+                        % (painted, self.palette_name or "the palette",
+                           " (dithered)" if dither else ""))
 
     # --------------------------------------------------------------- patterns
     def on_pattern_click(self, event, erase=False):
@@ -3356,6 +3711,15 @@ class hex2pixApp(tk.Tk):
         self.push_recent(self.fg)
         self.alpha_var.set(self.fg[3])
         self.hex_entry.set(hex_str(*self.fg))
+        if getattr(self, "wheel", None) is not None:
+            self.wheel.set_color(self.fg)
+
+    def wheel_color(self, color, secondary=False):
+        if secondary:
+            self.bg = tuple(color)
+            self.draw_swatches()
+        else:
+            self.set_fg(tuple(color))
 
     def draw_swatches(self):
         for canvas, color in ((self.fg_swatch, self.fg), (self.bg_swatch, self.bg)):
@@ -4424,6 +4788,8 @@ class hex2pixApp(tk.Tk):
             "                loads them back, and Ctrl+S saves that format\n"
             "                once the document path is a .h2p file\n"
             "Wheel           smooth zoom around the pointer (12.5%-6400%)\n"
+            "Colour wheel    click sets FG, right-click sets BG\n"
+            "Palette         New/Set/Del build one; Map quantizes to it\n"
             "Shift+T         move / scale / rotate selection: drag to move,\n"
             "                Shift+drag scales, Ctrl+drag rotates in 15 deg\n"
             "                steps, Enter moves it to the cursor\n"
@@ -5141,7 +5507,20 @@ def run_selftest(out_path=None):
                        and app.doc.bitmap.rgba(7, 0)[:3] == (0, 0, 255))
 
         palette_ok = (len(app.palette) == 16
-                      and len(app.palette_frame.winfo_children()) == 16)
+                      and len(app.palette_chips) == 16
+                      and app.palette_count_var.get().startswith("16"))
+        wheel_ok = (app.wheel is not None
+                    and app.wheel.winfo_width() > 50)
+        app.new_canvas(CanvasSpec(4, 4))
+        app.doc.bitmap.fill((10, 20, 30, 255))
+        app.palette = [(255, 0, 0, 255)]
+        app.palette_name = "Test"
+        app.apply_palette(False)
+        quantize_ok = all(app.doc.bitmap.rgba(x, y) == (255, 0, 0, 255)
+                          for x in range(4) for y in range(4))
+        app.palette = preset_colors("PICO-8")
+        app.palette_name = "PICO-8"
+        app.draw_palette()
 
         app.set_fullscreen(True)
         app.update_idletasks()
@@ -5185,7 +5564,7 @@ def run_selftest(out_path=None):
                       kb_ok, kb_cancel_ok, record_ok, play_ok, kb_fill_ok,
                       line_fill_ok, structure_ok, pattern_text_ok,
                       fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
-                      gradient_ok, palette_ok))
+                      gradient_ok, palette_ok, wheel_ok, quantize_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
                      "drag=%s erase=%s export=%s dump=%s canvas=%s props=%s "
                      "canvas_undo=%s dialog=%s default_view=%s hex_view=%s "
@@ -5194,7 +5573,7 @@ def run_selftest(out_path=None):
                      "kb_cancel=%s record=%s play=%s kb_fill=%s line_fill=%s "
                      "structure=%s pattern_text=%s fullscreen=%s "
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
-                     "palette=%s"
+                     "palette=%s wheel=%s quantize=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -5203,7 +5582,7 @@ def run_selftest(out_path=None):
                         kb_ok, kb_cancel_ok, record_ok, play_ok, kb_fill_ok,
                         line_fill_ok, structure_ok, pattern_text_ok,
                         fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
-                        gradient_ok, palette_ok))
+                        gradient_ok, palette_ok, wheel_ok, quantize_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))
