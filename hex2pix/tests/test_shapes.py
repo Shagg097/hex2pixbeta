@@ -2,10 +2,10 @@
 
 import unittest
 
-from hex2pix.model import Bitmap, HexError
-from hex2pix.shapes import (brush_offsets, gradient_fill, mirror_points,
-                            paint_dab, paint_shape, paint_stroke,
-                            shape_points)
+from hex2pix.model import Bitmap, Block, HexError
+from hex2pix.shapes import (brush_offsets, curve_points, gradient_fill,
+                            mirror_points, paint_curve, paint_dab, paint_shape,
+                            paint_stroke, shape_points)
 
 RED = (255, 0, 0, 255)
 BLUE = (0, 0, 255, 255)
@@ -119,10 +119,121 @@ class GradientTest(unittest.TestCase):
         self.assertEqual(bitmap.rgba(0, 0), CLEAR)
         self.assertNotEqual(bitmap.rgba(1, 0), CLEAR)
 
+    def test_dither_uses_only_the_two_colours(self):
+        bitmap = Bitmap(16, 1)
+        painted = gradient_fill(bitmap, None, 0, 0, 15, 0, RED, BLUE,
+                                "bayer4")
+        self.assertEqual(painted, 16)
+        colours = [bitmap.rgba(x, 0) for x in range(16)]
+        self.assertIn(RED, colours)
+        self.assertIn(BLUE, colours)
+        self.assertTrue(set(colours) <= set([RED, BLUE]))
+
+    def test_gradient_dither_honours_strength(self):
+        bitmap = Bitmap(8, 1)
+        gradient_fill(bitmap, None, 0, 0, 7, 0, RED, BLUE, "bayer4",
+                      strength=50)
+        colours = set(bitmap.rgba(x, 0) for x in range(8))
+        self.assertNotIn(RED, colours)
+        self.assertNotIn(BLUE, colours)
+
+    def test_pattern_dither_uses_the_block(self):
+        bitmap = Bitmap(4, 1)
+        block = Block(1, 1, [[(255, 255, 255, 255)]])
+        gradient_fill(bitmap, None, 0, 0, 3, 0, RED, BLUE, "pattern", block)
+        self.assertEqual([bitmap.rgba(x, 0) for x in range(4)], [RED] * 4)
+
     def test_zero_length_direction_is_an_error(self):
         bitmap = Bitmap(4, 4)
         with self.assertRaises(HexError):
             gradient_fill(bitmap, None, 2, 2, 2, 2, RED, BLUE)
+
+
+class CurveTest(unittest.TestCase):
+    def test_zero_bend_is_a_straight_line(self):
+        points = curve_points(0, 0, 6, 0, 0)
+        self.assertEqual(points[0], (0, 0))
+        self.assertEqual(points[-1], (6, 0))
+        self.assertTrue(all(y == 0 for _x, y in points))
+
+    def test_bend_arcs_away_from_the_chord(self):
+        points = curve_points(0, 0, 8, 0, 50)
+        self.assertEqual(points[0], (0, 0))
+        self.assertEqual(points[-1], (8, 0))
+        # A 50% bend on an 8 px chord peaks 2 px out.
+        self.assertEqual(max(y for _x, y in points), 2)
+
+    def test_negative_bend_goes_the_other_way(self):
+        up = curve_points(0, 4, 8, 4, 50)
+        down = curve_points(0, 4, 8, 4, -50)
+        self.assertGreater(max(y for _x, y in up), 4)
+        self.assertLess(min(y for _x, y in down), 4)
+
+    def test_degenerate_chord_is_a_single_point(self):
+        self.assertEqual(curve_points(3, 3, 3, 3, 50), [(3, 3)])
+
+    def test_curve_paints_its_apex(self):
+        bitmap = Bitmap(16, 16)
+        painted = paint_curve(bitmap, None, 0, 4, 8, 4, 1, RED, 50)
+        self.assertGreater(painted, 0)
+        # The middle of a 50% bend on an 8 px chord sits 2 px below the ends.
+        self.assertEqual(bitmap.rgba(4, 6), RED)
+
+    def test_two_vectors_make_a_wave(self):
+        points = curve_points(0, 4, 12, 4, 30, 2, "alternate")
+        self.assertEqual(points[0], (0, 4))
+        self.assertEqual(points[-1], (12, 4))
+        ys = [y for _x, y in points]
+        self.assertLess(min(ys), 4)
+        self.assertGreater(max(ys), 4)
+
+    def test_direction_picks_the_side(self):
+        left = curve_points(0, 4, 8, 4, 30, 1, "left")
+        right = curve_points(0, 4, 8, 4, 30, 1, "right")
+        self.assertGreater(max(y for _x, y in left), 4)
+        self.assertLess(min(y for _x, y in right), 4)
+
+    def test_three_vectors_ripple(self):
+        ys = [y for _x, y in curve_points(0, 10, 18, 10, 20, 3, "alternate")]
+        self.assertLess(min(ys), 10)
+        self.assertGreater(max(ys), 10)
+
+    def test_vectors_are_clamped(self):
+        self.assertEqual(curve_points(0, 0, 8, 0, 30, 0, "left"),
+                         curve_points(0, 0, 8, 0, 30, 1, "left"))
+        self.assertEqual(len(curve_points(0, 0, 8, 0, 30, 99, "alternate")),
+                         len(curve_points(0, 0, 8, 0, 30, 8, "alternate")))
+
+    def test_unknown_direction_falls_back_to_left(self):
+        self.assertEqual(curve_points(0, 4, 8, 4, 30, 1, "sideways"),
+                         curve_points(0, 4, 8, 4, 30, 1, "left"))
+
+    def test_wave_paints_both_sides(self):
+        bitmap = Bitmap(24, 20)
+        paint_curve(bitmap, None, 2, 10, 22, 10, 1, RED, 30, "square", "", 2,
+                    "alternate")
+        above = any(bitmap.rgba(x, y) == RED
+                    for x in range(24) for y in range(0, 10))
+        below = any(bitmap.rgba(x, y) == RED
+                    for x in range(24) for y in range(11, 20))
+        self.assertTrue(above)
+        self.assertTrue(below)
+
+    def test_direction_right_flips_the_arc(self):
+        left = Bitmap(16, 16)
+        right = Bitmap(16, 16)
+        paint_curve(left, None, 0, 8, 12, 8, 1, RED, 40, "square", "", 1,
+                    "left")
+        paint_curve(right, None, 0, 8, 12, 8, 1, RED, 40, "square", "", 1,
+                    "right")
+        self.assertEqual(left.rgba(6, 10), RED)
+        self.assertEqual(right.rgba(6, 6), RED)
+
+    def test_curve_mirrors_endpoints(self):
+        bitmap = Bitmap(16, 16)
+        paint_curve(bitmap, None, 1, 4, 9, 4, 1, RED, 40, "square", "x")
+        self.assertEqual(bitmap.rgba(14, 4), RED)
+        self.assertEqual(bitmap.rgba(6, 4), RED)
 
 
 if __name__ == "__main__":

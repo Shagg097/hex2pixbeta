@@ -137,6 +137,79 @@ Scale repeats each pattern pixel N times. Enter at the keyboard cursor runs
 whichever fill tool is active, so patterns and flood fills can be placed
 without touching the mouse.
 
+## Blur, jumble and text
+
+Three pixel-level tools share the brush footprint, the mirror setting and the
+selection mask, so each one can be confined to a region:
+
+- **Blur** (Shift+B) replaces every pixel under the brush with the average of
+  its 3x3 neighbourhood, mixed back towards the original by **Strength**. A
+  drag reads from the snapshot taken when the stroke started, so overlapping
+  dabs soften once instead of compounding into mush.
+- **Jumble** (Shift+J) reorders the colour bytes under the brush. **Shuffle**
+  permutes them, **Scatter** gives each pixel a random neighbour's colour (so
+  colours repeat) and **Noise** jitters each channel by **Amount** percent
+  while keeping the pixel's alpha.
+- **Text** (Shift+X) stamps the **Text** option in the foreground colour with
+  its top-left corner at the click point, drawn in a built-in 5x7 font at
+  whole-pixel **Scale** with blank **Spacing** columns between glyphs. Unknown
+  characters fall back to `?`, and the result is ordinary pixels that the hex
+  panels and byte tools can edit afterwards.
+
+## Airbrush, curves and contours
+
+- **Airbrush** (Shift+A) sprays foreground dots inside the brush footprint:
+  every pixel of the tip is painted with **Flow**% probability, and holding the
+  button keeps spraying at the cursor, so passes build up like a real
+  airbrush. Dragging sprays along the stroke; the whole press is one undo step.
+- **Curve** (Shift+C) drags a curve between two points. **Bend** pushes the
+  middle sideways by a percentage of half the chord: `0` is a straight line,
+  `100` arcs half the chord out, negative bends the other way. **Vectors**
+  splits the drag into 1-8 arcs, so `2` with **Side** set to *Alternate* draws
+  an S-wave, `3` or more a ripple, and *Left* / *Right* keeps every arc on the
+  same side of the drag. Width, tip and mirror work as they do for the other
+  shape tools, and two `Enter` presses draw one from the keyboard.
+- **Contour** (Shift+G) outlines a region with the foreground colour: a ring
+  **Width** pixels just outside or just inside it, following 4- or
+  8-connected edges. With a selection it outlines the selection; with nothing
+  selected it outlines everything opaque in the layer. The ring is painted
+  as-is, including the part that falls outside the selection, because the
+  selection is what is being outlined. One click is one undo step.
+
+## Dithering and art filters
+
+The **Dither** tab reduces the selection (or the whole canvas) to the two
+current colours, which is how a small palette gets its shading, and it also
+holds the bare-necessity filters. Every control works on the selection when
+there is one, and the whole active layer when there is not.
+
+| Dither mode | What it does |
+| --- | --- |
+| Bayer 2x2 / 4x4 / 8x8 | ordered dot patterns from the recursive Bayer matrix, stable and tileable |
+| Floyd-Steinberg | error diffusion, organic mixes with no visible grid |
+| Pattern | the block painted in the **Pattern** tab becomes the matrix: bright cells turn into FG pixels, so a checkerboard, hatch or logo gives a custom dither, and `.` cells are left untouched |
+| Noise | white-noise threshold, grainy shading with no visible grid |
+| Lines | horizontal scanline bands, **Scale** rows tall |
+
+Four settings tune every mode: **Bias** shifts the light/dark cut, so negative
+keeps more FG; **Strength** blends the dithered colour back towards the pixel
+it replaced, so a low value fades the dither out over the artwork; **Scale**
+spaces out the Pattern block and the Lines bands; **Serpentine scan** makes
+Floyd-Steinberg reverse direction on alternate rows, which removes the
+worm-like artefacts of a single-direction scan.
+
+The filters are **Grayscale** (perceived luminance), **Posterize** (2-32
+levels), **Threshold** (black-and-white cut-off), **Brightness** and
+**Contrast** (tone), **Saturation** (drain to grey or push the channels
+apart), **Hue shift** (rotate every hue), **Noise** (stable per-pixel grain),
+**Sepia** (warm brown ramp) and **Find edges** (Sobel edge strength as grey).
+Each is one undo step.
+
+The Gradient tool's **Dither** option runs the same modes over a gradient
+fill, so an FG-to-BG ramp becomes a dithered band instead of a smooth blend.
+It reads Bias, Strength, Scale and Serpentine from the Dither tab, and Pattern
+reads the Pattern tab block.
+
 ## Shapes, symmetry and palettes
 
 Aseprite-style drawing aids on top of the brush:
@@ -190,6 +263,10 @@ the **Move / Scale** tool moves or resizes what they selected.
 | Lasso | drag freehand; the path previews live, closes on release and is tidied before it fills |
 | Wand | contiguous (4-connected) pixel data matching the clicked pixel |
 | Similar | every matching pixel in the image, not just the connected run |
+
+Polygon and lasso masks are filled solid: any pocket enclosed by a path that
+circles back on itself is selected too, so a wobbly lasso or a polygon whose
+outline crosses itself cannot leave holes inside the selection.
 
 Tolerance (left panel) loosens the color comparison; `0` means exact bytes.
 Hold **Shift** while selecting to add, **Ctrl** to subtract, **Alt** to
@@ -249,9 +326,15 @@ state the tool uses:
 | Fill | Tolerance |
 | Line | Width, Tip |
 | Rectangle, Ellipse | Fill, Width, Tip |
-| Gradient | reverse the direction (BG to FG) |
+| Gradient | reverse the direction (BG to FG), Dither mode (Bias/Strength/Scale from the Dither tab) |
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
+| Blur | Size, Strength, Mirror |
+| Jumble | Size, Mode (Shuffle, Scatter, Noise), Amount |
+| Text | the text, Scale, Spacing |
+| Airbrush | Size, Flow %, Tip |
+| Curve | Width, Tip, Bend %, Vectors (1-8), Side (left, right, alternate) |
+| Contour | Width, Side (outside or inside), Connect (4 or 8 edges) |
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
 | Lasso | selection mode and Smooth path |
 | Wand, Similar | Tolerance, Ignore alpha |
@@ -290,7 +373,7 @@ and `]` zoom out and in.
 | `+` / `-` | brush size |
 | `[` / `]` | zoom out / in |
 | Space | swap foreground and background |
-| Shift + letter | pick a tool (Pencil, Eraser, Picker, Fill, Line, Rectangle, Ellipse, Gradient, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
+| Shift + letter | pick a tool (Pencil, Eraser, Airbrush, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Jumble, Text, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
 | Shift+T | move the selection by dragging, scale it with Shift+drag, rotate it with Ctrl+drag, or move its corner to the cursor with `Enter` |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+A / Ctrl+D | select all / deselect |
@@ -300,6 +383,25 @@ and `]` zoom out and in.
 | Ctrl+Shift+N | new layer |
 
 Tool letters are on `Shift` so that `A-F` can stay available for hex digits.
+
+## Projects (.h2p)
+
+**File > Save project as...** writes the whole working session to a `.h2p`
+file: a zip holding a `project.json` header, one raw RGBA entry per layer, and
+the selection mask. Layers stay separate on disk, with their names, order,
+visibility, opacity and blend operation, so reopening a project gives back the
+same stack instead of a flattened picture.
+
+The header also carries the canvas size, resolution, colour model and alpha
+flag, the active layer, and the editor state: palette and its name, the Pattern
+tab block, mirror setting, foreground and background colours, and hex/image
+view.
+
+**File > Open project...** (or **Open...**, which recognises `.h2p`) restores
+all of it in one step. Once the document path is a `.h2p`, **Ctrl+S** saves the
+project rather than flattening it to an image, and **File > Save As...** offers
+the project type next to PNG, BMP, TGA and hex text. A malformed or foreign zip
+is reported as an error instead of being loaded partially.
 
 ## File formats
 

@@ -16,12 +16,15 @@ from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from . import __version__, formats
+from . import __version__, dither, filters, formats
 from .macro import Macro, Recorder
 from .palette import PALETTES, format_gpl, parse_gpl, preset_colors
 from .pattern import PatternSpec, apply_pattern, block_from_grid
-from .shapes import (gradient_fill, mirror_points, paint_dab, paint_shape,
-                     paint_stroke)
+from .bitmapfont import text_size
+from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
+                      jumble_area, jumble_stroke, spray_area, spray_stroke)
+from .shapes import (gradient_fill, mirror_points, paint_curve, paint_dab,
+                     paint_mask, paint_shape, paint_stroke, stamp_text)
 from .canvas import (ANCHOR_CODES, ANCHOR_LABELS, MAX_SIDE, UNITS, CanvasSpec,
                      apply_spec_to_document, physical_size, px_per_unit,
                      scale_image)
@@ -40,14 +43,20 @@ from .model import (
 TOOLS = (
     ("pencil", "Pencil", "p", "Paint with the foreground color"),
     ("eraser", "Eraser", "e", "Erase to transparency"),
+    ("airbrush", "Airbrush", "a", "Spray the foreground color; hold to build up"),
     ("picker", "Picker", "i", "Pick the color under the cursor"),
     ("fill", "Fill", "f", "Flood fill related pixel data"),
     ("line", "Line", "n", "Drag a straight line, or Enter twice"),
+    ("curve", "Curve", "c", "Drag a curved line; Bend sets the arc"),
     ("shape_rect", "Rectangle", "r", "Drag a rectangle, outline or filled"),
     ("shape_ellipse", "Ellipse", "u", "Drag an ellipse, outline or filled"),
     ("gradient", "Gradient", "v", "Drag a foreground to background gradient"),
     ("pattern", "Line pattern", "l", "Fill lines with the pattern, row by row"),
     ("structure", "Structure fill", "k", "Fill with a mirrored structural pattern"),
+    ("contour", "Contour", "g", "Outline the selection, or the artwork"),
+    ("blur", "Blur", "b", "Soften the pixels under the brush"),
+    ("jumble", "Jumble", "j", "Shuffle, scatter or noise the pixels"),
+    ("text", "Text", "x", "Click to stamp the Text option in the fg color"),
     ("rect", "Rect select", "m", "Select a rectangle"),
     ("ellipse", "Ellipse select", "o", "Select an ellipse"),
     ("polygon", "Polygon select", "y", "Click vertices, Enter closes"),
@@ -65,7 +74,7 @@ HEX_CHARS = set("0123456789abcdef")
 SELECTION_TOOLS = ("rect", "ellipse", "polygon", "lasso", "wand",
                    "similar", "transform")
 PAINT_TOOLS = ("pencil", "eraser")
-SHAPE_TOOLS = ("line", "shape_rect", "shape_ellipse")
+SHAPE_TOOLS = ("line", "curve", "shape_rect", "shape_ellipse")
 
 MAX_PIXELS = 12000000
 MIN_ZOOM = 0.125
@@ -77,6 +86,15 @@ SEL_MODE_LABELS = {"replace": "Replace", "add": "Add",
                    "subtract": "Subtract", "intersect": "Intersect"}
 SEL_MODE_VALUES = {"Replace": "replace", "Add": "add",
                    "Subtract": "subtract", "Intersect": "intersect"}
+
+
+def _bounded(value, low, high, default):
+    """An int from a widget variable, clamped to its range."""
+    try:
+        value = int(value)
+    except (tk.TclError, TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
 
 
 class _KeyEvent(object):
@@ -451,9 +469,13 @@ class hex2pixApp(tk.Tk):
                               command=self.new_document)
         file_menu.add_command(label="Open...", accelerator="Ctrl+O",
                               command=self.open_document)
+        file_menu.add_command(label="Open project...",
+                              command=self.open_project)
         file_menu.add_command(label="Save", accelerator="Ctrl+S",
                               command=self.save_document)
         file_menu.add_command(label="Save As...", command=self.save_document_as)
+        file_menu.add_command(label="Save project as...",
+                              command=self.save_project_as)
         file_menu.add_separator()
         file_menu.add_command(label="Export As...", accelerator="Ctrl+E",
                               command=self.focus_export)
@@ -1075,6 +1097,106 @@ class hex2pixApp(tk.Tk):
                   foreground="#7ddc7d", wraplength=280).pack(anchor="w",
                                                              pady=(4, 0))
         self.draw_pattern_grid()
+        self._build_dither()
+
+    def _build_dither(self):
+        tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab, text="Dither")
+        self.dither_mode_var = tk.StringVar(value="Bayer 4x4")
+        self.dither_bias_var = tk.IntVar(value=0)
+        self.dither_strength_var = tk.IntVar(value=100)
+        self.dither_scale_var = tk.IntVar(value=1)
+        self.dither_serpentine_var = tk.BooleanVar(value=False)
+
+        block = ttk.LabelFrame(tab, text="Dither to FG and BG", padding=6)
+        block.pack(fill="x")
+        block.columnconfigure(1, weight=1)
+        ttk.Label(block, text="Mode").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(block, values=tuple(dither.DITHER_LABELS),
+                     state="readonly",
+                     textvariable=self.dither_mode_var).grid(
+            row=0, column=1, columnspan=3, sticky="ew", pady=(0, 4))
+        self._dither_spin(block, 1, "Bias", "%", self.dither_bias_var, -100,
+                          100)
+        self._dither_spin(block, 2, "Strength", "%",
+                          self.dither_strength_var, 0, 100)
+        self._dither_spin(block, 3, "Scale", "x", self.dither_scale_var, 1,
+                          16)
+        ttk.Checkbutton(block, text="Serpentine scan (Floyd-Steinberg)",
+                        variable=self.dither_serpentine_var).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ttk.Button(block, text="Apply dither",
+                   command=self.apply_dither).grid(
+            row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(block, text="FG replaces light pixels, BG dark ones.\n"
+                  "Scale spaces out Pattern and Lines; the Gradient tool "
+                  "uses these settings too.", foreground="#8ab7f8",
+                  wraplength=260).grid(row=6, column=0, columnspan=4,
+                                       sticky="w", pady=(4, 0))
+        self._build_filters(tab)
+
+    def _dither_spin(self, parent, row, label, unit, var, low, high):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
+                                           pady=1)
+        ttk.Spinbox(parent, from_=low, to=high, width=6,
+                    textvariable=var).grid(row=row, column=1, sticky="w")
+        ttk.Label(parent, text=unit).grid(row=row, column=2, sticky="w",
+                                          padx=(2, 0))
+
+    def _build_filters(self, tab):
+        block = ttk.LabelFrame(tab, text="Filters", padding=6)
+        block.pack(fill="x", pady=(8, 0))
+        block.columnconfigure(1, weight=1)
+        ttk.Button(block, text="Grayscale",
+                   command=self.apply_grayscale).grid(
+            row=0, column=0, columnspan=4, sticky="ew", pady=1)
+        self.posterize_var = tk.IntVar(value=4)
+        row = self._filter_row(block, 1, "Posterize", "levels",
+                               self.posterize_var, 2, 32,
+                               self.apply_posterize)
+        self.filter_threshold_var = tk.IntVar(value=128)
+        row = self._filter_row(block, row, "Threshold", "level",
+                               self.filter_threshold_var, 0, 255,
+                               self.apply_threshold)
+        self.filter_brightness_var = tk.IntVar(value=25)
+        row = self._filter_row(block, row, "Brightness", "%",
+                               self.filter_brightness_var, -100, 100,
+                               self.apply_brightness)
+        self.filter_contrast_var = tk.IntVar(value=25)
+        row = self._filter_row(block, row, "Contrast", "%",
+                               self.filter_contrast_var, -100, 100,
+                               self.apply_contrast)
+        self.filter_saturation_var = tk.IntVar(value=30)
+        row = self._filter_row(block, row, "Saturation", "%",
+                               self.filter_saturation_var, -100, 100,
+                               self.apply_saturation)
+        self.filter_hue_var = tk.IntVar(value=30)
+        row = self._filter_row(block, row, "Hue shift", "deg",
+                               self.filter_hue_var, -180, 180,
+                               self.apply_hue)
+        self.filter_noise_var = tk.IntVar(value=12)
+        row = self._filter_row(block, row, "Noise", "%",
+                               self.filter_noise_var, 0, 100,
+                               self.apply_noise)
+        pair = ttk.Frame(block)
+        pair.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(3, 0))
+        pair.columnconfigure(0, weight=1)
+        pair.columnconfigure(1, weight=1)
+        ttk.Button(pair, text="Sepia", command=self.apply_sepia).grid(
+            row=0, column=0, sticky="ew", padx=(0, 2))
+        ttk.Button(pair, text="Find edges", command=self.apply_edges).grid(
+            row=0, column=1, sticky="ew")
+
+    def _filter_row(self, parent, row, label, unit, var, low, high, command):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
+        ttk.Spinbox(parent, from_=low, to=high, width=6,
+                    textvariable=var).grid(row=row, column=1, sticky="w")
+        ttk.Label(parent, text=unit).grid(row=row, column=2, sticky="w",
+                                          padx=(2, 0))
+        ttk.Button(parent, text="Apply", width=6,
+                   command=command).grid(row=row, column=3, sticky="e",
+                                         padx=(6, 0))
+        return row + 1
 
     def _build_canvas(self, parent):
         frame = ttk.Frame(parent)
@@ -1089,10 +1211,29 @@ class hex2pixApp(tk.Tk):
         self.ignore_alpha_var = tk.BooleanVar(value=False)
         self.lasso_smooth_var = tk.BooleanVar(value=True)
         self.gradient_reverse_var = tk.BooleanVar(value=False)
+        self.gradient_dither_var = tk.StringVar(value="Off")
         self.symmetry_option_var = tk.StringVar(
             value=SYMMETRY_LABELS.get(self.symmetry, "Off"))
         self.rotate_snap = int(ROTATE_SNAP)
         self.rotate_snap_var = tk.IntVar(value=int(ROTATE_SNAP))
+        self.blur_size_var = tk.IntVar(value=4)
+        self.blur_strength_var = tk.IntVar(value=60)
+        self.jumble_size_var = tk.IntVar(value=4)
+        self.jumble_mode_var = tk.StringVar(value="Shuffle")
+        self.jumble_amount_var = tk.IntVar(value=40)
+        self.text_value = tk.StringVar(value="HEX")
+        self.text_scale_var = tk.IntVar(value=2)
+        self.text_spacing_var = tk.IntVar(value=1)
+        self.air_size_var = tk.IntVar(value=8)
+        self.air_flow_var = tk.IntVar(value=25)
+        self.curve_bend_var = tk.IntVar(value=30)
+        self.curve_vectors_var = tk.IntVar(value=1)
+        self.curve_direction_var = tk.StringVar(value="Left")
+        self.contour_width_var = tk.IntVar(value=1)
+        self.contour_side_var = tk.StringVar(value="Outside")
+        self.contour_connect_var = tk.StringVar(value="4")
+        self._airbrush_job = None
+        self.blur_source = None
         self.tool_option_widgets = {}
         self._refresh_tool_options()
         self.view = tk.Canvas(frame, bg="#17171a", highlightthickness=0, bd=0)
@@ -1146,6 +1287,11 @@ class hex2pixApp(tk.Tk):
         if command is not None:
             combo.bind("<<ComboboxSelected>>", lambda event: command())
         return combo
+
+    def _option_entry(self, var, width=14):
+        entry = ttk.Entry(self.tool_options, textvariable=var, width=width)
+        entry.pack(side="left")
+        return entry
 
     def _option_button(self, text, command, width=None):
         button = ttk.Button(self.tool_options, text=text, command=command,
@@ -1222,7 +1368,11 @@ class hex2pixApp(tk.Tk):
 
     def _options_gradient(self):
         self._option_check("Reverse (BG to FG)", self.gradient_reverse_var)
-        self._option_label("Drag from one colour to the other")
+        self._option_label("Dither")
+        self._option_combo(self.gradient_dither_var,
+                           tuple(dither.DITHER_LABELS), 15)
+        self._option_label("Dither Bias/Strength/Scale come from the Dither "
+                           "tab", (10, 2))
 
     def _options_pattern(self):
         self._option_label("Grid")
@@ -1238,6 +1388,69 @@ class hex2pixApp(tk.Tk):
         self._option_spin(self.pattern_size_var, 1, 16,
                           command=self.apply_pattern_size)
         self._option_check("Mirror tiles", self.pattern_mirror)
+
+    def _options_blur(self):
+        self._option_label("Size")
+        self._option_spin(self.blur_size_var, 1, 64)
+        self._option_label("Strength")
+        self._option_spin(self.blur_strength_var, 0, 100)
+        self._option_label("%", (2, 2))
+        self._option_label("Mirror")
+        self._option_combo(self.symmetry_option_var,
+                           ("Off", "X", "Y", "XY"), 5,
+                           command=self.apply_symmetry_option)
+
+    def _options_jumble(self):
+        self._option_label("Size")
+        self._option_spin(self.jumble_size_var, 1, 64)
+        self._option_label("Mode")
+        self._option_combo(self.jumble_mode_var,
+                           ("Shuffle", "Scatter", "Noise"), 8)
+        self._option_label("Amount")
+        self._option_spin(self.jumble_amount_var, 0, 100)
+        self._option_label("%", (2, 2))
+
+    def _options_text(self):
+        self._option_label("Text")
+        self._option_entry(self.text_value, 16)
+        self._option_label("Scale")
+        self._option_spin(self.text_scale_var, 1, 8, width=3)
+        self._option_label("Spacing")
+        self._option_spin(self.text_spacing_var, 0, 8, width=3)
+        self._option_label("Click to stamp in the foreground color", (16, 2))
+
+    def _options_airbrush(self):
+        self._option_label("Size")
+        self._option_spin(self.air_size_var, 1, 64)
+        self._option_label("Flow")
+        self._option_spin(self.air_flow_var, 1, 100)
+        self._option_label("%", (2, 2))
+        self._option_label("Tip")
+        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_label("Hold to spray", (14, 2))
+
+    def _options_curve(self):
+        self._option_label("Width")
+        self._option_spin(self.brush_var, 1, 64, command=self.apply_brush)
+        self._option_label("Tip")
+        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_label("Bend")
+        self._option_spin(self.curve_bend_var, -100, 100, width=4)
+        self._option_label("Vectors")
+        self._option_spin(self.curve_vectors_var, 1, 8, width=3)
+        self._option_label("Side")
+        self._option_combo(self.curve_direction_var,
+                           ("Left", "Right", "Alternate"), 10)
+
+    def _options_contour(self):
+        self._option_label("Width")
+        self._option_spin(self.contour_width_var, 1, 8)
+        self._option_label("Side")
+        self._option_combo(self.contour_side_var, ("Outside", "Inside"), 8)
+        self._option_label("Connect")
+        self._option_combo(self.contour_connect_var, ("4", "8"), 3)
+        self._option_label("Outlines the selection, else the artwork",
+                           (14, 2))
 
     def _options_selection_mode(self):
         self._option_label("Mode")
@@ -1534,11 +1747,12 @@ class hex2pixApp(tk.Tk):
             self._redraw_pending = True
             self.after_idle(self._flush_redraw)
 
-    def _mark_dirty(self, x0, y0, x1, y1):
+    def _mark_dirty(self, x0, y0, x1, y1, half=None):
         """Record the hex cells touched by a stroke, mirrors included."""
         if self.view_mode != "hex":
             return
-        half = max(0, self.brush // 2)
+        if half is None:
+            half = max(0, self.brush // 2)
         points = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
         for px, py in list(points):
             points.extend(mirror_points(px, py, self.doc.width,
@@ -1731,6 +1945,11 @@ class hex2pixApp(tk.Tk):
             self.begin_stroke()
             self.paint_at(x, y, "eraser" if secondary else tool)
             self.last_paint = (x, y)
+        elif tool == "airbrush":
+            self.begin_stroke()
+            self.spray_at(x, y)
+            self.last_paint = (x, y)
+            self.start_airbrush()
         elif tool == "picker":
             self.pick_at(x, y)
         elif tool == "fill":
@@ -1739,6 +1958,21 @@ class hex2pixApp(tk.Tk):
             self.pattern_at(x, y, "line")
         elif tool == "structure":
             self.pattern_at(x, y, "structure")
+        elif tool == "blur":
+            self.begin_stroke()
+            self.blur_source = self.doc.bitmap.copy()
+            self.blur_at(x, y)
+            self.last_paint = (x, y)
+        elif tool == "jumble":
+            self.begin_stroke()
+            self.jumble_at(x, y)
+            self.last_paint = (x, y)
+        elif tool == "text":
+            before = self.doc.begin()
+            if self.stamp_text_at(x, y):
+                self.doc.commit(before)
+        elif tool == "contour":
+            self.contour_at()
         elif tool in SHAPE_TOOLS:
             self.begin_shape(x, y)
         elif tool == "gradient":
@@ -1787,6 +2021,35 @@ class hex2pixApp(tk.Tk):
             if previous:
                 self._mark_dirty(previous[0], previous[1], x, y)
             self.last_paint = (x, y)
+        elif tool in ("blur", "jumble") and self.stroke_before is not None:
+            previous = self.last_paint or (x, y)
+            if tool == "blur":
+                if self.blur_source is None:
+                    self.blur_source = self.doc.bitmap.copy()
+                blur_stroke(self.doc.bitmap, self.doc.mask(),
+                            previous[0], previous[1], x, y,
+                            self.blur_radius(), self.blur_strength(),
+                            self.brush_shape(), self.symmetry,
+                            self.blur_source)
+                half = self.blur_radius() // 2 + 1
+            else:
+                jumble_stroke(self.doc.bitmap, self.doc.mask(),
+                              previous[0], previous[1], x, y,
+                              self.jumble_radius(), self.jumble_mode(),
+                              self.jumble_amount(), self.brush_shape(),
+                              self.symmetry)
+                half = self.jumble_radius() // 2 + 1
+            self._mark_dirty(previous[0], previous[1], x, y, half)
+            self.last_paint = (x, y)
+        elif tool == "airbrush" and self.stroke_before is not None:
+            previous = self.last_paint or (x, y)
+            spray_stroke(self.doc.bitmap, self.doc.mask(),
+                         previous[0], previous[1], x, y,
+                         self.airbrush_size(), self.airbrush_flow(),
+                         self.fg, self.brush_shape(), self.symmetry)
+            self._mark_dirty(previous[0], previous[1], x, y,
+                             self.airbrush_size() // 2 + 1)
+            self.last_paint = (x, y)
         elif tool in SHAPE_TOOLS and self.shape_anchor is not None:
             self.apply_shape(x, y)
         elif tool in ("rect", "ellipse") and self.drag_anchor:
@@ -1814,6 +2077,7 @@ class hex2pixApp(tk.Tk):
         self.redraw()
 
     def on_release_common(self):
+        self.stop_airbrush()
         if self.shape_anchor is not None:
             self.finish_shape()
         if self.gradient_anchor is not None:
@@ -1824,6 +2088,7 @@ class hex2pixApp(tk.Tk):
             self.doc.commit(self.stroke_before)
             self.stroke_before = None
             self.last_paint = None
+            self.blur_source = None
         if self.tool in ("rect", "ellipse") and self.drag_anchor:
             self.apply_drag_selection(*self.cursor)
             self.drag_anchor = None
@@ -1923,10 +2188,12 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------- tools
     def set_tool(self, name):
+        self.stop_airbrush()
         self.tool = name
         self.tool_var.set(name)
         self.poly_points = []
         self.lasso_points = []
+        self.blur_source = None
         self._refresh_tool_options()
         if hasattr(self, "view"):
             self.view.configure(cursor="fleur" if name == "hand" else "")
@@ -1953,6 +2220,89 @@ class hex2pixApp(tk.Tk):
         paint_dab(self.doc.bitmap, self.doc.mask(), x, y, self.brush, color,
                   self.brush_shape(), self.symmetry)
         self._mark_dirty(x, y, x, y)
+
+    def blur_at(self, x, y):
+        """Soften the brush footprint, reading from the stroke snapshot."""
+        if self.blur_source is None:
+            self.blur_source = self.doc.bitmap.copy()
+        painted = blur_area(self.doc.bitmap, self.doc.mask(), x, y,
+                            self.blur_radius(), self.blur_strength(),
+                            self.brush_shape(), self.symmetry,
+                            self.blur_source)
+        self._mark_dirty(x, y, x, y, self.blur_radius() // 2 + 1)
+        return painted
+
+    def jumble_at(self, x, y):
+        painted = jumble_area(self.doc.bitmap, self.doc.mask(), x, y,
+                              self.jumble_radius(), self.jumble_mode(),
+                              self.jumble_amount(), self.brush_shape(),
+                              self.symmetry)
+        self._mark_dirty(x, y, x, y, self.jumble_radius() // 2 + 1)
+        return painted
+
+    def stamp_text_at(self, x, y):
+        """Stamp the Text option with its top-left corner at (x, y)."""
+        text = self.text_value.get()
+        if not text:
+            return 0
+        painted = stamp_text(self.doc.bitmap, self.doc.mask(), x, y, text,
+                             self.fg, self.text_scale(), self.text_spacing(),
+                             self.symmetry)
+        width, height = text_size(text, self.text_scale(), self.text_spacing())
+        self._mark_dirty(x, y, x + max(0, width - 1), y + max(0, height - 1))
+        self.refresh_bytes()
+        return painted
+
+    def spray_at(self, x, y):
+        """One airbrush pass over the brush footprint."""
+        painted = spray_area(self.doc.bitmap, self.doc.mask(), x, y,
+                             self.airbrush_size(), self.airbrush_flow(),
+                             self.fg, self.brush_shape(), self.symmetry)
+        self._mark_dirty(x, y, x, y, self.airbrush_size() // 2 + 1)
+        self.request_redraw()
+        return painted
+
+    def start_airbrush(self):
+        if self._airbrush_job is None:
+            self._airbrush_job = self.after(60, self._airbrush_tick)
+
+    def _airbrush_tick(self):
+        self._airbrush_job = None
+        if self.stroke_before is None or self.tool != "airbrush":
+            return
+        self.spray_at(self.cursor[0], self.cursor[1])
+        self._airbrush_job = self.after(60, self._airbrush_tick)
+
+    def stop_airbrush(self):
+        if getattr(self, "_airbrush_job", None) is None:
+            return
+        try:
+            self.after_cancel(self._airbrush_job)
+        except tk.TclError:
+            pass
+        self._airbrush_job = None
+
+    def contour_at(self):
+        """Outline the selection, or the artwork when nothing is selected.
+
+        The ring is painted as-is, even the part outside a selection: the
+        selection is what gets outlined, so clipping to it would hide the
+        result.
+        """
+        selection = self.doc.selection
+        region = selection.mask if selection.active else None
+        solid = content_mask(self.doc.bitmap, region)
+        outline = contour_mask(solid, self.doc.width, self.doc.height,
+                               self.contour_width(), self.contour_side(),
+                               self.contour_connectivity())
+        before = self.doc.begin()
+        painted = paint_mask(self.doc.bitmap, None, outline, self.fg)
+        if painted:
+            self.doc.commit(before)
+        self._mark_dirty(0, 0, self.doc.width - 1, self.doc.height - 1)
+        self.refresh_bytes()
+        self.request_redraw()
+        return painted
 
     def pick_at(self, x, y):
         color = self.doc.bitmap.rgba(x, y)
@@ -2233,6 +2583,26 @@ class hex2pixApp(tk.Tk):
             self.pattern_at(x, y, "line")
         elif tool == "structure":
             self.pattern_at(x, y, "structure")
+        elif tool == "blur":
+            before = self.doc.begin()
+            self.blur_source = self.doc.bitmap.copy()
+            if self.blur_at(x, y):
+                self.doc.commit(before)
+            self.blur_source = None
+        elif tool == "jumble":
+            before = self.doc.begin()
+            if self.jumble_at(x, y):
+                self.doc.commit(before)
+        elif tool == "text":
+            before = self.doc.begin()
+            if self.stamp_text_at(x, y):
+                self.doc.commit(before)
+        elif tool == "airbrush":
+            before = self.doc.begin()
+            if self.spray_at(x, y):
+                self.doc.commit(before)
+        elif tool == "contour":
+            self.contour_at()
         elif tool in SHAPE_TOOLS:
             if self.shape_anchor is None:
                 self.begin_shape(x, y)
@@ -2293,12 +2663,19 @@ class hex2pixApp(tk.Tk):
         if self.shape_anchor is None or self.shape_base is None:
             return
         self.doc.bitmap = self.shape_base.copy()
-        kind = {"line": "line", "shape_rect": "rect",
-                "shape_ellipse": "ellipse"}.get(self.tool, "line")
-        paint_shape(self.doc.bitmap, self.doc.mask(), kind,
-                    self.shape_anchor[0], self.shape_anchor[1], x, y,
-                    self.brush, self.fg, bool(self.shape_filled.get()),
-                    self.brush_shape(), self.symmetry)
+        if self.tool == "curve":
+            paint_curve(self.doc.bitmap, self.doc.mask(),
+                        self.shape_anchor[0], self.shape_anchor[1], x, y,
+                        self.brush, self.fg, self.curve_bend(),
+                        self.brush_shape(), self.symmetry,
+                        self.curve_vectors(), self.curve_direction())
+        else:
+            kind = {"line": "line", "shape_rect": "rect",
+                    "shape_ellipse": "ellipse"}.get(self.tool, "line")
+            paint_shape(self.doc.bitmap, self.doc.mask(), kind,
+                        self.shape_anchor[0], self.shape_anchor[1], x, y,
+                        self.brush, self.fg, bool(self.shape_filled.get()),
+                        self.brush_shape(), self.symmetry)
         self.refresh_bytes()
         self.request_redraw()
 
@@ -2334,8 +2711,11 @@ class hex2pixApp(tk.Tk):
         self.gradient_anchor = None
         try:
             start_color, end_color = self.gradient_colors()
+            mode = self.gradient_dither_mode()
             gradient_fill(self.doc.bitmap, self.doc.mask(), x0, y0, x1, y1,
-                          start_color, end_color)
+                          start_color, end_color, mode,
+                          self.gradient_pattern(mode),
+                          **self.dither_options())
         except HexError as exc:
             self.report_error(str(exc))
             self.gradient_before = None
@@ -2368,8 +2748,11 @@ class hex2pixApp(tk.Tk):
         before = self.doc.begin()
         try:
             start_color, end_color = self.gradient_colors()
+            mode = self.gradient_dither_mode()
             gradient_fill(self.doc.bitmap, self.doc.mask(), start[0], start[1],
-                          end[0], end[1], start_color, end_color)
+                          end[0], end[1], start_color, end_color, mode,
+                          self.gradient_pattern(mode),
+                          **self.dither_options())
         except HexError as exc:
             self.report_error(str(exc))
             return
@@ -2876,6 +3259,55 @@ class hex2pixApp(tk.Tk):
             self.draw_swatches()
         self.refresh_status()
 
+    def blur_radius(self):
+        return _bounded(self.blur_size_var.get(), 1, 64, 4)
+
+    def blur_strength(self):
+        return _bounded(self.blur_strength_var.get(), 0, 100, 60)
+
+    def jumble_radius(self):
+        return _bounded(self.jumble_size_var.get(), 1, 64, 4)
+
+    def jumble_mode(self):
+        value = str(self.jumble_mode_var.get()).lower()
+        return value if value in ("shuffle", "scatter", "noise") \
+            else "shuffle"
+
+    def jumble_amount(self):
+        return _bounded(self.jumble_amount_var.get(), 0, 100, 40)
+
+    def text_scale(self):
+        return _bounded(self.text_scale_var.get(), 1, 8, 2)
+
+    def text_spacing(self):
+        return _bounded(self.text_spacing_var.get(), 0, 8, 1)
+
+    def airbrush_size(self):
+        return _bounded(self.air_size_var.get(), 1, 64, 8)
+
+    def airbrush_flow(self):
+        return _bounded(self.air_flow_var.get(), 1, 100, 25)
+
+    def curve_bend(self):
+        return _bounded(self.curve_bend_var.get(), -100, 100, 30)
+
+    def curve_vectors(self):
+        return _bounded(self.curve_vectors_var.get(), 1, 8, 1)
+
+    def curve_direction(self):
+        value = str(self.curve_direction_var.get()).lower()
+        return value if value in ("left", "right", "alternate") else "left"
+
+    def contour_width(self):
+        return _bounded(self.contour_width_var.get(), 1, 8, 1)
+
+    def contour_side(self):
+        return ("inside" if str(self.contour_side_var.get()).lower()
+                .startswith("in") else "outside")
+
+    def contour_connectivity(self):
+        return 8 if str(self.contour_connect_var.get()).startswith("8") else 4
+
     def apply_brush(self):
         self.brush = max(1, min(64, int(self.brush_var.get())))
         self.refresh_status()
@@ -3212,7 +3644,16 @@ class hex2pixApp(tk.Tk):
             return
         self.load_path(path)
 
+    def open_project(self):
+        path = filedialog.askopenfilename(parent=self, title="Open project",
+                                          filetypes=formats.PROJECT_FILETYPES)
+        if not path:
+            return
+        self.load_path(path)
+
     def load_path(self, path):
+        if formats.is_project_path(path):
+            return self.load_project_path(path)
         try:
             bitmap, ppi = formats.load_document(path)
         except (OSError, HexError) as exc:
@@ -3231,7 +3672,127 @@ class hex2pixApp(tk.Tk):
         self.show_editor()
         return True
 
+    def project_extras(self):
+        """Editor state stored alongside the layers in a .h2p project."""
+        extras = {
+            "foreground": list(self.fg),
+            "background": list(self.bg),
+            "palette": [list(color) for color in self.palette],
+            "pattern_size": int(self.pattern_size),
+            "pattern": [None if color is None else list(color)
+                        for row in self.pattern_cells for color in row],
+            "symmetry": self.symmetry,
+            "view": self.view_mode,
+        }
+        palette_name = getattr(self, "palette_var", None)
+        if palette_name is not None:
+            try:
+                extras["palette_name"] = str(palette_name.get())
+            except tk.TclError:
+                pass
+        return extras
+
+    def apply_project_extras(self, extras):
+        """Restore palette, pattern, colours, mirror and view from a project."""
+        if not extras:
+            return
+        foreground = extras.get("foreground")
+        if isinstance(foreground, (list, tuple)) and len(foreground) == 4:
+            self.set_fg(tuple(int(v) for v in foreground))
+        background = extras.get("background")
+        if isinstance(background, (list, tuple)) and len(background) == 4:
+            self.bg = tuple(int(v) for v in background)
+        palette = extras.get("palette")
+        if isinstance(palette, list) and palette:
+            colors = []
+            for color in palette:
+                if isinstance(color, (list, tuple)) and len(color) in (3, 4):
+                    colors.append(tuple(_bounded(int(v), 0, 255, 0)
+                                        for v in color))
+            if colors:
+                self.palette = colors
+                self.draw_palette()
+        palette_name = getattr(self, "palette_var", None)
+        if palette_name is not None and extras.get("palette_name"):
+            try:
+                palette_name.set(str(extras["palette_name"]))
+            except tk.TclError:
+                pass
+        size = extras.get("pattern_size")
+        pattern = extras.get("pattern")
+        if isinstance(size, int) and 1 <= size <= 16 and isinstance(pattern, list):
+            self.set_pattern_size(size)
+            cells = [[None] * size for _ in range(size)]
+            for index, color in enumerate(pattern[:size * size]):
+                if isinstance(color, (list, tuple)) and len(color) == 4:
+                    cells[index // size][index % size] = tuple(
+                        _bounded(int(v), 0, 255, 0) for v in color)
+            self.pattern_cells = cells
+            if hasattr(self, "pattern_size_var"):
+                self.pattern_size_var.set(size)
+            self.draw_pattern_grid()
+        symmetry = extras.get("symmetry")
+        if isinstance(symmetry, str) and symmetry in SYMMETRY_LABELS:
+            self.symmetry = symmetry
+            self.symmetry_option_var.set(SYMMETRY_LABELS[symmetry])
+        view = extras.get("view")
+        if view in ("hex", "image"):
+            self.view_mode = view
+            if hasattr(self, "view_mode_var"):
+                self.view_mode_var.set(view)
+
+    def load_project_path(self, path):
+        try:
+            project = formats.load_project(path)
+        except (OSError, HexError) as exc:
+            self.report_error(str(exc))
+            return False
+        self.doc = project.document
+        self.cursor = (0, 0)
+        self.apply_project_extras(project.extras)
+        self._set_default_export_path()
+        self.zoom_fit()
+        self.refresh_layers()
+        self.refresh_bytes()
+        self.refresh_status()
+        self.redraw()
+        self.note_recent(path)
+        self.show_editor()
+        return True
+
+    def save_project(self):
+        if not formats.is_project_path(self.doc.path or ""):
+            return self.save_project_as()
+        try:
+            formats.save_project(self.doc.path, self.doc,
+                                 self.project_extras())
+        except (OSError, HexError) as exc:
+            self.report_error(str(exc))
+            return
+        self.note_recent(self.doc.path)
+        self.refresh_status()
+
+    def save_project_as(self):
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save project",
+            defaultextension=formats.PROJECT_EXT,
+            filetypes=formats.PROJECT_FILETYPES)
+        if not path:
+            return
+        if not formats.is_project_path(path):
+            path += formats.PROJECT_EXT
+        try:
+            formats.save_project(path, self.doc, self.project_extras())
+        except (OSError, HexError) as exc:
+            self.report_error(str(exc))
+            return
+        self.doc.path = path
+        self.note_recent(path)
+        self.refresh_status()
+
     def save_document(self):
+        if formats.is_project_path(self.doc.path or ""):
+            return self.save_project()
         if not self.doc.path:
             return self.save_document_as()
         key = formats.format_for_path(self.doc.path)
@@ -3247,10 +3808,20 @@ class hex2pixApp(tk.Tk):
     def save_document_as(self):
         path = filedialog.asksaveasfilename(
             parent=self, title="Save image", defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("BMP 24-bit", "*.bmp"),
-                       ("TGA", "*.tga"), ("Hex text", "*.txt"),
-                       ("All files", "*.*")])
+            filetypes=[("hex2pix project", "*.h2p"), ("PNG", "*.png"),
+                       ("BMP 24-bit", "*.bmp"), ("TGA", "*.tga"),
+                       ("Hex text", "*.txt"), ("All files", "*.*")])
         if not path:
+            return
+        if formats.is_project_path(path):
+            try:
+                formats.save_project(path, self.doc, self.project_extras())
+            except (OSError, HexError) as exc:
+                self.report_error(str(exc))
+                return
+            self.doc.path = path
+            self.note_recent(path)
+            self.refresh_status()
             return
         key = formats.format_for_path(path)
         try:
@@ -3306,6 +3877,89 @@ class hex2pixApp(tk.Tk):
         self.doc.commit(before)
         self.refresh_bytes()
         self.redraw()
+
+    # ------------------------------------------------------- dither and arts
+    def dither_mode(self):
+        return dither.DITHER_LABELS.get(str(self.dither_mode_var.get()),
+                                        "bayer4")
+
+    def gradient_dither_mode(self):
+        return dither.DITHER_LABELS.get(str(self.gradient_dither_var.get()),
+                                        "off")
+
+    def gradient_pattern(self, mode):
+        return self.pattern_block() if mode == "pattern" else None
+
+    def dither_options(self):
+        """The Bias/Strength/Scale/Serpentine settings shared with Gradient."""
+        return {
+            "scale": _bounded(self.dither_scale_var.get(), 1, 16, 1),
+            "bias": _bounded(self.dither_bias_var.get(), -100, 100, 0),
+            "strength": _bounded(self.dither_strength_var.get(), 0, 100, 100),
+            "serpentine": bool(self.dither_serpentine_var.get()),
+        }
+
+    def apply_dither(self):
+        mode = self.dither_mode()
+        before = self.doc.begin()
+        painted = dither.dither_bitmap(
+            self.doc.bitmap, self.doc.mask(), self.fg, self.bg, mode,
+            self.gradient_pattern(mode), **self.dither_options())
+        self.finish_bulk_edit(before, painted)
+
+    def finish_bulk_edit(self, before, changed):
+        """Commit one whole-canvas edit and refresh the views."""
+        if changed:
+            self.doc.commit(before)
+        self._mark_dirty(0, 0, self.doc.width - 1, self.doc.height - 1)
+        self.refresh_bytes()
+        self.redraw()
+
+    def run_filter(self, function, *args):
+        before = self.doc.begin()
+        changed = function(self.doc.bitmap, self.doc.mask(), *args)
+        self.finish_bulk_edit(before, changed)
+
+    def apply_grayscale(self):
+        self.run_filter(filters.grayscale)
+
+    def apply_posterize(self):
+        self.run_filter(filters.posterize,
+                        _bounded(self.posterize_var.get(), 2, 32, 4))
+
+    def apply_threshold(self):
+        self.run_filter(filters.threshold,
+                        _bounded(self.filter_threshold_var.get(), 0, 255,
+                                 128))
+
+    def apply_brightness(self):
+        self.run_filter(filters.brightness,
+                        _bounded(self.filter_brightness_var.get(), -100, 100,
+                                 25))
+
+    def apply_contrast(self):
+        self.run_filter(filters.contrast,
+                        _bounded(self.filter_contrast_var.get(), -100, 100,
+                                 25))
+
+    def apply_saturation(self):
+        self.run_filter(filters.saturate,
+                        _bounded(self.filter_saturation_var.get(), -100, 100,
+                                 30))
+
+    def apply_hue(self):
+        self.run_filter(filters.hue_shift,
+                        _bounded(self.filter_hue_var.get(), -180, 180, 30))
+
+    def apply_noise(self):
+        self.run_filter(filters.noise,
+                        _bounded(self.filter_noise_var.get(), 0, 100, 12))
+
+    def apply_sepia(self):
+        self.run_filter(filters.sepia)
+
+    def apply_edges(self):
+        self.run_filter(filters.edges)
 
     # ------------------------------------------------------------------ layers
     def layer_row_text(self, index, layer):
@@ -3563,6 +4217,23 @@ class hex2pixApp(tk.Tk):
             "Shift+A..Z      pick a tool (Shift+P pencil, Shift+W wand)\n"
             "Shift+N/R/U/V   line, rectangle, ellipse, gradient\n"
             "Shift+H         hand: drag to pan the canvas anywhere\n"
+            "Shift+B         blur: soften the pixels under the brush\n"
+            "Shift+J         jumble: shuffle, scatter or noise the pixels\n"
+            "Shift+X         text: click to stamp the Text option\n"
+            "Shift+A         airbrush: hold to spray the brush footprint\n"
+            "Shift+C         curve: Bend, Vectors (1-8) and Dir make an arc\n"
+            "                or a wave (Dir Alternate flips each vector)\n"
+            "Shift+G         contour: outline the selection or the artwork\n"
+            "Dither tab      Bayer, Floyd-Steinberg, Pattern, Noise or Lines\n"
+            "                dither to FG and BG; Bias, Strength, Scale and\n"
+            "                Serpentine tune it. Filters: Grayscale, Posterize,\n"
+            "                Threshold, Brightness, Contrast, Saturation,\n"
+            "                Hue, Noise, Sepia and Find edges\n"
+            "Gradient        the Dither option bands a gradient to FG and BG\n"
+            "Projects        Save project as .h2p keeps every layer, the\n"
+            "                selection, palette, pattern and view; Open\n"
+            "                loads them back, and Ctrl+S saves that format\n"
+            "                once the document path is a .h2p file\n"
             "Wheel           smooth zoom around the pointer (12.5%-6400%)\n"
             "Shift+T         move / scale / rotate selection: drag to move,\n"
             "                Shift+drag scales, Ctrl+drag rotates in 15 deg\n"
@@ -4012,8 +4683,10 @@ def run_selftest(out_path=None):
     """Run the unit tests plus a headless GUI pass. Returns an exit status."""
     import unittest
 
-    from .tests import (test_canvas, test_formats, test_macro, test_model,
-                        test_palette, test_pattern, test_shapes)
+    from .tests import (test_bitmapfont, test_canvas, test_dither,
+                        test_effects, test_filters, test_formats, test_macro,
+                        test_model, test_palette, test_pattern, test_project,
+                        test_shapes)
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([
@@ -4024,6 +4697,11 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_shapes),
         loader.loadTestsFromModule(test_palette),
         loader.loadTestsFromModule(test_macro),
+        loader.loadTestsFromModule(test_effects),
+        loader.loadTestsFromModule(test_bitmapfont),
+        loader.loadTestsFromModule(test_dither),
+        loader.loadTestsFromModule(test_filters),
+        loader.loadTestsFromModule(test_project),
     ])
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)

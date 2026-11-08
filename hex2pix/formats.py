@@ -7,13 +7,15 @@ round-trips with its alpha intact, even though some viewers read 32-bit
 BI_RGB BMPs as 24-bit + padding.
 """
 
+import json
 import os
 import struct
+import zipfile
 
 from PIL import Image
 
-from .model import (MATTE_WHITE, SKIP, Bitmap, HexError, block_from_bitmap,
-                    parse_block)
+from .model import (MATTE_WHITE, SKIP, Bitmap, Document, HexError, Layer,
+                    block_from_bitmap, clamp, parse_block)
 
 FORMATS = (
     {"key": "png", "label": "PNG (8-bit RGBA)", "ext": ".png", "alpha": True},
@@ -33,11 +35,17 @@ FORMAT_BY_LABEL = {item["label"]: item for item in FORMATS}
 FORMAT_LABELS = [item["label"] for item in FORMATS]
 
 OPEN_FILETYPES = [
-    ("Images", "*.png *.bmp *.gif *.tga *.ico *.tif *.tiff *.webp *.jpg "
-               "*.jpeg *.ppm *.pgm *.pbm"),
+    ("Images and projects", "*.h2p *.png *.bmp *.gif *.tga *.ico *.tif "
+                           "*.tiff *.webp *.jpg *.jpeg *.ppm *.pgm *.pbm"),
+    ("hex2pix project", "*.h2p"),
     ("Hex text", "*.txt *.hex"),
     ("All files", "*.*"),
 ]
+
+PROJECT_EXT = ".h2p"
+PROJECT_FORMAT = "hex2pix-project"
+PROJECT_VERSION = 1
+PROJECT_FILETYPES = [("hex2pix project", "*.h2p"), ("All files", "*.*")]
 
 
 def flatten(data, width, height, matte=MATTE_WHITE):
@@ -332,3 +340,136 @@ def format_for_path(path):
         if item["ext"] == ext:
             return item["key"]
     return "png"
+
+
+# ------------------------------------------------------------------- projects
+class ProjectFile(object):
+    """A loaded .h2p project: the document plus the editor's session extras."""
+
+    __slots__ = ("document", "extras")
+
+    def __init__(self, document, extras=None):
+        self.document = document
+        self.extras = dict(extras or {})
+
+
+def is_project_path(path):
+    """True when `path` names a hex2pix project container."""
+    return os.path.splitext(str(path or ""))[1].lower() == PROJECT_EXT
+
+
+def save_project(path, document, extras=None):
+    """Write the whole document as a .h2p zip and return its size in bytes.
+
+    `project.json` holds the canvas properties, the layer list and any session
+    extras (palette, pattern, colours, view); each layer's RGBA bytes live in
+    its own `layers/NNN.rgba` entry and the byte selection in
+    `selection.mask`, so layers stay separate on disk instead of being
+    flattened.
+    """
+    path = str(path)
+    _ensure_dir(path)
+    entries = []
+    layers = []
+    for index, layer in enumerate(document.layers):
+        name = "layers/%03d.rgba" % index
+        layers.append({
+            "name": layer.name,
+            "op": layer.op,
+            "visible": bool(layer.visible),
+            "alpha": int(layer.alpha),
+            "data": name,
+        })
+        entries.append((name, bytes(layer.bitmap.data)))
+    header = {
+        "format": PROJECT_FORMAT,
+        "version": PROJECT_VERSION,
+        "width": int(document.width),
+        "height": int(document.height),
+        "ppi": float(document.ppi),
+        "color_mode": document.color_mode,
+        "alpha": bool(document.alpha),
+        "matte": list(document.matte),
+        "display_format": document.display_format,
+        "active_layer": int(document.layer_index),
+        "layers": layers,
+        "selection_active": bool(document.selection.active),
+        "selection": "selection.mask" if document.selection.active else None,
+        "extras": dict(extras or {}),
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("project.json",
+                         json.dumps(header, indent=2, sort_keys=True))
+        for name, data in entries:
+            archive.writestr(name, data)
+        if document.selection.active:
+            archive.writestr("selection.mask", bytes(document.selection.mask))
+    return os.path.getsize(path)
+
+
+def load_project(path):
+    """Read a .h2p project into a ProjectFile, layers kept separate."""
+    path = str(path)
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            try:
+                raw_header = archive.read("project.json")
+            except KeyError:
+                raise HexError("not a hex2pix project: no project.json")
+            try:
+                header = json.loads(raw_header.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise HexError("damaged project header: %s" % exc)
+            if header.get("format") != PROJECT_FORMAT:
+                raise HexError("not a hex2pix project file")
+            version = int(header.get("version", 0))
+            if version > PROJECT_VERSION:
+                raise HexError("this project needs a newer hex2pix "
+                               "(format version %d)" % version)
+            try:
+                width = int(header["width"])
+                height = int(header["height"])
+            except (KeyError, TypeError, ValueError):
+                raise HexError("project has no canvas size")
+            if width <= 0 or height <= 0:
+                raise HexError("project has no canvas size")
+            layers = []
+            for index, entry in enumerate(header.get("layers") or []):
+                name = entry.get("data") or "layers/%03d.rgba" % index
+                try:
+                    data = archive.read(name)
+                except KeyError:
+                    raise HexError("project is missing layer data for %r"
+                                   % (entry.get("name"),))
+                layers.append(Layer(
+                    width, height, entry.get("name", "Layer %d" % (index + 1)),
+                    entry.get("op", "normal"),
+                    entry.get("visible", True), data,
+                    entry.get("alpha", 255)))
+            if not layers:
+                raise HexError("project has no layers")
+            document = Document(width, height, path=path,
+                                ppi=float(header.get("ppi", 72.0)),
+                                color_mode=header.get("color_mode", "RGB"),
+                                alpha=header.get("alpha", True))
+            document.layers = layers
+            document.layer_index = clamp(int(header.get("active_layer", 0)), 0,
+                                         len(layers) - 1)
+            document.display_format = str(header.get("display_format", "png"))
+            matte = header.get("matte")
+            if isinstance(matte, (list, tuple)) and len(matte) == 3:
+                document.matte = tuple(clamp(int(v), 0, 255) for v in matte)
+            if header.get("selection_active"):
+                try:
+                    mask = archive.read(header.get("selection")
+                                        or "selection.mask")
+                except KeyError:
+                    mask = b""
+                if len(mask) == width * height:
+                    document.selection.restore(mask)
+    except zipfile.BadZipFile:
+        raise HexError("not a hex2pix project: %s" % os.path.basename(path))
+    except OSError as exc:
+        raise HexError("could not read the project: %s" % exc)
+    return ProjectFile(document, header.get("extras"))
+

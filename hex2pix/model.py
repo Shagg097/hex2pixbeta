@@ -789,8 +789,61 @@ def _line_points(x0, y0, x1, y1):
     return points
 
 
+def fill_holes(mask, width, height):
+    """Return a copy of `mask` with every enclosed pocket selected.
+
+    Pixels that cannot be reached from the canvas border by walking unselected
+    pixels are inside the shape, so a path that circles back on itself (a
+    self-crossing lasso, or a polygon whose vertices enclose a second loop)
+    cannot leave holes in the middle of the selection.
+    """
+    width, height = int(width), int(height)
+    source = bytearray(mask)
+    if width <= 0 or height <= 0 or len(source) != width * height:
+        return source
+    outside = bytearray(width * height)
+    stack = []
+    for x in range(width):
+        for y in (0, height - 1):
+            index = y * width + x
+            if not source[index] and not outside[index]:
+                outside[index] = 1
+                stack.append(index)
+    for y in range(height):
+        for x in (0, width - 1):
+            index = y * width + x
+            if not source[index] and not outside[index]:
+                outside[index] = 1
+                stack.append(index)
+    while stack:
+        index = stack.pop()
+        y, x = divmod(index, width)
+        if x > 0 and not source[index - 1] and not outside[index - 1]:
+            outside[index - 1] = 1
+            stack.append(index - 1)
+        if x + 1 < width and not source[index + 1] and not outside[index + 1]:
+            outside[index + 1] = 1
+            stack.append(index + 1)
+        if y > 0 and not source[index - width] \
+                and not outside[index - width]:
+            outside[index - width] = 1
+            stack.append(index - width)
+        if y + 1 < height and not source[index + width] \
+                and not outside[index + width]:
+            outside[index + width] = 1
+            stack.append(index + width)
+    for index in range(width * height):
+        if not outside[index]:
+            source[index] = 255
+    return source
+
+
 def selection_polygon_mask(width, height, points):
-    """Even-odd scanline fill of a polygon, with its outline included."""
+    """Even-odd scanline fill of a polygon, with its outline included.
+
+    Enclosed pockets are filled afterwards, so a path that crosses itself
+    still yields a solid byte selection instead of one with holes in it.
+    """
     mask = bytearray(width * height)
     pts = [(int(px), int(py)) for px, py in points]
     if len(pts) < 2:
@@ -836,7 +889,7 @@ def selection_polygon_mask(width, height, points):
         for x, y in _line_points(ax, ay, bx, by):
             if 0 <= x < width and 0 <= y < height:
                 mask[y * width + x] = 255
-    return mask
+    return fill_holes(mask, width, height)
 
 
 def clean_path(points, tolerance=0.5):

@@ -14,6 +14,7 @@ from hex2pix.model import (
     rotate_ramp,
     selected_bytes, selection_ellipse_mask, selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block, unique_colors,
+    fill_holes,
 )
 
 RED = (255, 0, 0, 255)
@@ -492,6 +493,55 @@ class LayerTests(unittest.TestCase):
         document.move_layer(-1)
         self.assertEqual(document.active_layer.op, "subtract")
         self.assertEqual(document.flatten().rgba(0, 0), (200, 100, 50, 255))
+
+
+class HoleFillTests(unittest.TestCase):
+    def test_enclosed_pocket_is_filled(self):
+        width = height = 9
+        mask = bytearray(width * height)
+        for y in range(1, 8):
+            for x in range(1, 8):
+                mask[y * width + x] = 255
+        mask[4 * width + 4] = 0
+        filled = fill_holes(mask, width, height)
+        self.assertEqual(filled[4 * width + 4], 255)
+        self.assertEqual(filled[0], 0)
+
+    def test_open_concavity_is_left_alone(self):
+        width = height = 7
+        mask = bytearray(width * height)
+        for y in range(height):
+            for x in range(width):
+                if x < 2 or y < 2 or y > 4:
+                    mask[y * width + x] = 255
+        filled = fill_holes(mask, width, height)
+        self.assertEqual(filled[3 * width + 5], 0)
+        self.assertEqual(filled[3 * width], 255)
+
+    def test_solid_mask_is_unchanged(self):
+        mask = bytearray(b"\xff" * 12)
+        self.assertEqual(fill_holes(mask, 4, 3), mask)
+
+    def test_wrong_size_returns_a_copy(self):
+        mask = bytearray(b"\xff\x00")
+        filled = fill_holes(mask, 4, 3)
+        self.assertEqual(filled, mask)
+        self.assertIsNot(filled, mask)
+
+    def test_polygon_with_a_nested_loop_has_no_hole(self):
+        points = [(1, 1), (8, 1), (8, 8), (1, 8),
+                  (2, 2), (7, 2), (7, 7), (2, 7)]
+        mask = selection_polygon_mask(10, 10, points)
+        for y in range(2, 8):
+            for x in range(2, 8):
+                self.assertEqual(mask[y * 10 + x], 255, (x, y))
+
+    def test_lasso_like_path_leaves_no_gap(self):
+        points = [(1, 1), (7, 1), (7, 7), (1, 7),
+                  (2, 2), (6, 2), (6, 6), (2, 6), (2, 3)]
+        mask = selection_polygon_mask(9, 9, points)
+        self.assertEqual(mask[4 * 9 + 4], 255)
+        self.assertGreaterEqual(sum(1 for value in mask if value), 47)
 
 
 class LassoPathTests(unittest.TestCase):

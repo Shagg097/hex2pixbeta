@@ -9,6 +9,10 @@ colour inside the mask.
 Pure Python, no tkinter, so the geometry is unit-testable.
 """
 
+import math
+
+from .bitmapfont import text_points
+from .dither import apply_gradient_dither
 from .model import HexError, clamp
 
 SHAPE_KINDS = ("line", "rect", "ellipse")
@@ -189,6 +193,131 @@ def paint_stroke(bitmap, mask, x0, y0, x1, y1, size, color, shape="square",
     return painted
 
 
+def line_points(x0, y0, x1, y1):
+    """The pixels of a straight stroke, for effects that follow a drag."""
+    return _bresenham(int(x0), int(y0), int(x1), int(y1))
+
+
+def paint_points(bitmap, mask, points, color, axes=""):
+    """Paint arbitrary pixels, mirrored and inside the mask."""
+    painted = 0
+    seen = set()
+    for x, y in points:
+        for mx, my in mirror_points(x, y, bitmap.width, bitmap.height, axes):
+            if (mx, my) in seen:
+                continue
+            seen.add((mx, my))
+            painted += _plot(bitmap, mask, mx, my, color)
+    return painted
+
+
+def paint_mask(bitmap, mask, region, color):
+    """Paint `color` into the pixels a byte mask selects."""
+    painted = 0
+    width = bitmap.width
+    for index, value in enumerate(region):
+        if not value:
+            continue
+        painted += _plot(bitmap, mask, index % width, index // width, color)
+    return painted
+
+
+CURVE_DIRECTIONS = ("left", "right", "alternate")
+
+
+def curve_points(x0, y0, x1, y1, bend=30.0, vectors=1, direction="left"):
+    """A chain of quadratic arcs from (x0, y0) to (x1, y1).
+
+    `bend` is each arc's apex offset from its stretch of the chord, as a
+    percentage of half the chord length. `vectors` splits the chord into that
+    many arcs, so 2 makes an S-wave and more make a ripple. `direction` picks
+    the side each arc bulges to: `left` or `right` of the drag, or `alternate`
+    to flip sides on every vector. A negative `bend` flips all of them.
+
+    The arc through (x0, y0) and (x1, y1) with `bend=0` is a straight line;
+    `bend=100` reaches half the chord out, because a quadratic only ever gets
+    half way to its control point.
+    """
+    dx = float(x1) - float(x0)
+    dy = float(y1) - float(y0)
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return [(int(x0), int(y0))]
+    try:
+        vectors = int(vectors)
+    except (TypeError, ValueError):
+        vectors = 1
+    vectors = max(1, min(8, vectors))
+    side = str(direction).lower()
+    if side not in CURVE_DIRECTIONS:
+        side = "left"
+    offset = (float(bend) / 100.0) * length
+    normal_x = -dy / length
+    normal_y = dx / length
+    points = []
+    for index in range(vectors):
+        start_t = index / float(vectors)
+        end_t = (index + 1) / float(vectors)
+        start_x = x0 + dx * start_t
+        start_y = y0 + dy * start_t
+        end_x = x0 + dx * end_t
+        end_y = y0 + dy * end_t
+        if side == "right":
+            sign = -1.0
+        elif side == "alternate":
+            sign = 1.0 if index % 2 == 0 else -1.0
+        else:
+            sign = 1.0
+        middle_t = (start_t + end_t) / 2.0
+        control_x = x0 + dx * middle_t + normal_x * offset * sign
+        control_y = y0 + dy * middle_t + normal_y * offset * sign
+        steps = max(6, int(length / vectors * 2))
+        for step in range(steps + 1):
+            t = step / float(steps)
+            rest = 1.0 - t
+            x = (rest * rest * start_x + 2 * rest * t * control_x
+                 + t * t * end_x)
+            y = (rest * rest * start_y + 2 * rest * t * control_y
+                 + t * t * end_y)
+            point = (int(round(x)), int(round(y)))
+            if not points or points[-1] != point:
+                points.append(point)
+    return points
+
+
+def paint_curve(bitmap, mask, x0, y0, x1, y1, size, color, bend=30.0,
+                shape="square", axes="", vectors=1, direction="left"):
+    """Paint a curved line between two points, mirrored and with a width."""
+    painted = 0
+    pairs = [(x0, y0, x1, y1)]
+    width, height = bitmap.width, bitmap.height
+    if "x" in axes:
+        pairs.append((width - 1 - x0, y0, width - 1 - x1, y1))
+    if "y" in axes:
+        pairs.append((x0, height - 1 - y0, x1, height - 1 - y1))
+    if "x" in axes and "y" in axes:
+        pairs.append((width - 1 - x0, height - 1 - y0,
+                      width - 1 - x1, height - 1 - y1))
+    centers = set()
+    seen = set()
+    for ax0, ay0, ax1, ay1 in pairs:
+        for x, y in curve_points(ax0, ay0, ax1, ay1, bend, vectors,
+                                 direction):
+            if (x, y) in centers:
+                continue
+            centers.add((x, y))
+            painted += paint_dab(bitmap, mask, x, y, size, color, shape,
+                                 seen=seen)
+    return painted
+
+
+def stamp_text(bitmap, mask, x, y, text, color, scale=1, spacing=1,
+               axes=""):
+    """Stamp one line of text with its top-left corner at (x, y)."""
+    points = [(x + dx, y + dy) for dx, dy in text_points(text, scale, spacing)]
+    return paint_points(bitmap, mask, points, color, axes)
+
+
 def paint_shape(bitmap, mask, kind, x0, y0, x1, y1, size, color,
                 fill=False, shape="square", axes=""):
     """Paint a line, rectangle or ellipse, mirrored and with a brush width."""
@@ -214,13 +343,24 @@ def paint_shape(bitmap, mask, kind, x0, y0, x1, y1, size, color,
     return painted
 
 
-def gradient_fill(bitmap, mask, x0, y0, x1, y1, start, end):
-    """Linear gradient from `start` to `end` along the stroke direction."""
+def gradient_fill(bitmap, mask, x0, y0, x1, y1, start, end, dither="off",
+                  pattern=None, scale=1, bias=0.0, strength=100,
+                  serpentine=False):
+    """Linear gradient from `start` to `end` along the stroke direction.
+
+    With a `dither` mode the gradient is reduced to those same two colours
+    with a Bayer matrix, Floyd-Steinberg error diffusion or a custom pattern
+    block instead of interpolating every pixel.
+    """
     dx = int(x1) - int(x0)
     dy = int(y1) - int(y0)
     denominator = dx * dx + dy * dy
     if denominator == 0:
         raise HexError("drag the gradient tool to set a direction")
+    if dither and dither != "off":
+        return apply_gradient_dither(bitmap, mask, x0, y0, x1, y1, start,
+                                     end, dither, pattern, scale, bias,
+                                     strength, serpentine)
     painted = 0
     for y in range(bitmap.height):
         row = y * bitmap.width
