@@ -23,7 +23,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import __version__, dither, filters, formats, icons
 from .integrations import (GITHUB_REPOSITORY, SettingsStore, UpdateError,
-                           apply_update, check_for_update, download_update)
+                           apply_update, check_for_update, download_update,
+                           is_folder_build)
 from .macro import Macro, Recorder
 from .palette import (MAX_PALETTE_COLORS, PALETTE_FILETYPES, PALETTES,
                       format_palette, make_palette, parse_palette,
@@ -84,6 +85,9 @@ SELECTION_TOOLS = ("rect", "ellipse", "polygon", "lasso", "wand",
                    "similar", "transform")
 PAINT_TOOLS = ("pencil", "eraser")
 SHAPE_TOOLS = ("line", "curve", "shape_rect", "shape_ellipse")
+
+# Dockers hidden on startup; the View menu shows them again.
+DEFAULT_HIDDEN_DOCKERS = ("block", "bytes", "dump", "export")
 
 MAX_PIXELS = 12000000
 MIN_ZOOM = 0.125
@@ -797,6 +801,7 @@ class hex2pixApp(tk.Tk):
         self._muted_labels = []
 
         self.title("hex2pix")
+        self._set_window_icon()
         self.geometry("1200x780")
         self.minsize(940, 620)
         self.configure(bg=self.colors["bg"])
@@ -985,29 +990,48 @@ class hex2pixApp(tk.Tk):
         for tab in self.notebook.tabs():
             label = str(self.notebook.tab(tab, "text"))
             key = label.lower()
-            var = tk.BooleanVar(value=True)
+            visible = key not in DEFAULT_HIDDEN_DOCKERS
+            var = tk.BooleanVar(value=visible)
             self.docker_vars[key] = var
             self.docker_tabs[key] = tab
             self.docker_labels[key] = label
             self.view_menu.add_checkbutton(
                 label=label, variable=var,
                 command=lambda k=key: self.toggle_docker(k))
+            if not visible:
+                self.set_docker_visible(key, False)
+        self._select_first_visible_docker()
         self._style_menus(self.menubar)
 
-    def toggle_docker(self, key):
-        """Show or hide a right-side docker without reordering the tabs."""
+    def _select_first_visible_docker(self):
+        """Keep the notebook on a tab that is actually shown."""
+        for tab in self.notebook.tabs():
+            if str(self.notebook.tab(tab, "state")) != "hidden":
+                self.notebook.select(tab)
+                return
+
+    def set_docker_visible(self, key, visible):
+        """Show or hide one right-side docker without reordering the tabs."""
         tab = self.docker_tabs.get(key)
-        var = self.docker_vars.get(key)
-        if tab is None or var is None:
+        if tab is None:
             return
         try:
-            self.notebook.tab(tab, state="normal" if var.get()
-                              else "hidden")
+            self.notebook.tab(tab, state="normal" if visible else "hidden")
         except tk.TclError:
-            if var.get():
+            if visible:
                 self.notebook.add(tab, text=self.docker_labels.get(key, key))
             else:
                 self.notebook.hide(tab)
+
+    def toggle_docker(self, key):
+        """Show or hide a right-side docker without reordering the tabs."""
+        var = self.docker_vars.get(key)
+        if var is None:
+            return
+        visible = bool(var.get())
+        self.set_docker_visible(key, visible)
+        if not visible:
+            self._select_first_visible_docker()
 
     def toggle_dark_mode(self):
         self.dark_mode = bool(self.dark_var.get())
@@ -1137,7 +1161,7 @@ class hex2pixApp(tk.Tk):
         edit_menu.add_separator()
         edit_menu.add_command(label="Invert colors",
                               command=self.invert_colors_action)
-        edit_menu.add_command(label="Clear selection",
+        edit_menu.add_command(label="Clear selection", accelerator="Delete",
                               command=self.clear_selection)
         bar.add_cascade(label="Edit", menu=edit_menu)
 
@@ -1185,9 +1209,9 @@ class hex2pixApp(tk.Tk):
                                command=self.duplicate_layer)
         layer_menu.add_command(label="Delete layer", command=self.delete_layer)
         layer_menu.add_separator()
-        layer_menu.add_command(label="Raise layer",
+        layer_menu.add_command(label="Raise layer", accelerator="Alt+Up",
                                command=lambda: self.move_layer(1))
-        layer_menu.add_command(label="Lower layer",
+        layer_menu.add_command(label="Lower layer", accelerator="Alt+Down",
                                command=lambda: self.move_layer(-1))
         layer_menu.add_separator()
         for op in LAYER_OPS:
@@ -1487,6 +1511,14 @@ class hex2pixApp(tk.Tk):
         self.sel_info = tk.StringVar(value="no selection")
         ttk.Label(left, textvariable=self.sel_info, wraplength=190,
                   foreground="#8ab4f8").pack(anchor="w", pady=(10, 0))
+        sel_buttons = ttk.Frame(left)
+        sel_buttons.pack(fill="x", pady=(2, 0))
+        ttk.Button(sel_buttons, text="Select all",
+                   command=self.select_all).pack(side="left", fill="x",
+                                                 expand=True)
+        ttk.Button(sel_buttons, text="Deselect",
+                   command=self.deselect).pack(side="left", fill="x",
+                                               expand=True, padx=(2, 0))
         self._update_left_scrollregion()
 
     def _heading(self, parent, text):
@@ -1529,6 +1561,19 @@ class hex2pixApp(tk.Tk):
         except (OSError, ValueError):
             return None
         return ImageTk.PhotoImage(art)
+
+    def _set_window_icon(self):
+        """Put the H2P logo in the title bar and on the taskbar."""
+        path = icons.logo_path()
+        if not path:
+            return
+        try:
+            with Image.open(path) as image:
+                art = image.convert("RGBA")
+            self._logo_photo = ImageTk.PhotoImage(art)
+            self.iconphoto(True, self._logo_photo)
+        except (OSError, ValueError, tk.TclError):
+            self._logo_photo = None
 
     def _reload_tool_icons(self):
         """Re-tint the palette icons after a theme switch."""
@@ -1644,6 +1689,8 @@ class hex2pixApp(tk.Tk):
         scroll.pack(side="right", fill="y")
         self.layer_list.bind("<<ListboxSelect>>", self.on_layer_select)
         self.layer_list.bind("<Double-Button-1>", self.on_layer_toggle)
+        self.layer_list.bind("<ButtonPress-1>", self.begin_layer_drag)
+        self.layer_list.bind("<ButtonRelease-1>", self.end_layer_drag)
 
         op_row = ttk.Frame(layers)
         op_row.pack(fill="x", pady=(2, 0))
@@ -1699,7 +1746,8 @@ class hex2pixApp(tk.Tk):
         ttk.Label(layers,
                   text="A layer combines with the layers below it using its "
                        "operation; Normal simply covers what is underneath. "
-                       "Double-click a layer to show or hide it. Both views "
+                       "Drag a row to restack it, double-click to show or "
+                       "hide, Alt+Up/Down moves the active layer. Both views "
                        "show the result; the dump shows the active layer.",
                   foreground="#777", wraplength=280,
                   justify="left").pack(anchor="w", pady=(2, 0))
@@ -2675,10 +2723,16 @@ class hex2pixApp(tk.Tk):
                 int(round((x0 - hx0 + bw) * zoom)),
                 int(round((y0 - hy0 + bh) * zoom)))
         solid = halo.crop(trim)
+        if solid.size != image.size:
+            # Fractional zoom rounds the crop up to a pixel away from the
+            # drawn image, and composite() needs an exact match.
+            solid = solid.resize(image.size, Image.NEAREST)
         tint = Image.new("RGBA", image.size, (0, 190, 255, 70))
         image = Image.composite(Image.alpha_composite(image, tint), image, solid)
         edges = halo.filter(ImageFilter.FIND_EDGES).crop(trim).point(
             lambda v: 255 if v > 0 else 0)
+        if edges.size != image.size:
+            edges = edges.resize(image.size, Image.NEAREST)
         accent = Image.new("RGBA", image.size, (0, 235, 255, 235))
         return Image.composite(accent, image, edges)
 
@@ -3062,6 +3116,11 @@ class hex2pixApp(tk.Tk):
         self.stop_airbrush()
         self.tool = name
         self.tool_var.set(name)
+        if name == "transform" and not self.doc.selection.bounds():
+            # Move / Scale works on the whole layer until a selection exists.
+            self.doc.selection.select_all()
+            if hasattr(self, "sel_info"):
+                self.refresh_bytes()
         self.refresh_tool_buttons()
         self.poly_points = []
         self.lasso_points = []
@@ -3243,8 +3302,11 @@ class hex2pixApp(tk.Tk):
             mode = "move"
         bounds = self.doc.selection.bounds()
         if not bounds:
-            self.report_error("Select an area first, then drag it.")
-            return
+            # Nothing selected: the whole layer is the piece.
+            self.doc.selection.select_all()
+            bounds = self.doc.selection.bounds()
+            if not bounds:
+                return
         left, top, width, height = bounds
         if mode == "move" and not self.doc.selection.get(x, y):
             self.report_error("Drag from inside the selection to move it, "
@@ -3359,8 +3421,11 @@ class hex2pixApp(tk.Tk):
         """Enter with the move tool: put the selection's corner at the cursor."""
         bounds = self.doc.selection.bounds()
         if not bounds:
-            self.report_error("Select an area first, then Enter moves it.")
-            return
+            # Nothing selected: Enter moves the whole layer.
+            self.doc.selection.select_all()
+            bounds = self.doc.selection.bounds()
+            if not bounds:
+                return
         piece = extract_selection(self.doc.bitmap, self.doc.selection.mask,
                                   bounds)
         before = self.doc.begin()
@@ -5185,6 +5250,32 @@ class hex2pixApp(tk.Tk):
         self.doc.commit(before)
         self.layers_changed()
 
+    def move_layer_to(self, target):
+        """Restack the active layer at `target`; used by dragging a row."""
+        before = self.doc.begin()
+        if not self.doc.reorder_layer(target):
+            return
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def begin_layer_drag(self, event=None):
+        """Remember the row a drag starts on; the drop decides the restack."""
+        self._layer_drag_row = (self.layer_list.nearest(event.y)
+                                if event is not None else None)
+
+    def end_layer_drag(self, event=None):
+        """Drop a dragged row onto another row to move that layer there."""
+        row = getattr(self, "_layer_drag_row", None)
+        self._layer_drag_row = None
+        if event is None or not row or row < 0:
+            return
+        if event.y < 0 or event.y > self.layer_list.winfo_height():
+            return
+        target_row = self.layer_list.nearest(event.y)
+        if target_row < 0 or target_row == row:
+            return
+        self.move_layer_to(self.doc.layer_count - 1 - target_row)
+
     def flip_image(self, horizontal):
         before = self.doc.begin()
         self.doc.transform_all(flip_horizontal if horizontal
@@ -5337,6 +5428,18 @@ class hex2pixApp(tk.Tk):
                 return
             if self.silent:
                 return
+            if is_folder_build():
+                # A folder install is replaced by unzipping the new portable
+                # build, not by swapping in the single-file executable.
+                if messagebox.askyesno(
+                        "Update available",
+                        "hex2pix %s is available.\n\n"
+                        "This is the portable folder build: download the new "
+                        "hex2pix-portable.zip and unzip it over this folder.\n\n"
+                        "Open the release page?" % release.version,
+                        parent=self):
+                    webbrowser.open(release.page_url)
+                return
             if messagebox.askyesno(
                     "Update available",
                     "hex2pix %s is available. Download and install it now?\n\n"
@@ -5443,14 +5546,17 @@ class hex2pixApp(tk.Tk):
             "Ctrl+Z / Ctrl+Y undo / redo\n"
             "Ctrl+A          select all\n"
             "Ctrl+D          deselect\n"
+            "Delete          clear the pixels inside the selection\n"
+            "Escape          cancel the current step, then deselect\n"
             "Ctrl+C / Ctrl+V copy / paste hex block text\n"
             "Ctrl+O / Ctrl+S open / save\n"
             "Ctrl+E          export formats\n"
             "Ctrl+Shift+N    new layer (Normal operation)\n"
+            "Alt+Up/Alt+Down restack the active layer\n"
             "Layers tab      Normal / Add / Subtract / Multiply / Divide,\n"
             "                New / Copy / Delete / Raise / Lower; the\n"
             "                Opacity slider blends the active layer;\n"
-            "                double-click a row to show or hide that layer\n"
+            "                drag a row to restack, double-click shows/hides\n"
             "F9              record the keys you press\n"
             "F5              play the recording back (Escape stops)\n"
             "F11             toggle fullscreen (Escape leaves it)\n"
@@ -5500,6 +5606,9 @@ class hex2pixApp(tk.Tk):
             if self.recorder.capture(key, event.char or "", int(event.state)):
                 self.refresh_macro_status()
 
+        if key in ("Up", "Down") and bool(event.state & 0x0008):
+            self.move_layer(1 if key == "Up" else -1)
+            return "break"
         if key in ("Up", "Down", "Left", "Right"):
             jump = 8 if control else 1
             moves = {"Up": (0, -jump), "Down": (0, jump),
@@ -5551,6 +5660,10 @@ class hex2pixApp(tk.Tk):
             self.refresh_status()
             return "break"
         if key == "Escape":
+            busy = bool(self.fullscreen or self.typed or self.poly_points
+                        or self.lasso_points or self.transform_base
+                        or self.shape_anchor or self.gradient_anchor
+                        or self.kb_anchor is not None)
             if self.fullscreen:
                 self.set_fullscreen(False)
             self.cancel_shape()
@@ -5561,11 +5674,17 @@ class hex2pixApp(tk.Tk):
             self.lasso_points = []
             self.sel_backup = None
             self.keyboard_cancel()
+            if not busy and self.doc.selection.active:
+                # Nothing else to cancel: Escape drops the selection too.
+                self.doc.selection.clear()
             self.refresh_status()
             self.redraw()
             return "break"
         if key == "Delete":
-            self.erase_at_cursor()
+            if self.doc.selection.active:
+                self.clear_selection()
+            else:
+                self.erase_at_cursor()
             return "break"
         if key in ("plus", "equal", "KP_Add"):
             self.brush = min(64, self.brush + 1)
@@ -6198,6 +6317,23 @@ def run_selftest(out_path=None):
             str(app.notebook.tab(app.docker_tabs[key], "state")) == "normal"
             for key in docker_keys)
 
+        # Fractional zoom used to round the selection mask one pixel away
+        # from the drawn image, which made the overlay raise ValueError.
+        app.doc.selection.select_all()
+        overlay_ok = True
+        for probe_zoom in (0.9, 1.0, 3.7, 8.25):
+            probe_size = (max(1, int(round(app.doc.width * probe_zoom))),
+                          max(1, int(round(app.doc.height * probe_zoom))))
+            try:
+                probe = app.selection_overlay(
+                    Image.new("RGBA", probe_size, (0, 0, 0, 0)),
+                    app.doc.width, app.doc.height, probe_zoom)
+            except ValueError:
+                overlay_ok = False
+            else:
+                overlay_ok = overlay_ok and probe.size == probe_size
+        app.doc.selection.clear()
+
         old_tool = app.tool
         app.tool = "line"
         app.shape_anchor = (0, 0)
@@ -6264,7 +6400,7 @@ def run_selftest(out_path=None):
                       line_fill_ok, structure_ok, pattern_text_ok,
                       fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                       gradient_ok, palette_ok, wheel_ok, quantize_ok,
-                      dark_ok, light_ok, dockers_ok, mouse_ok))
+                      dark_ok, light_ok, dockers_ok, overlay_ok, mouse_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
                      "drag=%s erase=%s export=%s dump=%s canvas=%s props=%s "
                      "canvas_undo=%s dialog=%s default_view=%s hex_view=%s "
@@ -6274,7 +6410,7 @@ def run_selftest(out_path=None):
                      "structure=%s pattern_text=%s fullscreen=%s "
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
                      "palette=%s wheel=%s quantize=%s dark=%s light=%s "
-                     "dockers=%s mouse=%s"
+                     "dockers=%s overlay=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -6284,7 +6420,7 @@ def run_selftest(out_path=None):
                         line_fill_ok, structure_ok, pattern_text_ok,
                         fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                         gradient_ok, palette_ok, wheel_ok, quantize_ok,
-                        dark_ok, light_ok, dockers_ok, mouse_ok))
+                        dark_ok, light_ok, dockers_ok, overlay_ok, mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))

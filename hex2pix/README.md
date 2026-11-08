@@ -351,7 +351,8 @@ Both views show the flattened result once there is more than one layer; the
 **Dump** tab, **Copy block** and the byte tools still work on the active
 layer, which is the one tools edit and type hex into. **New**, **Copy**,
 **Delete**, **Raise** and **Lower** manage the stack, `Ctrl+Shift+N` adds a
-layer, and double-clicking a layer row shows or hides that layer.
+layer, dragging a row restacks it, double-clicking shows or hides it, and
+`Alt+Up` / `Alt+Down` restack the active layer.
 
 ## Tool palette
 
@@ -432,18 +433,19 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
 | Enter | close a polygon once it has three vertices (`Shift+Enter` adds a vertex); set that color and paint at the cursor; place a selection corner; or run the active fill/shape tool |
 | Backspace | delete a typed digit |
 | `G` | pick the color under the cursor |
-| Delete | erase the pixel under the cursor |
+| Delete | erase the pixel under the cursor, or the pixels inside the selection |
 | `+` / `-` | brush size |
 | `[` / `]` | zoom out / in |
 | Space | swap foreground and background |
 | Shift + letter | pick a tool (Pencil, Eraser, Airbrush, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Jumble, Text, Line pattern, Structure fill, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
 | Shift+T | move the selection by dragging, scale it with Shift+drag, rotate it with Ctrl+drag, or move its corner to the cursor with `Enter` |
 | Ctrl+Z / Ctrl+Y | undo / redo |
-| Ctrl+A / Ctrl+D | select all / deselect |
+| Ctrl+A / Ctrl+D | select all / deselect (the sidebar buttons do the same) |
 | Ctrl+C / Ctrl+V | copy / paste hex block text |
 | Ctrl+O / Ctrl+S | open / save |
 | Ctrl+E | export tab |
 | Ctrl+Shift+N | new layer |
+| Alt+Up / Alt+Down | restack the active layer |
 
 Tool letters are on `Shift` so that `A-F` can stay available for hex digits.
 
@@ -507,7 +509,10 @@ py -3 -m PyInstaller --noconfirm --clean --onefile --windowed --name hex2pix ^
 ```
 
 `dist\hex2pix.exe` is a single self-contained file; no Python install is
-needed on the target machine.
+needed on the target machine. `build_exe.cmd` also writes
+`dist\hex2pix-portable.zip`: the same program as a folder that keeps its
+runtime DLLs beside the executable, which fixes a start-up failure of the
+single file that reads `Failed to load Python DLL`.
 
 ## Tests
 
@@ -516,7 +521,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 350 tests over the model, the canvas, formats, colours,
+The first command runs 354 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand
@@ -532,6 +537,7 @@ executable: `hex2pix.exe --selftest`.
   a 512x512 image, fewer for larger).
 * Selections are hard-edged byte masks; there is no feathering or anti-aliasing.
 * Brush tips are square or circle; there are no custom brush stamps.
-* Automatic updates only replace the packaged Windows executable and need write
-  access to its folder.
+* Automatic updates only replace the single-file Windows executable and need
+  write access to its folder; the portable folder build points at the release
+  page instead.
 * Canvases are capped at 8192 pixels per side.

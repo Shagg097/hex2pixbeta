@@ -68,6 +68,36 @@ class HexColorTests(unittest.TestCase):
         self.assertEqual(ramp[(255, 255, 255)], (0, 0, 0))
 
 
+class LayerReorderTests(unittest.TestCase):
+    def test_reorder_active_layer(self):
+        doc = Document(4, 4)
+        doc.layers[0].name = "base"
+        doc.add_layer("middle")
+        doc.add_layer("top")
+        self.assertEqual(doc.layer_index, 2)
+        self.assertTrue(doc.reorder_layer(0))
+        self.assertEqual([l.name for l in doc.layers],
+                         ["top", "base", "middle"])
+        self.assertEqual(doc.layer_index, 0)
+        self.assertFalse(doc.reorder_layer(0))
+        self.assertFalse(doc.reorder_layer(5))
+        self.assertFalse(doc.reorder_layer(-1))
+        self.assertTrue(doc.reorder_layer(2))
+        self.assertEqual([l.name for l in doc.layers],
+                         ["base", "middle", "top"])
+        self.assertEqual(doc.layer_index, 2)
+
+    def test_reorder_keeps_another_layer_active(self):
+        doc = Document(4, 4)
+        doc.layers[0].name = "base"
+        doc.add_layer("middle")
+        doc.add_layer("top")
+        self.assertTrue(doc.reorder_layer(2, index=0))
+        self.assertEqual([l.name for l in doc.layers],
+                         ["middle", "top", "base"])
+        self.assertEqual(doc.layer_index, 2)
+
+
 class BlockTests(unittest.TestCase):
     def test_parse_basic(self):
         block = parse_block("FF0000 00FF00\n0000FF")

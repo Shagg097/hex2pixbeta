@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    name: Build and publish hex2pix.exe
+    name: Build and publish hex2pix
     runs-on: windows-latest
     steps:
       - name: Check out the tag
@@ -43,7 +43,29 @@ jobs:
       - name: Build hex2pix.exe
         run: python -m PyInstaller --noconfirm --clean hex2pix.spec
 
-      - name: Attach the executable to the release
+      - name: Build the portable folder
+        run: python -m PyInstaller --noconfirm --clean hex2pix_onedir.spec
+
+      - name: Zip the portable folder
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/hex2pix-portable/hex2pix.exe)) {
+            throw "The portable folder build is missing its executable."
+          }
+          Compress-Archive -Path dist/hex2pix-portable -DestinationPath dist/hex2pix-portable.zip -Force
+
+      - name: Smoke-test both builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist/hex2pix-portable/hex2pix.exe --selftest
+          grep -q "RESULT: PASS" hex2pix-selftest.txt
+          rm -f hex2pix-selftest.txt
+          ./hex2pix.exe --selftest
+          grep -q "RESULT: PASS" hex2pix-selftest.txt
+          rm -f hex2pix-selftest.txt
+
+      - name: Attach the builds to the release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,13 +73,15 @@ jobs:
           set -euo pipefail
           tag="${{ github.ref_name }}"
           test -s dist/hex2pix.exe
+          test -s dist/hex2pix-portable.zip
           flags=(--title "hex2pix $tag" --generate-notes)
           if [[ "$tag" =~ [A-Za-z] ]]; then
             flags+=(--prerelease)
           fi
+          assets=(dist/hex2pix.exe dist/hex2pix-portable.zip)
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/hex2pix.exe --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "$tag" dist/hex2pix.exe "${flags[@]}"
+            gh release create "$tag" "${assets[@]}" "${flags[@]}"
           fi
           gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.size) bytes"'

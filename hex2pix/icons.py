@@ -35,6 +35,8 @@ ICON_FILES = {
 }
 
 ICON_SIZE = 16
+#: The H2P logo, used for the window, taskbar and executable icon.
+LOGO_FILE = "logoicon.bmp"
 #: Pixel size of the buttons in the tool palette; 2x keeps the art crisp.
 BUTTON_ICON_SIZE = 32
 BUTTON_SIZE = 36
@@ -51,4 +53,10 @@ def icon_path(tool, folder=None):
     if not name:
         return None
     path = os.path.join(folder or asset_dir(), name)
+    return path if os.path.isfile(path) else None
+
+
+def logo_path(folder=None):
+    """Path to the H2P logo bitmap, or None when it is missing."""
+    path = os.path.join(folder or asset_dir(), LOGO_FILE)
     return path if os.path.isfile(path) else None

@@ -30,8 +30,9 @@ keyboard is the primary instrument.
   user palettes, plus ordered and error-diffusion dithering.
 - **Projects, layers and formats** — layered `.h2p` projects and export to the
   common pixel-art formats.
-- **Single-file Windows build** — no Python installation is required for the
-  packaged executable.
+- **Packaged Windows build** — `hex2pix.exe` needs no Python installation,
+  and a portable folder ZIP covers machines whose antivirus blocks the
+  single file's temporary unpacking.
 - **Optional desktop extras** — automatic update checks in the packaged
   Windows build.
 
@@ -46,14 +47,33 @@ This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
 
 ## Quick start
 
-Download the latest `hex2pix.exe` from the
-[Releases page](https://github.com/Shagg097/hex2pixbeta/releases), or build it
-yourself, then run it directly:
+Download the latest release from the
+[Releases page](https://github.com/Shagg097/hex2pixbeta/releases) — either
+`hex2pix.exe` (single file) or `hex2pix-portable.zip` (folder build) — or build
+it yourself, then run it:
 
 ```text
 hex2pix.exe                 # start page: presets and recent documents
 hex2pix.exe art.bmp         # open an image in the editor
 ```
+
+### If the packaged executable does not start
+
+`hex2pix.exe` is a single-file build: on every start it unpacks its Python
+runtime into `%TEMP%\_MEIxxxxxx` and loads `python310.dll` from there. Some
+antivirus products quarantine or block that freshly written DLL, which appears
+as
+
+```text
+Failed to load Python DLL
+C:\Users\<you>\AppData\Local\Temp\_MEIxxxxxx\python310.dll
+```
+
+Use `hex2pix-portable.zip` from the same release instead. Unzip it anywhere you
+can write and run `hex2pix.exe` inside the folder: that build keeps its runtime
+DLLs on disk beside the executable and never extracts to `%TEMP%`. If you want
+to keep using the single file, adding an antivirus exclusion for it clears the
+same error.
 
 To run from source:
 
@@ -96,8 +116,9 @@ FF000080   -> half-transparent red
 ```
 
 Arrow keys move the pixel cursor; `Ctrl`+arrows move it eight pixels. Delete
-erases the pixel under the cursor. The canvas is a first-class keyboard editor,
-not a mouse-only surface with shortcuts bolted on.
+erases the pixel under the cursor, or every pixel inside the selection. Escape
+cancels whatever is in progress and then deselects. The canvas is a first-class
+keyboard editor, not a mouse-only surface with shortcuts bolted on.
 
 ### Paint with hex blocks
 
@@ -270,8 +291,9 @@ combining.
 
 Both views show the flattened result. The Dump tab, byte tools and Copy block
 work on the active layer. **New**, **Copy**, **Delete**, **Raise** and **Lower**
-manage the stack. `Ctrl+Shift+N` adds a layer; double-click a layer row to hide
-or show it.
+manage the stack. `Ctrl+Shift+N` adds a layer; drag a row to restack it,
+double-click to hide or show it, and `Alt+Up` / `Alt+Down` restack the active
+layer.
 
 ## Canvas and documents
 
@@ -408,7 +430,7 @@ controls than fit.
 | `Enter` | Apply color and paint, close a polygon, set a selection corner, or run a fill/shape tool |
 | `Backspace` | Delete a typed hex digit |
 | `G` | Pick the color under the cursor |
-| `Delete` | Erase the pixel under the cursor |
+| `Delete` | Erase the pixel under the cursor, or the pixels inside the selection |
 | `+` / `-` | Change brush size |
 | `[` / `]` | Zoom out / in |
 | `Space` | Swap foreground and background |
@@ -420,8 +442,9 @@ controls than fit.
 | `Ctrl+O` / `Ctrl+S` | Open / save |
 | `Ctrl+E` | Jump to the Export tab |
 | `Ctrl+Shift+N` | New layer |
+| `Alt+Up` / `Alt+Down` | Raise / lower the active layer |
 | `F5` / `F9` | Play / record a macro |
-| `F11` / `Escape` | Toggle fullscreen / leave it |
+| `F11` / `Escape` | Toggle fullscreen / leave it; `Escape` also deselects |
 | `F1` | Keyboard reference |
 
 A tool's exact shortcut and a one-line reminder appear when hovering its tile.

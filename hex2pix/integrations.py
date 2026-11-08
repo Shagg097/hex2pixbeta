@@ -44,6 +44,18 @@ def default_settings_path():
     return os.path.join(base, "hex2pix", "settings.json")
 
 
+def is_folder_build():
+    """True for the portable build, whose runtime sits in `_internal`.
+
+    The single-file build unpacks to a `_MEIxxxxxx` folder under %TEMP% instead,
+    so the executable's own folder has no `_internal` beside it.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.isdir(os.path.join(exe_dir, "_internal"))
+
+
 class SettingsStore(object):
     """Small JSON settings file for optional update checks."""
 
@@ -395,6 +407,9 @@ def apply_update(downloaded, target=None, pid=None, restart=True):
     if not (getattr(sys, "frozen", False) and target == os.path.abspath(
             sys.executable)):
         raise UpdateError("Automatic installation requires the packaged build.")
+    if is_folder_build():
+        raise UpdateError("This is the portable folder build. Replace the "
+                          "folder with hex2pix-portable.zip instead.")
     pid = int(pid or os.getpid())
     folder = tempfile.mkdtemp(prefix="hex2pix-install-")
     log = os.path.join(folder, "apply-update.log")

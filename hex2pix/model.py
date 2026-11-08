@@ -1443,6 +1443,19 @@ class Document(object):
         self.layer_index = target
         return True
 
+    def reorder_layer(self, target, index=None):
+        """Move a layer to another slot in the stack."""
+        index = self.layer_index if index is None else int(index)
+        target = int(target)
+        if (index == target or index < 0 or index >= self.layer_count
+                or target < 0 or target >= self.layer_count):
+            return False
+        layer = self.layers.pop(index)
+        self.layers.insert(target, layer)
+        if index == self.layer_index:
+            self.layer_index = target
+        return True
+
     def transform_all(self, func):
         """Apply a bitmap transform (flip, rotate, resize) to every layer."""
         for layer in self.layers:

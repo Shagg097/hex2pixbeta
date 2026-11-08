@@ -53,3 +53,22 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Built hex2pix.exe
+echo Building the portable folder (no extraction to TEMP) ...
+%PY% -m PyInstaller --noconfirm --clean hex2pix_onedir.spec
+if errorlevel 1 (
+    echo Portable build failed.
+    exit /b 1
+)
+if not exist "dist\hex2pix-portable\hex2pix.exe" (
+    echo The portable build is missing dist\hex2pix-portable\hex2pix.exe.
+    exit /b 1
+)
+pushd dist
+%PY% -m zipfile -c hex2pix-portable.zip hex2pix-portable
+if errorlevel 1 (
+    popd
+    echo Built the portable folder, but dist\hex2pix-portable.zip could not be created.
+    exit /b 1
+)
+popd
+echo Built hex2pix.exe and dist\hex2pix-portable.zip

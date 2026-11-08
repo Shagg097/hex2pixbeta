@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 
@@ -134,6 +135,40 @@ class DownloadTests(unittest.TestCase):
             integrations.download_update(release, self.path,
                                          opener=FakeOpener(body))
         self.assertFalse(os.path.exists(self.path))
+
+
+class FolderBuildTests(unittest.TestCase):
+    def test_not_frozen_is_never_a_folder_build(self):
+        had_frozen = hasattr(sys, "frozen")
+        old_frozen = getattr(sys, "frozen", None)
+        if had_frozen:
+            del sys.frozen
+        try:
+            self.assertFalse(integrations.is_folder_build())
+        finally:
+            if had_frozen:
+                sys.frozen = old_frozen
+
+    def test_internal_folder_marks_the_portable_build(self):
+        folder = tempfile.mkdtemp(prefix="hex2pix-folder-test-")
+        exe = os.path.join(folder, "hex2pix.exe")
+        with open(exe, "wb") as handle:
+            handle.write(b"MZ")
+        had_frozen = hasattr(sys, "frozen")
+        old_frozen = getattr(sys, "frozen", None)
+        old_executable = sys.executable
+        sys.frozen = True
+        sys.executable = exe
+        try:
+            self.assertFalse(integrations.is_folder_build())
+            os.makedirs(os.path.join(folder, "_internal"))
+            self.assertTrue(integrations.is_folder_build())
+        finally:
+            if had_frozen:
+                sys.frozen = old_frozen
+            else:
+                del sys.frozen
+            sys.executable = old_executable
 
 
 class SettingsTests(unittest.TestCase):
