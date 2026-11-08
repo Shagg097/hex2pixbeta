@@ -41,10 +41,10 @@ jobs:
         run: python -m unittest discover -s hex2pix/tests -t .
 
       - name: Build hex2pix.exe
-        run: python -m PyInstaller --noconfirm --clean hex2pix.spec
+        run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix.spec
 
       - name: Build the portable folder
-        run: python -m PyInstaller --noconfirm --clean hex2pix_onedir.spec
+        run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix_onedir.spec
 
       - name: Zip the portable folder
         shell: pwsh
@@ -61,7 +61,7 @@ jobs:
           dist/hex2pix-portable/hex2pix.exe --selftest
           grep -q "RESULT: PASS" hex2pix-selftest.txt
           rm -f hex2pix-selftest.txt
-          ./hex2pix.exe --selftest
+          dist/hex2pix.exe --selftest
           grep -q "RESULT: PASS" hex2pix-selftest.txt
           rm -f hex2pix-selftest.txt
 
