@@ -7,11 +7,6 @@ build/
 dist/
 *.spec.bak
 
-# Built executables (rebuilt with build_exe.cmd; published as GitHub Release
-# assets instead of being committed)
-hex2pix.exe
-*.exe
-
 # Local experimental work, kept out of main
 experimental/
 
