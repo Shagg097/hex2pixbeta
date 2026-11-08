@@ -37,6 +37,21 @@ selection help and this manual. **File > Home** returns to the page at any
 time, and **Continue** goes straight back to the editor. Passing a file on the
 command line skips the page and opens that image.
 
+## Automatic updates
+
+The update check is optional and uses only the Python standard library.
+
+Packaged Windows builds check GitHub Releases after launch; **Help > Check for
+updates...** checks immediately and **Check for updates automatically**
+toggles the startup check. A newer release asks first, then downloads with a
+size check and the SHA-256 digest published by GitHub. After the editor closes,
+a helper replaces `hex2pix.exe` and restarts it. Stable installs ignore
+prereleases; prerelease installs may receive them. The folder must be writable
+(portable installs are fine, `Program Files` is not). Source checkouts do not
+self-replace and instead offer the release page. Attach the built
+`hex2pix.exe` to a GitHub Release (with a version tag such as `v1.3.0b1`) for
+that release to be installable.
+
 ## Canvas setup
 
 **File > New canvas...** opens a dialog in the spirit of GIMP's: a preset list
@@ -501,9 +516,10 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 341 tests over the model, the canvas, formats, colours,
-palettes, patterns, dithering and macros. The second runs those plus a headless
-GUI pass that builds the window and exercises painting, erasing, byte and wand
+The first command runs 350 tests over the model, the canvas, formats, colours,
+palettes, patterns, dithering, macros and update checks. The second runs those
+plus a headless GUI pass that builds the window and exercises painting, erasing,
+byte and wand
 selections, canvas resizing, undo, home/recent navigation, pattern fills,
 fullscreen, dark/light theming, all docker toggles and the shape/mouse helpers;
 it writes `hex2pix-selftest.txt`. The same command is available in the frozen
@@ -516,4 +532,6 @@ executable: `hex2pix.exe --selftest`.
   a 512x512 image, fewer for larger).
 * Selections are hard-edged byte masks; there is no feathering or anti-aliasing.
 * Brush tips are square or circle; there are no custom brush stamps.
+* Automatic updates only replace the packaged Windows executable and need write
+  access to its folder.
 * Canvases are capped at 8192 pixels per side.

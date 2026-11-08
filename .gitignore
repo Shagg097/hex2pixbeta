@@ -10,6 +10,9 @@ dist/
 # Built executable (rebuilt with build_exe.cmd)
 hex2pix.exe
 
+# Local experimental work, kept out of main
+experimental/
+
 # Editor and OS noise
 .vscode/
 .idea/

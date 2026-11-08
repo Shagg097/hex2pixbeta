@@ -10,15 +10,20 @@ import io
 import json
 import math
 import os
+import queue
 import sys
 import tempfile
+import threading
 import tkinter as tk
+import webbrowser
 from tkinter import (colorchooser, filedialog, font as tkfont, messagebox,
                      simpledialog, ttk)
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import __version__, dither, filters, formats, icons
+from .integrations import (GITHUB_REPOSITORY, SettingsStore, UpdateError,
+                           apply_update, check_for_update, download_update)
 from .macro import Macro, Recorder
 from .palette import (MAX_PALETTE_COLORS, PALETTE_FILETYPES, PALETTES,
                       format_palette, make_palette, parse_palette,
@@ -693,8 +698,15 @@ class PaletteDialog(tk.Toplevel):
 class hex2pixApp(tk.Tk):
     """The editor window."""
 
-    def __init__(self, document=None, recent_path=None, show_home=True):
+    def __init__(self, document=None, recent_path=None, show_home=True,
+                 settings_path=None):
         super().__init__()
+        self.settings = SettingsStore(settings_path)
+        self._update_results = queue.Queue()
+        self._update_thread = None
+        self._update_busy = False
+        self._closing = False
+        self._destroyed = False
         self.doc = document or Document(64, 64)
         self.recent_files = RecentStore(recent_path)
         self.home_visible = False
@@ -776,6 +788,8 @@ class hex2pixApp(tk.Tk):
         self._saved_geometry = None
         self.dark_mode = True
         self.colors = THEMES["dark"]
+        self.update_auto_var = tk.BooleanVar(
+            value=bool(self.settings.get("check_updates", True)))
         self.docker_vars = {}
         self.docker_tabs = {}
         self.docker_labels = {}
@@ -828,6 +842,7 @@ class hex2pixApp(tk.Tk):
             self.show_home()
         else:
             self.show_editor()
+        self.after(500, self._start_integrations)
 
     # ------------------------------------------------------------------ layout
     def _polish_style(self):
@@ -1227,6 +1242,13 @@ class hex2pixApp(tk.Tk):
                               command=self.show_help)
         help_menu.add_command(label="Byte selection help",
                               command=self.show_selection_help)
+        help_menu.add_separator()
+        help_menu.add_command(label="Check for updates...",
+                              command=lambda: self.check_for_updates(True))
+        help_menu.add_checkbutton(
+            label="Check for updates automatically",
+            variable=self.update_auto_var,
+            command=self._update_auto_changed)
         bar.add_cascade(label="Help", menu=help_menu)
 
         self.config(menu=bar)
@@ -5237,6 +5259,133 @@ class hex2pixApp(tk.Tk):
             return
         messagebox.showerror("hex2pix", message, parent=self)
 
+    # ------------------------------------------------------------ integrations
+    def _start_integrations(self):
+        if self._closing or self.silent:
+            return
+        if (self.settings.get("check_updates")
+                and bool(getattr(sys, "frozen", False))):
+            self.after(2500, self._auto_check_updates)
+
+    def _auto_check_updates(self):
+        if (not self._closing and self.settings.get("check_updates")
+                and bool(getattr(sys, "frozen", False))):
+            self.check_for_updates(False)
+
+    def _update_auto_changed(self):
+        self.settings.set("check_updates", bool(self.update_auto_var.get()))
+
+    def check_for_updates(self, manual=True):
+        if self._closing:
+            return
+        if self._update_busy:
+            if manual and not self.silent:
+                messagebox.showinfo("Updates",
+                                    "An update check is already running.",
+                                    parent=self)
+            return
+        self._update_busy = True
+        self._update_thread = threading.Thread(
+            target=self._check_update_worker, args=(bool(manual),),
+            name="hex2pix-update-check", daemon=True)
+        self._update_thread.start()
+        self.after(100, self._poll_update_results)
+
+    def _check_update_worker(self, manual):
+        try:
+            release = check_for_update(__version__, GITHUB_REPOSITORY)
+        except Exception as exc:  # noqa: BLE001 - shown by the UI thread
+            self._update_results.put(("check", manual, None, str(exc), None))
+        else:
+            self._update_results.put(("check", manual, release, None, None))
+
+    def _poll_update_results(self):
+        if self._closing:
+            return
+        while True:
+            try:
+                result = self._update_results.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_update_result(result)
+        if self._update_busy and not self._closing:
+            self.after(100, self._poll_update_results)
+
+    def _handle_update_result(self, result):
+        kind, manual, release, error, path = result
+        self._update_busy = False
+        if error:
+            if manual and not self.silent:
+                messagebox.showerror("Updates", error, parent=self)
+            return
+        if kind == "check":
+            if release is None:
+                if manual and not self.silent:
+                    messagebox.showinfo(
+                        "Updates", "hex2pix %s is up to date." % __version__,
+                        parent=self)
+                return
+            if not bool(getattr(sys, "frozen", False)):
+                if manual and not self.silent:
+                    if messagebox.askyesno(
+                            "Update available",
+                            "hex2pix %s is available.\n\n"
+                            "Automatic installation works in the packaged "
+                            "Windows build. Open the release page?"
+                            % release.version, parent=self):
+                        webbrowser.open(release.page_url)
+                return
+            if self.silent:
+                return
+            if messagebox.askyesno(
+                    "Update available",
+                    "hex2pix %s is available. Download and install it now?\n\n"
+                    "hex2pix will close, replace the executable, and restart."
+                    % release.version, parent=self):
+                self._download_update(release)
+            return
+        if kind == "download":
+            if error:
+                if not self.silent:
+                    messagebox.showerror("Update failed", error, parent=self)
+                return
+            if self.silent:
+                return
+            try:
+                apply_update(path, sys.executable, os.getpid())
+            except UpdateError as exc:
+                messagebox.showerror("Update failed", str(exc), parent=self)
+                return
+            self.destroy()
+
+    def _download_update(self, release):
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self._update_thread = threading.Thread(
+            target=self._download_update_worker, args=(release,),
+            name="hex2pix-update-download", daemon=True)
+        self._update_thread.start()
+
+    def _download_update_worker(self, release):
+        try:
+            path = download_update(release)
+        except Exception as exc:  # noqa: BLE001 - shown by the UI thread
+            self._update_results.put(("download", True, release, str(exc),
+                                      None))
+        else:
+            self._update_results.put(("download", True, release, None, path))
+
+    def destroy(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
+        self._closing = True
+        try:
+            super().destroy()
+        except tk.TclError:
+            pass
+
     # ------------------------------------------------------------------- help
     def show_help(self):
         messagebox.showinfo(
@@ -5284,6 +5433,7 @@ class hex2pixApp(tk.Tk):
             "Palette         New/Set/Del build one; Map quantizes to it\n"
             "Dark mode       View > Dark mode; on by default\n"
             "Dockers         View menu hides or shows right-side tabs\n"
+            "Help menu       GitHub update checks\n"
             "Shift+T         move / scale / rotate selection: drag to move,\n"
             "                Shift+drag scales, Ctrl+drag rotates in 15 deg\n"
             "                steps, Enter moves it to the cursor\n"
@@ -5737,8 +5887,8 @@ def run_selftest(out_path=None):
 
     from .tests import (test_bitmapfont, test_canvas, test_dither,
                         test_effects, test_filters, test_formats, test_icons,
-                        test_macro, test_model, test_palette, test_pattern,
-                        test_project, test_shapes)
+                        test_integrations, test_macro, test_model,
+                        test_palette, test_pattern, test_project, test_shapes)
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([
@@ -5755,6 +5905,7 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_filters),
         loader.loadTestsFromModule(test_project),
         loader.loadTestsFromModule(test_icons),
+        loader.loadTestsFromModule(test_integrations),
     ])
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)
@@ -5769,8 +5920,10 @@ def run_selftest(out_path=None):
     temp_dir = tempfile.mkdtemp(prefix="hex2pix-selftest-")
     gui_ok = False
     try:
-        app = hex2pixApp(Document(16, 16),
-                          recent_path=os.path.join(temp_dir, "recent.json"))
+        app = hex2pixApp(
+            Document(16, 16),
+            recent_path=os.path.join(temp_dir, "recent.json"),
+            settings_path=os.path.join(temp_dir, "settings.json"))
         app.withdraw()
         app.silent = True
         app.show_editor()
