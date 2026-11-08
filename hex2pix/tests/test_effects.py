@@ -198,6 +198,75 @@ class SprayTest(unittest.TestCase):
         self.assertEqual(painted, 21)
         self.assertEqual(bitmap.rgba(10, 1), GREEN)
 
+    def test_zero_blur_paints_flat_colour(self):
+        bitmap = Bitmap(9, 9)
+        painted = spray_area(bitmap, None, 4, 4, 3, 100, RED, "square",
+                             rng=random.Random(1), blur=0)
+        self.assertEqual(painted, 9)
+        for y in range(3, 6):
+            for x in range(3, 6):
+                self.assertEqual(bitmap.rgba(x, y), RED)
+
+    def test_blur_feathers_the_spray_rim(self):
+        bitmap = Bitmap(9, 9)
+        spray_area(bitmap, None, 4, 4, 5, 100, RED, "square",
+                   rng=random.Random(1), blur=100)
+        self.assertEqual(bitmap.rgba(4, 4), RED)
+        edge = bitmap.rgba(2, 4)
+        self.assertGreater(edge[3], 0)
+        self.assertLess(edge[3], 255)
+        self.assertGreater(edge[0], 0)
+        self.assertEqual(edge[1:3], (0, 0))
+
+    def test_blur_fades_into_the_pixels_underneath(self):
+        bitmap = Bitmap(9, 9)
+        bitmap.fill(BLUE)
+        spray_area(bitmap, None, 4, 4, 3, 100, WHITE, "square",
+                   rng=random.Random(1), blur=100)
+        self.assertEqual(bitmap.rgba(4, 4), WHITE)
+        edge = bitmap.rgba(3, 3)
+        self.assertNotEqual(edge, WHITE)
+        self.assertNotEqual(edge, BLUE)
+        self.assertEqual(edge[3], 255)
+
+    def test_blur_still_respects_flow_and_mask(self):
+        bitmap = Bitmap(9, 9)
+        mask = bytearray(81)
+        self.assertEqual(spray_area(bitmap, mask, 4, 4, 3, 100, RED, "square",
+                                    blur=50), 0)
+        self.assertEqual(spray_area(bitmap, None, 4, 4, 3, 0, RED, "square",
+                                    blur=50), 0)
+
+    def test_multicolor_picks_from_the_palette(self):
+        bitmap = Bitmap(16, 16)
+        palette = [RED, GREEN, BLUE]
+        painted = spray_area(bitmap, None, 8, 8, 8, 100, WHITE, "square",
+                             rng=random.Random(2), colors=palette)
+        self.assertEqual(painted, 64)
+        cells = [bitmap.rgba(x, y) for y in range(16) for x in range(16)]
+        used = {color for color in cells if color[3]}
+        self.assertEqual(len([color for color in cells if color[3]]), 64)
+        self.assertTrue(used <= set(palette), used)
+        self.assertGreater(len(used), 1)
+
+    def test_multicolor_stroke_keeps_to_the_palette(self):
+        bitmap = Bitmap(21, 3)
+        palette = [RED, BLUE]
+        spray_stroke(bitmap, None, 0, 1, 20, 1, 3, 100, WHITE, "square",
+                     rng=random.Random(3), colors=palette)
+        used = {bitmap.rgba(x, y) for y in range(3) for x in range(21)}
+        self.assertTrue(used <= set(palette), used)
+
+    def test_blur_combines_with_multicolor(self):
+        bitmap = Bitmap(9, 9)
+        palette = [RED, BLUE]
+        spray_area(bitmap, None, 4, 4, 3, 100, WHITE, "square",
+                   rng=random.Random(2), blur=100, colors=palette)
+        self.assertIn(bitmap.rgba(4, 4), palette)
+        used = {bitmap.rgba(x, y) for y in range(9) for x in range(9)
+                if bitmap.rgba(x, y)[3]}
+        self.assertNotIn(WHITE, used)
+
 
 def block():
     solid = bytearray(25)

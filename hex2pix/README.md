@@ -63,20 +63,22 @@ always shows the current canvas as `WxH @ ppi ppi MODE`.
 
 ## Views
 
-The canvas opens in **hex code view**: every pixel is drawn as its own hex
-code, in its own color. Opaque pixels read `RRGGBB`; partly transparent pixels
-read `RRGGBBAA`; fully transparent pixels show `......`. Selected pixels get a
-tinted cell so byte selections stay visible in this view too. Codes too dark to
-read are lightened just enough to be legible.
+The canvas opens in **pixel view**, so the rendered artwork is what you see
+first: transparent pixels on the checkerboard, the pixel grid, and every
+selection overlay drawn over the image. **View > Hex code view**, the
+**Pixel / Hex** radios in the left panel, or the **H** key switch to the hex
+view, where every pixel is drawn as its own hex code in its own color. Opaque
+pixels read `RRGGBB`; partly transparent pixels read `RRGGBBAA`; fully
+transparent pixels show `......`. Selected pixels get a tinted cell so byte
+selections stay visible there too, and codes too dark to read are lightened
+just enough to be legible.
 
-Only the visible cells are drawn, so this grid stays responsive on large
+Only the visible cells are drawn, so the hex grid stays responsive on large
 canvases instead of being flattened into one enormous picture.
 
-Toggle to the rendered artwork with **View > Result image**, the **Hex / Image**
-radios in the left panel, or the **H** key. In hex view `[` `]` and the wheel
-change the code font size (6–22 pt); in image view they zoom the artwork, and
-the pixel grid and checkerboard apply there. Tools, the cursor and every
-selection work identically in both views.
+In pixel view `[` `]` and the wheel zoom the artwork; in hex view they change
+the code font size (6–22 pt). Tools, the cursor and every selection work
+identically in both views.
 
 **F11** toggles borderless fullscreen and **Escape** leaves it, restoring the
 previous window geometry. The tool column scrolls on its own when the window
@@ -162,6 +164,11 @@ selection mask, so each one can be confined to a region:
   every pixel of the tip is painted with **Flow**% probability, and holding the
   button keeps spraying at the cursor, so passes build up like a real
   airbrush. Dragging sprays along the stroke; the whole press is one undo step.
+  **Blur** is a 0-100 slider that softens the spray itself: at `0` every dot is
+  flat colour, and higher values fade the outer pixels of the tip into whatever
+  is already underneath, so the spray gets a soft feathered rim. **Multicolor**
+  draws each sprayed pixel from the current palette instead of the foreground
+  colour, and works together with Blur.
 - **Curve** (Shift+C) drags a curve between two points. **Bend** pushes the
   middle sideways by a percentage of half the chord: `0` is a straight line,
   `100` arcs half the chord out, negative bends the other way. **Vectors**
@@ -313,6 +320,17 @@ Both views show the flattened result once there is more than one layer; the
 layer, which is the one tools edit and type hex into. **New**, **Copy**,
 **Delete**, **Raise** and **Lower** manage the stack, `Ctrl+Shift+N` adds a
 layer, and double-clicking a layer row shows or hides that layer.
+
+## Tool palette
+
+The left column shows every tool as an icon tile, six rows of four, in the same
+order as the menus. Hover a tile for its name, shortcut and a one-line
+reminder; click or press `Shift` plus its letter to pick it. The active tile is
+blue, and the status bar always names the current tool. The artwork lives in
+`hex2pix/assets/` as 16x16 BMPs (`pencilbtn.bmp`, `lassobtn.bmp`, ...; the
+Line pattern tile is `linebylinebtn.bmp` and Structure fill is
+`paternbtn.bmp`), so a tile can be redrawn without touching code; a tool
+without artwork falls back to a text button.
 
 ## Tool options
 

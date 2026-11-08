@@ -5,7 +5,7 @@ a = Analysis(
     ['run_hex2pix.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('hex2pix\\README.md', 'hex2pix')],
+    datas=[('hex2pix\\README.md', 'hex2pix'), ('hex2pix\\assets', 'hex2pix\\assets')],
     hiddenimports=['PIL._tkinter_finder'],
     hookspath=[],
     hooksconfig={},

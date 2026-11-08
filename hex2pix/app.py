@@ -16,7 +16,7 @@ from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from . import __version__, dither, filters, formats
+from . import __version__, dither, filters, formats, icons
 from .macro import Macro, Recorder
 from .palette import PALETTES, format_gpl, parse_gpl, preset_colors
 from .pattern import PatternSpec, apply_pattern, block_from_grid
@@ -106,6 +106,42 @@ class _KeyEvent(object):
         self.keysym = keysym
         self.char = char
         self.state = int(state)
+
+
+class _ToolTip(object):
+    """A hover label, since the tool palette is icon-only."""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def show(self, event=None):
+        if self.tip is not None:
+            return
+        try:
+            x = self.widget.winfo_rootx() + self.widget.winfo_width() + 6
+            y = self.widget.winfo_rooty() - 2
+            tip = tk.Toplevel(self.widget)
+        except tk.TclError:
+            return
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry("+%d+%d" % (x, y))
+        tk.Label(tip, text=self.text, justify="left", background="#ffffe0",
+                 relief="solid", borderwidth=1, font=("Segoe UI", 8),
+                 padx=4, pady=1).pack()
+        self.tip = tip
+
+    def hide(self, event=None):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
 
 
 HOME_BG = "#1b1b1f"
@@ -359,12 +395,12 @@ class hex2pixApp(tk.Tk):
         self.brush = 1
         self.zoom = 8
         self.grid = True
-        self.view_mode = "hex"
+        self.view_mode = "image"
         self.hex_font = 9
         self.hex_font_obj = tkfont.Font(family="Consolas", size=self.hex_font)
         self.hex_cell = (72, 18)
         self.hex_pad = 3
-        self.view_mode_var = tk.StringVar(value="hex")
+        self.view_mode_var = tk.StringVar(value="image")
         self._update_hex_metrics()
         self.tolerance = 0
         self.cursor = (0, 0)
@@ -430,13 +466,22 @@ class hex2pixApp(tk.Tk):
         self.title("hex2pix")
         self.geometry("1200x780")
         self.minsize(940, 620)
-        self.configure(bg="#232326")
+        self.configure(bg="#e9ecf2")
+        self._polish_style()
 
         self._build_menus()
         self.status = tk.StringVar(value="")
-        status = ttk.Label(self, textvariable=self.status, anchor="w",
-                           relief="sunken", padding=(6, 2))
-        status.pack(side="bottom", fill="x")
+        status_bar = tk.Frame(self, bg="#2b2f37")
+        status_bar.pack(side="bottom", fill="x")
+        status = tk.Label(status_bar, textvariable=self.status, anchor="w",
+                          bg="#2b2f37", fg="#e7ebf2", padx=10, pady=4,
+                          font=("Segoe UI", 9))
+        status.pack(side="left", fill="x", expand=True)
+        tk.Label(status_bar,
+                 text="Wheel zoom  \u00b7  Space swap  \u00b7  "
+                      "Shift+letter tools  \u00b7  F1 keys",
+                 bg="#2b2f37", fg="#8f98a6", padx=10,
+                 font=("Segoe UI", 8)).pack(side="right")
 
         self.container = ttk.Frame(self)
         self.container.pack(side="top", fill="both", expand=True)
@@ -459,6 +504,18 @@ class hex2pixApp(tk.Tk):
             self.show_editor()
 
     # ------------------------------------------------------------------ layout
+    def _polish_style(self):
+        """A little breathing room and consistent weights across widgets."""
+        style = ttk.Style(self)
+        try:
+            style.configure("TNotebook.Tab", padding=(11, 5))
+            style.configure("TButton", padding=(6, 3))
+            style.configure("TEntry", padding=2)
+            style.configure("TSpinbox", padding=1)
+            style.configure("TCombobox", padding=1)
+        except tk.TclError:
+            pass
+
     def _build_menus(self):
         bar = tk.Menu(self)
 
@@ -551,10 +608,10 @@ class hex2pixApp(tk.Tk):
         bar.add_cascade(label="Layer", menu=layer_menu)
 
         view_menu = tk.Menu(bar, tearoff=0)
-        view_menu.add_radiobutton(label="Hex code view", value="hex",
+        view_menu.add_radiobutton(label="Pixel view", value="image",
                                   variable=self.view_mode_var,
                                   command=self.set_view_mode)
-        view_menu.add_radiobutton(label="Result image", value="image",
+        view_menu.add_radiobutton(label="Hex code view", value="hex",
                                   variable=self.view_mode_var,
                                   command=self.set_view_mode)
         view_menu.add_separator()
@@ -607,28 +664,34 @@ class hex2pixApp(tk.Tk):
         self.left_canvas.configure(yscrollcommand=bar.set)
         self.left_canvas.pack(side="left", fill="y")
         bar.pack(side="right", fill="y")
-        left = ttk.Frame(self.left_canvas, padding=(6, 6))
+        left = ttk.Frame(self.left_canvas, padding=(10, 10))
         self.left_inner = left
         self.left_window = self.left_canvas.create_window((0, 0), window=left,
                                                           anchor="nw")
         left.bind("<Configure>",
                   lambda event: self._update_left_scrollregion())
 
-        ttk.Label(left, text="Tools", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self._heading(left, "Tools")
         self.tool_var = tk.StringVar(value=self.tool)
-        for name, label, key, tip in TOOLS:
-            row = ttk.Frame(left)
-            row.pack(fill="x", pady=1)
-            button = ttk.Radiobutton(row, text=label, value=name,
-                                     variable=self.tool_var,
-                                     command=lambda n=name: self.set_tool(n))
-            button.pack(side="left", fill="x", expand=True)
-            ttk.Label(row, text="Shift+" + key.upper(),
-                      foreground="#777").pack(side="right")
+        self.tool_buttons = {}
+        self.tool_icons = {}
+        self._tool_tips = []
+        card = tk.Frame(left, bg="#ffffff", highlightthickness=1,
+                        highlightbackground="#d9dde5", bd=0, padx=3, pady=3)
+        card.pack(anchor="w", pady=(2, 0))
+        grid = ttk.Frame(card)
+        grid.pack(anchor="w")
+        for index, (name, label, key, tip) in enumerate(TOOLS):
+            button = self._build_tool_button(grid, name, label, key, tip)
+            button.grid(row=index // 4, column=index % 4, padx=1, pady=1)
+            self.tool_buttons[name] = button
+        ttk.Label(left, text="Hover a tool for its name; Shift+letter picks it",
+                  foreground="#777", wraplength=190).pack(anchor="w", pady=(2, 0))
+        self.refresh_tool_buttons()
 
         ttk.Separator(left).pack(fill="x", pady=6)
 
-        ttk.Label(left, text="Colors", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self._heading(left, "Colors")
         swatches = ttk.Frame(left)
         swatches.pack(anchor="w", pady=2)
         self.fg_swatch = tk.Canvas(swatches, width=42, height=42,
@@ -709,10 +772,10 @@ class hex2pixApp(tk.Tk):
         view_row = ttk.Frame(left)
         view_row.pack(fill="x", pady=(4, 0))
         ttk.Label(view_row, text="View").pack(side="left")
-        ttk.Radiobutton(view_row, text="Hex", value="hex",
+        ttk.Radiobutton(view_row, text="Pixel", value="image",
                         variable=self.view_mode_var,
                         command=self.set_view_mode).pack(side="right")
-        ttk.Radiobutton(view_row, text="Image", value="image",
+        ttk.Radiobutton(view_row, text="Hex", value="hex",
                         variable=self.view_mode_var,
                         command=self.set_view_mode).pack(side="right")
 
@@ -725,13 +788,12 @@ class hex2pixApp(tk.Tk):
                     command=self.apply_tolerance).pack(side="right")
 
         ttk.Separator(left).pack(fill="x", pady=6)
-        ttk.Label(left, text="Recent", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self._heading(left, "Recent")
         self.recent_frame = ttk.Frame(left)
         self.recent_frame.pack(anchor="w", pady=2)
 
         ttk.Separator(left).pack(fill="x", pady=6)
-        ttk.Label(left, text="Palette",
-                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self._heading(left, "Palette")
         self.palette_var = tk.StringVar(value="PICO-8")
         palette_combo = ttk.Combobox(left, values=list(PALETTES),
                                      state="readonly", width=14,
@@ -752,8 +814,7 @@ class hex2pixApp(tk.Tk):
         self.draw_palette()
 
         ttk.Separator(left).pack(fill="x", pady=6)
-        ttk.Label(left, text="Macro", font=("Segoe UI", 9, "bold")).pack(
-            anchor="w")
+        self._heading(left, "Macro")
         self.macro_info = tk.StringVar(value="no recording")
         ttk.Label(left, textvariable=self.macro_info, foreground="#ffb86b",
                   wraplength=190).pack(anchor="w", pady=(0, 2))
@@ -769,6 +830,61 @@ class hex2pixApp(tk.Tk):
                   foreground="#8ab4f8").pack(anchor="w", pady=(10, 0))
         self._update_left_scrollregion()
 
+    def _heading(self, parent, text):
+        """A small accent bar plus a bold heading, used down the sidebar."""
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", fill="x", pady=(2, 2))
+        tk.Frame(row, bg="#2f8fd0", width=3, height=14).pack(side="left")
+        ttk.Label(row, text=text, font=("Segoe UI", 9, "bold"),
+                  foreground="#2f3540").pack(side="left", padx=(6, 0))
+        return row
+
+    def _build_tool_button(self, parent, name, label, key, tip):
+        photo = self._load_tool_icon(name)
+        if photo is None:
+            return ttk.Button(parent, text=label, width=13,
+                              command=lambda: self.set_tool(name))
+        self.tool_icons[name] = photo
+        button = tk.Button(parent, image=photo, width=icons.BUTTON_SIZE,
+                           height=icons.BUTTON_SIZE, bd=1, padx=1, pady=1,
+                           relief="raised", background="#ffffff",
+                           activebackground="#eef4fb", highlightthickness=2,
+                           highlightbackground="#dbe0e8",
+                           command=lambda: self.set_tool(name))
+        self._tool_tips.append(_ToolTip(
+            button, "%s  (Shift+%s)\n%s" % (label, key.upper(), tip)))
+        return button
+
+    def _load_tool_icon(self, name):
+        path = icons.icon_path(name)
+        if not path:
+            return None
+        try:
+            with Image.open(path) as image:
+                art = image.convert("RGBA").resize(
+                    (icons.BUTTON_ICON_SIZE, icons.BUTTON_ICON_SIZE),
+                    Image.NEAREST)
+        except (OSError, ValueError):
+            return None
+        return ImageTk.PhotoImage(art)
+
+    def refresh_tool_buttons(self):
+        """Show the active tool on the icon palette."""
+        for name, button in getattr(self, "tool_buttons", {}).items():
+            active = name == self.tool
+            try:
+                if isinstance(button, tk.Button):
+                    button.configure(
+                        relief="sunken" if active else "raised",
+                        background="#bcdcff" if active else "#ffffff",
+                        activebackground="#a8d2ff" if active else "#eef4fb",
+                        highlightbackground=("#2f8fd0" if active
+                                             else "#dbe0e8"))
+                else:
+                    button.configure(relief="sunken" if active else "raised")
+            except tk.TclError:
+                return
+
     def _update_left_scrollregion(self):
         """Keep the tool column scrollable so no control is ever clipped."""
         try:
@@ -783,7 +899,7 @@ class hex2pixApp(tk.Tk):
             self.left_canvas.configure(scrollregion=box)
 
     def _build_right(self, parent):
-        right = ttk.Frame(parent, padding=(4, 6))
+        right = ttk.Frame(parent, padding=(8, 8))
         right.pack(side="right", fill="y")
         self.notebook = ttk.Notebook(right)
         self.notebook.pack(fill="both", expand=True)
@@ -1203,7 +1319,7 @@ class hex2pixApp(tk.Tk):
         frame.pack(side="left", fill="both", expand=True)
         frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
-        self.tool_options = ttk.Frame(frame, padding=(4, 3))
+        self.tool_options = ttk.Frame(frame, padding=(10, 6))
         self.tool_options.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.sel_mode_var = tk.StringVar(
             value=SEL_MODE_LABELS.get(self.sel_mode, "Replace"))
@@ -1232,11 +1348,15 @@ class hex2pixApp(tk.Tk):
         self.contour_width_var = tk.IntVar(value=1)
         self.contour_side_var = tk.StringVar(value="Outside")
         self.contour_connect_var = tk.StringVar(value="4")
+        self.air_blur_var = tk.DoubleVar(value=0.0)
+        self.air_blur_text = tk.StringVar(value="0%")
+        self.air_multi_var = tk.BooleanVar(value=False)
         self._airbrush_job = None
         self.blur_source = None
         self.tool_option_widgets = {}
         self._refresh_tool_options()
-        self.view = tk.Canvas(frame, bg="#17171a", highlightthickness=0, bd=0)
+        self.view = tk.Canvas(frame, bg="#20242b", highlightthickness=1,
+                              highlightbackground="#39404d", bd=0)
         vbar = ttk.Scrollbar(frame, orient="vertical", command=self.scroll_y)
         hbar = ttk.Scrollbar(frame, orient="horizontal", command=self.scroll_x)
         self.view.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
@@ -1257,7 +1377,7 @@ class hex2pixApp(tk.Tk):
         self.view.bind("<Button-2>", self.on_middle)
         self.view.bind("<B2-Motion>", self.on_middle_drag)
         self.view.bind("<ButtonRelease-2>", self.on_middle_release)
-        self.view.bind("<Configure>", lambda event: self.request_redraw())
+        self.view.bind("<Configure>", lambda event: self._on_view_configure())
 
     # ------------------------------------------------------------ tool options
     def _option_label(self, text, padx=(14, 2)):
@@ -1309,8 +1429,9 @@ class hex2pixApp(tk.Tk):
                   font=("Segoe UI", 9, "bold")).pack(side="left")
         labels = dict((name, label) for name, label, _, _ in TOOLS)
         name = labels.get(self.tool, self.tool)
-        ttk.Label(self.tool_options, text=name,
-                  foreground="#8ab4f8").pack(side="left", padx=(6, 0))
+        tk.Label(self.tool_options, text=name, bg="#3daee9", fg="#0e1116",
+                 font=("Segoe UI", 8, "bold"), padx=6, pady=1).pack(
+            side="left", padx=(6, 2))
         builder = getattr(self, "_options_" + self.tool, None)
         if builder is not None:
             builder()
@@ -1371,8 +1492,8 @@ class hex2pixApp(tk.Tk):
         self._option_label("Dither")
         self._option_combo(self.gradient_dither_var,
                            tuple(dither.DITHER_LABELS), 15)
-        self._option_label("Dither Bias/Strength/Scale come from the Dither "
-                           "tab", (10, 2))
+        self._option_label("Dither Bias / Strength / Scale: Dither tab",
+                           (10, 2))
 
     def _options_pattern(self):
         self._option_label("Grid")
@@ -1427,7 +1548,13 @@ class hex2pixApp(tk.Tk):
         self._option_label("%", (2, 2))
         self._option_label("Tip")
         self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
-        self._option_label("Hold to spray", (14, 2))
+        self._option_label("Blur")
+        ttk.Scale(self.tool_options, from_=0, to=100, length=90,
+                  variable=self.air_blur_var,
+                  command=self.airbrush_blur_changed).pack(side="left")
+        ttk.Label(self.tool_options, textvariable=self.air_blur_text,
+                  width=4).pack(side="left", padx=(2, 0))
+        self._option_check("Multicolor", self.air_multi_var)
 
     def _options_curve(self):
         self._option_label("Width")
@@ -1584,9 +1711,10 @@ class hex2pixApp(tk.Tk):
         photo = getattr(self, "_photo", None)
         if photo is None or photo.width() != cw or photo.height() != ch:
             self._photo = ImageTk.PhotoImage(image)
-            self.view.itemconfig(self.view_image, image=self._photo)
         else:
             photo.paste(image)
+        # Switching from hex clears the item, so re-attach it on every draw.
+        self.view.itemconfig(self.view_image, image=self._photo)
         self.view.coords(self.view_image, ox, oy)
 
     def _fit_scrollregion(self, width, height):
@@ -2046,7 +2174,8 @@ class hex2pixApp(tk.Tk):
             spray_stroke(self.doc.bitmap, self.doc.mask(),
                          previous[0], previous[1], x, y,
                          self.airbrush_size(), self.airbrush_flow(),
-                         self.fg, self.brush_shape(), self.symmetry)
+                         self.fg, self.brush_shape(), self.symmetry,
+                         **self.spray_options())
             self._mark_dirty(previous[0], previous[1], x, y,
                              self.airbrush_size() // 2 + 1)
             self.last_paint = (x, y)
@@ -2144,7 +2273,10 @@ class hex2pixApp(tk.Tk):
         self.view.itemconfig(self.view_image, image="")
         self.refresh_status()
         self.redraw()
-        self.center_on_cursor()
+        if self.view_mode == "image":
+            self.center_document()
+        else:
+            self.center_on_cursor()
 
     def toggle_view(self):
         self.set_view_mode("image" if self.view_mode == "hex" else "hex")
@@ -2191,6 +2323,7 @@ class hex2pixApp(tk.Tk):
         self.stop_airbrush()
         self.tool = name
         self.tool_var.set(name)
+        self.refresh_tool_buttons()
         self.poly_points = []
         self.lasso_points = []
         self.blur_source = None
@@ -2257,7 +2390,8 @@ class hex2pixApp(tk.Tk):
         """One airbrush pass over the brush footprint."""
         painted = spray_area(self.doc.bitmap, self.doc.mask(), x, y,
                              self.airbrush_size(), self.airbrush_flow(),
-                             self.fg, self.brush_shape(), self.symmetry)
+                             self.fg, self.brush_shape(), self.symmetry,
+                             **self.spray_options())
         self._mark_dirty(x, y, x, y, self.airbrush_size() // 2 + 1)
         self.request_redraw()
         return painted
@@ -3168,6 +3302,33 @@ class hex2pixApp(tk.Tk):
                                             (target_y - box[1]) / span_y)))
         self.request_redraw()
 
+    def center_document(self):
+        """Scroll so the whole artwork sits in the middle of the view."""
+        cell_w, cell_h = self.cell_size()
+        view_w = max(1, self.view.winfo_width())
+        view_h = max(1, self.view.winfo_height())
+        try:
+            x0, y0, x1, y1 = (float(value) for value in
+                              str(self.view.cget("scrollregion")).split())
+        except (ValueError, tk.TclError):
+            return
+        span_x = max(1.0, x1 - x0)
+        span_y = max(1.0, y1 - y0)
+        target_x = self.doc.width * cell_w / 2.0 - view_w / 2.0
+        target_y = self.doc.height * cell_h / 2.0 - view_h / 2.0
+        self.view.xview_moveto(max(0.0, min(1.0, (target_x - x0) / span_x)))
+        self.view.yview_moveto(max(0.0, min(1.0, (target_y - y0) / span_y)))
+        self.request_redraw()
+
+    def _on_view_configure(self):
+        self.request_redraw()
+        if not getattr(self, "_view_centred", False) \
+                and self.view.winfo_width() > 50:
+            self._view_centred = True
+            self.update_idletasks()
+            self.redraw()
+            self.center_document()
+
     def zoom_fit(self):
         if self.view_mode == "hex":
             self.hex_font = 9
@@ -3287,6 +3448,30 @@ class hex2pixApp(tk.Tk):
 
     def airbrush_flow(self):
         return _bounded(self.air_flow_var.get(), 1, 100, 25)
+
+    def spray_options(self):
+        """The Blur slider and Multicolor switch as spray_area keywords."""
+        options = {}
+        blur = self.airbrush_blur()
+        if blur:
+            options["blur"] = blur
+        if self.air_multi_var.get():
+            colors = [tuple(color) for color in getattr(self, "palette", [])
+                      if len(color) == 4]
+            options["colors"] = colors or [self.fg]
+        return options
+
+    def airbrush_blur(self):
+        try:
+            value = float(self.air_blur_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            return 0
+        return max(0, min(100, int(round(value))))
+
+    def airbrush_blur_changed(self, value=None):
+        text = getattr(self, "air_blur_text", None)
+        if text is not None:
+            text.set("%d%%" % self.airbrush_blur())
 
     def curve_bend(self):
         return _bounded(self.curve_bend_var.get(), -100, 100, 30)
@@ -4149,6 +4334,7 @@ class hex2pixApp(tk.Tk):
         x, y = self.cursor
         color = self.doc.bitmap.rgba(x, y)
         name = os.path.basename(self.doc.path) if self.doc.path else "untitled"
+        self.title("hex2pix \u2014 %s" % name)
         selection = self.doc.selection
         selected = ("%d px / %d B" % (selection.count(), selection.bytes_count())
                     if selection.active else "no selection")
@@ -4159,7 +4345,7 @@ class hex2pixApp(tk.Tk):
                      "+alpha" if self.doc.alpha else ""))
         view = (("hex view, font %d" % self.hex_font)
                 if self.view_mode == "hex"
-                else ("image view %s" % self.zoom_label()))
+                else ("pixel view %s" % self.zoom_label()))
         if self.view_mode == "hex" and self.doc.layer_count > 1:
             view = "hex view (result), font %d" % self.hex_font
         layer = self.doc.active_layer
@@ -4210,6 +4396,7 @@ class hex2pixApp(tk.Tk):
             "0-9 A-F         type a hex color (up to 8 digits)\n"
             "Backspace       delete a typed digit\n"
             "G               pick the color under the cursor\n"
+            "H               switch between pixel and hex views\n"
             "Del             erase the pixel under the cursor\n"
             "+ / -           brush size\n"
             "[ / ]           zoom out / in\n"
@@ -4220,7 +4407,9 @@ class hex2pixApp(tk.Tk):
             "Shift+B         blur: soften the pixels under the brush\n"
             "Shift+J         jumble: shuffle, scatter or noise the pixels\n"
             "Shift+X         text: click to stamp the Text option\n"
-            "Shift+A         airbrush: hold to spray the brush footprint\n"
+            "Shift+A         airbrush: hold to spray the brush footprint;\n"
+            "                Blur softens the spray edge, Multicolor uses\n"
+            "                the palette\n"
             "Shift+C         curve: Bend, Vectors (1-8) and Dir make an arc\n"
             "                or a wave (Dir Alternate flips each vector)\n"
             "Shift+G         contour: outline the selection or the artwork\n"
@@ -4684,9 +4873,9 @@ def run_selftest(out_path=None):
     import unittest
 
     from .tests import (test_bitmapfont, test_canvas, test_dither,
-                        test_effects, test_filters, test_formats, test_macro,
-                        test_model, test_palette, test_pattern, test_project,
-                        test_shapes)
+                        test_effects, test_filters, test_formats, test_icons,
+                        test_macro, test_model, test_palette, test_pattern,
+                        test_project, test_shapes)
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([
@@ -4702,6 +4891,7 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_dither),
         loader.loadTestsFromModule(test_filters),
         loader.loadTestsFromModule(test_project),
+        loader.loadTestsFromModule(test_icons),
     ])
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)
@@ -4722,8 +4912,13 @@ def run_selftest(out_path=None):
         app.silent = True
         app.show_editor()
         app.update_idletasks()
-        default_view_ok = (app.view_mode == "hex"
-                           and bool(app.view.find_withtag("hex")))
+        default_view_ok = (app.view_mode == "image"
+                           and getattr(app, "_photo", None) is not None
+                           and not app.view.find_withtag("hex")
+                           and str(app.view.itemcget(app.view_image,
+                                                     "image")) != "")
+        tool_palette_ok = (len(getattr(app, "tool_icons", {})) == len(TOOLS)
+                           and len(getattr(app, "tool_buttons", {})) == len(TOOLS))
 
         app.tool = "rect"
         app.sel_mode = "replace"
@@ -4828,7 +5023,9 @@ def run_selftest(out_path=None):
         app.update_idletasks()
         image_view_ok = (app.view_mode == "image"
                          and not app.view.find_withtag("hex")
-                         and app._photo is not None)
+                         and app._photo is not None
+                         and str(app.view.itemcget(app.view_image,
+                                                   "image")) != "")
         app.set_view_mode("hex")
         cell_w, cell_h = app.hex_cell
         offset_x = int(app.view.canvasx(0))
@@ -4980,6 +5177,7 @@ def run_selftest(out_path=None):
         manual_ok = manual_path() is not None
         app.destroy()
         gui_ok = all((rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
+                      tool_palette_ok,
                       erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                       undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
                       image_view_ok, cell_ok, hex_map_ok, home_ok, editor_ok,

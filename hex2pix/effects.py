@@ -151,13 +151,33 @@ def jumble_stroke(bitmap, mask, x0, y0, x1, y1, size=3, mode="shuffle",
     return written
 
 
+def _spray_pixel(bitmap, px, py, color, blur, radius, centers):
+    """Paint `color`, fading into the pixel underneath near the tip edge."""
+    if not blur:
+        _put(bitmap, px, py, color)
+        return
+    distance = min(((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+                   for cx, cy in centers)
+    feather = min(1.0, distance / radius)
+    mix = 1.0 - (blur / 100.0) * feather
+    base = bitmap.rgba(px, py)
+    _put(bitmap, px, py,
+         tuple(int(base[channel]
+                   + (color[channel] - base[channel]) * mix + 0.5)
+               for channel in range(4)))
+
+
 def spray_area(bitmap, mask, x, y, size=8, flow=25, color=(255, 255, 255,
                                                            255),
-               shape="circle", axes="", rng=None):
-    """Spray `color` inside the brush footprint; `flow` is a percentage.
+               shape="circle", axes="", rng=None, blur=0, colors=None):
+    """Spray inside the brush footprint; `flow` and `blur` are percentages.
 
     Every writable pixel of the footprint is painted with `flow`% probability,
     which is what makes an airbrush build up on the pixels it keeps hitting.
+    `colors` picks one of several colours per sprayed pixel instead of `color`.
+    `blur` feathers the rim of each dab: at 0 every hit is flat colour, and
+    higher values fade the outer pixels into whatever is already underneath,
+    so the spray gets a soft edge without becoming a different tool.
     """
     cells = _cells(bitmap, mask, x, y, size, shape, axes)
     if not cells:
@@ -166,24 +186,30 @@ def spray_area(bitmap, mask, x, y, size=8, flow=25, color=(255, 255, 255,
     if flow <= 0:
         return 0
     rng = rng if rng is not None else random.Random()
+    chosen = [cell for cell in cells if rng.random() * 100.0 < flow]
+    if not chosen:
+        return 0
+    blur = _count(blur, 0, 100, 0)
+    palette = [tuple(entry) for entry in colors] if colors else []
+    centers = list(mirror_points(x, y, bitmap.width, bitmap.height, axes))
+    radius = max(0.5, _count(size, 1, 64, 8) / 2.0)
     painted = 0
-    for px, py in cells:
-        if rng.random() * 100.0 >= flow:
-            continue
-        _put(bitmap, px, py, color)
+    for px, py in chosen:
+        picked = rng.choice(palette) if palette else color
+        _spray_pixel(bitmap, px, py, picked, blur, radius, centers)
         painted += 1
     return painted
 
 
 def spray_stroke(bitmap, mask, x0, y0, x1, y1, size=8, flow=25,
                  color=(255, 255, 255, 255), shape="circle", axes="",
-                 rng=None):
+                 rng=None, blur=False, colors=None):
     """Spray along a stroke between two points, mirrored."""
     rng = rng if rng is not None else random.Random()
     painted = 0
     for x, y in line_points(x0, y0, x1, y1):
         painted += spray_area(bitmap, mask, x, y, size, flow, color, shape,
-                              axes, rng)
+                              axes, rng, blur=blur, colors=colors)
     return painted
 
 

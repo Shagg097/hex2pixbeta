@@ -30,6 +30,7 @@ echo Building hex2pix.exe with %PY% ...
 %PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name hex2pix ^
     --paths . --hidden-import PIL._tkinter_finder ^
     --add-data "hex2pix\README.md;hex2pix" ^
+    --add-data "hex2pix\assets;hex2pix\assets" ^
     --exclude-module numpy --exclude-module PyQt5 ^
     run_hex2pix.py
 if errorlevel 1 (
