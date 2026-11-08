@@ -8,12 +8,17 @@
 #     Failed to load Python DLL ...\_MEIxxxxxx\python310.dll
 # This build keeps those DLLs on disk next to the executable, so nothing has
 # to be extracted and loaded from %TEMP% at all. Ship it as a ZIP.
+from pathlib import Path
+
+ROOT = Path(SPECPATH).parent
+ASSETS = ROOT / "hex2pix" / "assets"
 
 a = Analysis(
-    ['run_hex2pix.py'],
-    pathex=['.'],
+    [str(ROOT / "run_hex2pix.py")],
+    pathex=[str(ROOT)],
     binaries=[],
-    datas=[('hex2pix\\README.md', 'hex2pix'), ('hex2pix\\assets', 'hex2pix\\assets')],
+    datas=[(str(ROOT / "hex2pix" / "README.md"), "hex2pix"),
+           (str(ASSETS), "hex2pix/assets")],
     hiddenimports=['PIL._tkinter_finder'],
     hookspath=[],
     hooksconfig={},
@@ -42,7 +47,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='hex2pix\\assets\\logoicon.ico',
+    icon=str(ASSETS / "logoicon.ico"),
 )
 
 coll = COLLECT(

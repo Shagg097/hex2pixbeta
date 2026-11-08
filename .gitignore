@@ -10,6 +10,9 @@ dist/
 # Local experimental work, kept out of main
 experimental/
 
+# Report written by --selftest
+hex2pix-selftest.txt
+
 # Editor and OS noise
 .vscode/
 .idea/

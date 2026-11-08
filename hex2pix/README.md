@@ -501,19 +501,18 @@ own BMP parser too, so a file hex2pix wrote reopens with its alpha intact.
 ## Build the executable
 
 ```
-build_exe.cmd
+packaging\build_exe.cmd
 ```
 
-or directly:
+or call the specs directly from the repository root:
 
 ```
-py -3 -m PyInstaller --noconfirm --clean --onefile --windowed --name hex2pix ^
-    --paths . --hidden-import PIL._tkinter_finder ^
-    --add-data "hex2pix\README.md;hex2pix" run_hex2pix.py
+py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix.spec
+py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix_onedir.spec
 ```
 
 `dist\hex2pix.exe` is a single self-contained file; no Python install is
-needed on the target machine. `build_exe.cmd` also writes
+needed on the target machine. `packaging\build_exe.cmd` also writes
 `dist\hex2pix-portable.zip`: the same program as a folder that keeps its
 runtime DLLs beside the executable, which fixes a start-up failure of the
 single file that reads `Failed to load Python DLL`.

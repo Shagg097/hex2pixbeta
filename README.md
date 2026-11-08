@@ -456,15 +456,15 @@ The in-app **Manual** link opens the complete [hex2pix manual](hex2pix/README.md
 From the repository root:
 
 ```bash
-build_exe.cmd
+packaging\build_exe.cmd
 ```
 
-Or run PyInstaller directly:
+Or call the specs directly; they resolve the entry point, the packaged manual
+and the icon from the repository root:
 
 ```bash
-py -3 -m PyInstaller --noconfirm --clean --onefile --windowed --name hex2pix \
-    --paths . --hidden-import PIL._tkinter_finder \
-    --add-data "hex2pix\README.md;hex2pix" run_hex2pix.py
+py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix.spec
+py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix_onedir.spec
 ```
 
 The result is `dist\hex2pix.exe`: one self-contained file with no Python
@@ -477,7 +477,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **350 unit tests** covering the model, canvas geometry,
+The first command runs **354 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -496,7 +496,8 @@ dist\hex2pix.exe --selftest
 ```text
 hex2pixmain/
 ├─ run_hex2pix.py          entry point and PyInstaller script
-├─ build_exe.cmd           Windows build helper
+├─ requirements.txt        runtime and build dependencies
+├─ packaging/              PyInstaller specs and the Windows build helper
 ├─ hex2pix/
 │  ├─ app.py               Tk window, panels and interaction
 │  ├─ model.py             bitmaps, documents, selections and edits
@@ -512,7 +513,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              350 unit tests
+│  └─ tests/              354 unit tests
 └─ docs/                   README screenshots and example artwork
 ```
 

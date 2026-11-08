@@ -1,6 +1,8 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+rem Build helper for the Windows releases: run it from anywhere, it always
+rem works on the repository root and leaves build\ and dist\ there.
+cd /d "%~dp0.."
 set "PY="
 py -3 --version >nul 2>nul && set "PY=py -3"
 if not defined PY (
@@ -41,7 +43,7 @@ if errorlevel 1 (
     )
 )
 echo Building hex2pix.exe with %PY% ...
-%PY% -m PyInstaller --noconfirm --clean hex2pix.spec
+%PY% -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
 if errorlevel 1 (
     echo Build failed.
     exit /b 1
@@ -54,7 +56,7 @@ if errorlevel 1 (
 )
 echo Built hex2pix.exe
 echo Building the portable folder (no extraction to TEMP) ...
-%PY% -m PyInstaller --noconfirm --clean hex2pix_onedir.spec
+%PY% -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
 if errorlevel 1 (
     echo Portable build failed.
     exit /b 1
