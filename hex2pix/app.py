@@ -1205,9 +1205,10 @@ class hex2pixApp(tk.Tk):
         layer_menu = tk.Menu(bar, tearoff=0)
         layer_menu.add_command(label="New layer", accelerator="Ctrl+Shift+N",
                                command=self.new_layer)
-        layer_menu.add_command(label="Duplicate layer",
+        layer_menu.add_command(label="Duplicate layer", accelerator="Alt+C",
                                command=self.duplicate_layer)
-        layer_menu.add_command(label="Delete layer", command=self.delete_layer)
+        layer_menu.add_command(label="Delete layer", accelerator="Alt+Delete",
+                               command=self.delete_layer)
         layer_menu.add_separator()
         layer_menu.add_command(label="Raise layer", accelerator="Alt+Up",
                                command=lambda: self.move_layer(1))
@@ -1747,8 +1748,9 @@ class hex2pixApp(tk.Tk):
                   text="A layer combines with the layers below it using its "
                        "operation; Normal simply covers what is underneath. "
                        "Drag a row to restack it, double-click to show or "
-                       "hide, Alt+Up/Down moves the active layer. Both views "
-                       "show the result; the dump shows the active layer.",
+                       "hide. Alt+N/C/Delete adds, copies or removes a layer "
+                       "and Alt+Up/Down restacks it. Both views show the "
+                       "result; the dump shows the active layer.",
                   foreground="#777", wraplength=280,
                   justify="left").pack(anchor="w", pady=(2, 0))
         self.refresh_layers()
@@ -5545,13 +5547,15 @@ class hex2pixApp(tk.Tk):
             "Tool options    above the canvas follow the active tool\n"
             "Ctrl+Z / Ctrl+Y undo / redo\n"
             "Ctrl+A          select all\n"
-            "Ctrl+D          deselect\n"
+            "Ctrl+D          deselect (Escape does it at once, too)\n"
             "Delete          clear the pixels inside the selection\n"
-            "Escape          cancel the current step, then deselect\n"
+            "Escape          cancel everything and deselect at once\n"
             "Ctrl+C / Ctrl+V copy / paste hex block text\n"
             "Ctrl+O / Ctrl+S open / save\n"
             "Ctrl+E          export formats\n"
             "Ctrl+Shift+N    new layer (Normal operation)\n"
+            "Alt+N / Alt+C   new layer / copy layer\n"
+            "Alt+Delete      delete the active layer\n"
             "Alt+Up/Alt+Down restack the active layer\n"
             "Layers tab      Normal / Add / Subtract / Multiply / Divide,\n"
             "                New / Copy / Delete / Raise / Lower; the\n"
@@ -5606,9 +5610,16 @@ class hex2pixApp(tk.Tk):
             if self.recorder.capture(key, event.char or "", int(event.state)):
                 self.refresh_macro_status()
 
-        if key in ("Up", "Down") and bool(event.state & 0x0008):
-            self.move_layer(1 if key == "Up" else -1)
-            return "break"
+        if bool(event.state & 0x0008):
+            layer_actions = {"Up": lambda: self.move_layer(1),
+                             "Down": lambda: self.move_layer(-1),
+                             "n": self.new_layer,
+                             "c": self.duplicate_layer,
+                             "Delete": self.delete_layer}
+            action = layer_actions.get(key) or layer_actions.get(char)
+            if action:
+                action()
+                return "break"
         if key in ("Up", "Down", "Left", "Right"):
             jump = 8 if control else 1
             moves = {"Up": (0, -jump), "Down": (0, jump),
@@ -5660,10 +5671,6 @@ class hex2pixApp(tk.Tk):
             self.refresh_status()
             return "break"
         if key == "Escape":
-            busy = bool(self.fullscreen or self.typed or self.poly_points
-                        or self.lasso_points or self.transform_base
-                        or self.shape_anchor or self.gradient_anchor
-                        or self.kb_anchor is not None)
             if self.fullscreen:
                 self.set_fullscreen(False)
             self.cancel_shape()
@@ -5674,11 +5681,10 @@ class hex2pixApp(tk.Tk):
             self.lasso_points = []
             self.sel_backup = None
             self.keyboard_cancel()
-            if not busy and self.doc.selection.active:
-                # Nothing else to cancel: Escape drops the selection too.
-                self.doc.selection.clear()
             self.refresh_status()
-            self.redraw()
+            # Escape is the instant deselect: it cancels whatever is in
+            # progress and drops the selection in the same press.
+            self.deselect()
             return "break"
         if key == "Delete":
             if self.doc.selection.active:
@@ -6334,6 +6340,19 @@ def run_selftest(out_path=None):
                 overlay_ok = overlay_ok and probe.size == probe_size
         app.doc.selection.clear()
 
+        # Layer verbs and the instant deselect are keyboard reachable.
+        app.new_canvas(CanvasSpec(16, 16))
+        app.on_key(_KeyEvent("n", "", 0x0008))
+        app.on_key(_KeyEvent("c", "", 0x0008))
+        layer_keys_ok = app.doc.layer_count == 3
+        app.on_key(_KeyEvent("Delete", "", 0x0008))
+        layer_keys_ok = layer_keys_ok and app.doc.layer_count == 2
+        app.on_key(_KeyEvent("Up", "", 0x0008))
+        app.on_key(_KeyEvent("Down", "", 0x0008))
+        app.doc.selection.select_all()
+        app.on_key(_KeyEvent("Escape", "\x1b"))
+        layer_keys_ok = layer_keys_ok and not app.doc.selection.active
+
         old_tool = app.tool
         app.tool = "line"
         app.shape_anchor = (0, 0)
@@ -6400,7 +6419,8 @@ def run_selftest(out_path=None):
                       line_fill_ok, structure_ok, pattern_text_ok,
                       fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                       gradient_ok, palette_ok, wheel_ok, quantize_ok,
-                      dark_ok, light_ok, dockers_ok, overlay_ok, mouse_ok))
+                      dark_ok, light_ok, dockers_ok, overlay_ok,
+                      layer_keys_ok, mouse_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
                      "drag=%s erase=%s export=%s dump=%s canvas=%s props=%s "
                      "canvas_undo=%s dialog=%s default_view=%s hex_view=%s "
@@ -6410,7 +6430,7 @@ def run_selftest(out_path=None):
                      "structure=%s pattern_text=%s fullscreen=%s "
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
                      "palette=%s wheel=%s quantize=%s dark=%s light=%s "
-                     "dockers=%s overlay=%s mouse=%s"
+                     "dockers=%s overlay=%s layer_keys=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -6420,7 +6440,8 @@ def run_selftest(out_path=None):
                         line_fill_ok, structure_ok, pattern_text_ok,
                         fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                         gradient_ok, palette_ok, wheel_ok, quantize_ok,
-                        dark_ok, light_ok, dockers_ok, overlay_ok, mouse_ok))
+                        dark_ok, light_ok, dockers_ok, overlay_ok,
+                        layer_keys_ok, mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))

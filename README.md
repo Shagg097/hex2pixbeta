@@ -291,9 +291,9 @@ combining.
 
 Both views show the flattened result. The Dump tab, byte tools and Copy block
 work on the active layer. **New**, **Copy**, **Delete**, **Raise** and **Lower**
-manage the stack. `Ctrl+Shift+N` adds a layer; drag a row to restack it,
-double-click to hide or show it, and `Alt+Up` / `Alt+Down` restack the active
-layer.
+manage the stack. `Ctrl+Shift+N` (or `Alt+N`) adds a layer; drag a row to restack it,
+double-click to hide or show it. `Alt+C` and `Alt+Delete` copy and remove the
+active layer, and `Alt+Up` / `Alt+Down` restack it.
 
 ## Canvas and documents
 
@@ -437,14 +437,15 @@ controls than fit.
 | `Shift` + letter | Pick a tool (letters are on Shift so `A–F` stay available for hex) |
 | `Shift+T` | Move / Scale tool |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
-| `Ctrl+A` / `Ctrl+D` | Select all / deselect |
+| `Ctrl+A` / `Ctrl+D` | Select all / deselect; `Escape` deselects instantly |
 | `Ctrl+C` / `Ctrl+V` | Copy / paste hex block text |
 | `Ctrl+O` / `Ctrl+S` | Open / save |
 | `Ctrl+E` | Jump to the Export tab |
 | `Ctrl+Shift+N` | New layer |
+| `Alt+N` / `Alt+C` / `Alt+Delete` | New / copy / delete the active layer |
 | `Alt+Up` / `Alt+Down` | Raise / lower the active layer |
 | `F5` / `F9` | Play / record a macro |
-| `F11` / `Escape` | Toggle fullscreen / leave it; `Escape` also deselects |
+| `F11` / `Escape` | Toggle fullscreen / leave it, cancel the current step and deselect |
 | `F1` | Keyboard reference |
 
 A tool's exact shortcut and a one-line reminder appear when hovering its tile.

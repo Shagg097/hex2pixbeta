@@ -352,7 +352,9 @@ Both views show the flattened result once there is more than one layer; the
 layer, which is the one tools edit and type hex into. **New**, **Copy**,
 **Delete**, **Raise** and **Lower** manage the stack, `Ctrl+Shift+N` adds a
 layer, dragging a row restacks it, double-clicking shows or hides it, and
-`Alt+Up` / `Alt+Down` restack the active layer.
+`Alt+Up` / `Alt+Down` restack the active layer, and `Alt+N`, `Alt+C` and
+`Alt+Delete` add, copy and remove layers from the keyboard. `Escape`
+deselects instantly.
 
 ## Tool palette
 
@@ -441,10 +443,12 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
 | Shift+T | move the selection by dragging, scale it with Shift+drag, rotate it with Ctrl+drag, or move its corner to the cursor with `Enter` |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+A / Ctrl+D | select all / deselect (the sidebar buttons do the same) |
+| Escape | cancel the current step, leave fullscreen and deselect |
 | Ctrl+C / Ctrl+V | copy / paste hex block text |
 | Ctrl+O / Ctrl+S | open / save |
 | Ctrl+E | export tab |
 | Ctrl+Shift+N | new layer |
+| Alt+N / Alt+C / Alt+Delete | new / copy / delete the active layer |
 | Alt+Up / Alt+Down | restack the active layer |
 
 Tool letters are on `Shift` so that `A-F` can stay available for hex digits.
