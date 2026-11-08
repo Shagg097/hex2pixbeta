@@ -83,7 +83,15 @@ identically in both views.
 **F11** toggles borderless fullscreen and **Escape** leaves it, restoring the
 previous window geometry. The tool column scrolls on its own when the window
 is too short for every panel, so no control is ever cut off at any window
-size.
+size, and the tool-options bar above the canvas grows a horizontal scrollbar
+when the active tool has more controls than fit.
+
+The editor starts in **dark mode**. **View > Dark mode** switches the whole
+window -- menus, dockers, tool cards, fields, text panels, the colour wheel
+and the start page -- to the light palette and back. The same View menu ends
+with one checkbutton per right-side docker (**Block**, **Layers**, **Bytes**,
+**Dump**, **Export**, **Pattern**, **Dither**), so any tab can be hidden and
+brought back without losing its contents or its place in the tab order.
 
 ## Keyboard selection
 
@@ -359,7 +367,7 @@ state the tool uses:
 | Blur | Size, Strength, Mirror |
 | Jumble | Size, Mode (Shuffle, Scatter, Noise), Amount |
 | Text | the text, Scale, Spacing |
-| Airbrush | Size, Flow %, Tip |
+| Airbrush | Size, Flow %, Tip, Blur, Multicolor |
 | Curve | Width, Tip, Bend %, Vectors (1-8), Side (left, right, alternate) |
 | Contour | Width, Side (outside or inside), Connect (4 or 8 edges) |
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
@@ -377,15 +385,28 @@ including past its edges — the view keeps a margin of empty space on every
 side so the artwork can sit wherever you like. The wheel zooms smoothly in
 1.25× steps around the pointer, from 12.5% to 6400%, and **Zoom to fit** picks
 the exact ratio for the window (it can go below 100% for big sprites). `[`
-and `]` zoom out and in.
+and `]` zoom out and in. Double-click the middle button (or double-click with
+**Hand**) to fit the artwork, **Shift**+wheel scrolls sideways, and
+**Ctrl**+wheel changes the brush size without leaving the canvas.
 
 ## Mouse
 
-* Left drag — draw with the current tool; right drag — erase.
+* Left press/drag paints with the active tool. For paint tools the right
+  button erases; with a selection tool it subtracts; on controls it keeps the
+  control's own secondary action.
 * **Move / Scale**: left drag inside a selection moves it; **Shift**+drag
   scales it; **Ctrl**+drag rotates it.
-* Middle drag or **Hand** — pan freely; wheel — zoom around the pointer.
-* Click a swatch to change the foreground; click a recent swatch to reuse it.
+* **Shift** while dragging **Line** snaps to horizontal, vertical or 45°;
+  with **Rectangle** and **Ellipse** it draws a square or circle.
+* Selection tools: **Shift** adds, **Ctrl** subtracts, **Alt** intersects and
+  a right-drag subtracts. **Polygon** closes on a double-click, and **Lasso**
+  closes and tidies itself on release.
+* Middle drag or **Hand** pans freely; double-click either to zoom to fit.
+  Wheel zooms around the pointer, **Shift**+wheel pans sideways, and
+  **Ctrl**+wheel resizes the brush (or the hex code font in hex view).
+* Click a swatch to change the foreground, right-click it to edit it; click a
+  recent swatch to reuse it. The colour wheel follows the same rule: left for
+  FG, right for BG.
 
 ## Keyboard
 
@@ -400,7 +421,7 @@ and `]` zoom out and in.
 | `+` / `-` | brush size |
 | `[` / `]` | zoom out / in |
 | Space | swap foreground and background |
-| Shift + letter | pick a tool (Pencil, Eraser, Airbrush, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Jumble, Text, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
+| Shift + letter | pick a tool (Pencil, Eraser, Airbrush, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Jumble, Text, Line pattern, Structure fill, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
 | Shift+T | move the selection by dragging, scale it with Shift+drag, rotate it with Ctrl+drag, or move its corner to the cursor with `Enter` |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+A / Ctrl+D | select all / deselect |
@@ -480,23 +501,13 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 113 assertions over the model, the canvas, formats,
-patterns and macros. The second runs those plus 34 headless GUI checks —
-building the window, selecting 25 pixels with a rectangle, typing a hex color
-and painting it, undoing, running a wand selection, placing a block, painting
-and erasing with the mouse, exporting a PNG, reading the byte dump, creating a
-24x18 canvas at 144 ppi, scaling it to Grayscale without alpha, undoing that
-back to the original canvas, building the canvas dialog and reading a spec out
-of it, checking that the window opens in hex code view, toggling to the image
-view and back, mapping a click in hex view to the right pixel, switching
-between the home page and the editor, starting a preset canvas, reloading the
-recent list from disk with its limit and missing-file filtering, drawing a
-selection with two keyboard corners (and cancelling it), recording seven
-keystrokes and replaying them onto an undone canvas, flood filling from the
-keyboard, applying line and structural pattern fills, syncing the pattern hex
-rows with the micro canvas, toggling fullscreen and checking the scrollable
-tool column — then writes `hex2pix-selftest.txt`. The same command is
-available in the frozen executable: `hex2pix.exe --selftest`.
+The first command runs 341 tests over the model, the canvas, formats, colours,
+palettes, patterns, dithering and macros. The second runs those plus a headless
+GUI pass that builds the window and exercises painting, erasing, byte and wand
+selections, canvas resizing, undo, home/recent navigation, pattern fills,
+fullscreen, dark/light theming, all docker toggles and the shape/mouse helpers;
+it writes `hex2pix-selftest.txt`. The same command is available in the frozen
+executable: `hex2pix.exe --selftest`.
 
 ## Limits
 
@@ -504,5 +515,5 @@ available in the frozen executable: `hex2pix.exe --selftest`.
 * Undo keeps whole-image snapshots under a 96 MB budget (roughly 90 steps for
   a 512x512 image, fewer for larger).
 * Selections are hard-edged byte masks; there is no feathering or anti-aliasing.
-* No brush shapes beyond a square of pixels.
+* Brush tips are square or circle; there are no custom brush stamps.
 * Canvases are capped at 8192 pixels per side.

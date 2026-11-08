@@ -156,6 +156,67 @@ HOME_TEXT = "#e9e9ef"
 HOME_MUTED = "#9aa0aa"
 HOME_BORDER = "#34343c"
 
+THEMES = {
+    "dark": {
+        "bg": "#1b1e24",
+        "panel": "#232830",
+        "card": "#262c35",
+        "border": "#3a414d",
+        "fg": "#e6e9ef",
+        "muted": "#9aa3b2",
+        "field": "#2b313b",
+        "field_fg": "#e6e9ef",
+        "button": "#2d333d",
+        "button_active": "#3a424e",
+        "accent": "#2f8fd0",
+        "accent_fg": "#ffffff",
+        "tab": "#232830",
+        "tab_selected": "#2f3540",
+        "status_bg": "#14171c",
+        "status_fg": "#e7ebf2",
+        "status_hint": "#8f98a6",
+        "canvas_bg": "#20242b",
+        "canvas_border": "#39404d",
+        "heading": "#e6e9ef",
+        "home_bg": "#1b1b1f",
+        "home_panel": "#26262b",
+        "home_panel_alt": "#303038",
+        "home_text": "#e9e9ef",
+        "home_muted": "#9aa0aa",
+        "home_border": "#34343c",
+        "home_accent_fg": "#101014",
+    },
+    "light": {
+        "bg": "#e9ecf2",
+        "panel": "#eff2f7",
+        "card": "#ffffff",
+        "border": "#d9dde5",
+        "fg": "#20242b",
+        "muted": "#6b7280",
+        "field": "#ffffff",
+        "field_fg": "#20242b",
+        "button": "#eef1f6",
+        "button_active": "#e0e6ef",
+        "accent": "#2f8fd0",
+        "accent_fg": "#ffffff",
+        "tab": "#e4e8ef",
+        "tab_selected": "#ffffff",
+        "status_bg": "#2b2f37",
+        "status_fg": "#e7ebf2",
+        "status_hint": "#8f98a6",
+        "canvas_bg": "#20242b",
+        "canvas_border": "#39404d",
+        "heading": "#2f3540",
+        "home_bg": "#f4f6fa",
+        "home_panel": "#ffffff",
+        "home_panel_alt": "#e6ebf3",
+        "home_text": "#20242b",
+        "home_muted": "#5b6472",
+        "home_border": "#d5dbe5",
+        "home_accent_fg": "#101014",
+    },
+}
+
 HOME_PRESETS = (
     (16, 16, "icon"),
     (32, 32, "icon"),
@@ -348,6 +409,49 @@ class HomeView(tk.Frame):
                    self.app.show_help).pack(side="right", padx=8)
 
         self.refresh_recent()
+
+    def _theme_lookup(self):
+        """Map either theme's home colours onto the current palette."""
+        colours = self.app.colors
+        pairs = (("home_bg", HOME_BG), ("home_panel", HOME_PANEL),
+                 ("home_panel_alt", HOME_PANEL_ALT),
+                 ("accent", HOME_ACCENT), ("home_text", HOME_TEXT),
+                 ("home_muted", HOME_MUTED), ("home_border", HOME_BORDER),
+                 ("home_accent_fg", "#101014"))
+        lookup = {}
+        for key, original in pairs:
+            target = colours.get(key, original).lower()
+            lookup[original.lower()] = target
+            for theme in THEMES.values():
+                value = theme.get(key)
+                if value:
+                    lookup[value.lower()] = target
+        return lookup
+
+    def apply_theme(self):
+        """Recolour the start page in place when the editor theme changes."""
+        lookup = self._theme_lookup()
+        try:
+            self.configure(bg=self.app.colors["home_bg"])
+        except tk.TclError:
+            return
+        stack = [self]
+        while stack:
+            widget = stack.pop()
+            stack.extend(widget.winfo_children())
+            for option in ("bg", "fg", "activebackground",
+                           "activeforeground", "selectbackground",
+                           "selectforeground", "highlightbackground"):
+                try:
+                    value = str(widget.cget(option)).lower()
+                except tk.TclError:
+                    continue
+                replacement = lookup.get(value)
+                if replacement and replacement != value:
+                    try:
+                        widget.configure(**{option: replacement})
+                    except tk.TclError:
+                        pass
 
     # -------------------------------------------------------------- actions
     def refresh_recent(self):
@@ -670,26 +774,38 @@ class hex2pixApp(tk.Tk):
         self.palette_chips = []
         self.fullscreen = False
         self._saved_geometry = None
+        self.dark_mode = True
+        self.colors = THEMES["dark"]
+        self.docker_vars = {}
+        self.docker_tabs = {}
+        self.docker_labels = {}
+        self._heading_widgets = []
+        self._muted_labels = []
 
         self.title("hex2pix")
         self.geometry("1200x780")
         self.minsize(940, 620)
-        self.configure(bg="#e9ecf2")
+        self.configure(bg=self.colors["bg"])
         self._polish_style()
 
         self._build_menus()
         self.status = tk.StringVar(value="")
-        status_bar = tk.Frame(self, bg="#2b2f37")
-        status_bar.pack(side="bottom", fill="x")
-        status = tk.Label(status_bar, textvariable=self.status, anchor="w",
-                          bg="#2b2f37", fg="#e7ebf2", padx=10, pady=4,
-                          font=("Segoe UI", 9))
-        status.pack(side="left", fill="x", expand=True)
-        tk.Label(status_bar,
-                 text="Wheel zoom  \u00b7  Space swap  \u00b7  "
-                      "Shift+letter tools  \u00b7  F1 keys",
-                 bg="#2b2f37", fg="#8f98a6", padx=10,
-                 font=("Segoe UI", 8)).pack(side="right")
+        self.status_bar = tk.Frame(self, bg=self.colors["status_bg"])
+        self.status_bar.pack(side="bottom", fill="x")
+        self.status_rule = tk.Frame(self, bg=self.colors["border"], height=1)
+        self.status_rule.pack(side="bottom", fill="x")
+        self.status_label = tk.Label(self.status_bar, textvariable=self.status,
+                                     anchor="w",
+                                     bg=self.colors["status_bg"],
+                                     fg=self.colors["status_fg"], padx=12,
+                                     pady=5, font=("Segoe UI", 9))
+        self.status_label.pack(side="left", fill="x", expand=True)
+        self.status_hint = tk.Label(
+            self.status_bar,
+            text="Wheel zoom  \u00b7  Shift+wheel pan  \u00b7  F1 keys",
+            bg=self.colors["status_bg"], fg=self.colors["status_hint"],
+            padx=12, font=("Segoe UI", 8))
+        self.status_hint.pack(side="right")
 
         self.container = ttk.Frame(self)
         self.container.pack(side="top", fill="both", expand=True)
@@ -698,6 +814,8 @@ class hex2pixApp(tk.Tk):
         self._build_left(self.editor)
         self._build_right(self.editor)
         self._build_canvas(self.editor)
+        self._populate_docker_menu()
+        self.apply_theme()
 
         self.bind_all("<KeyPress>", self.on_key)
         self.view.focus_set()
@@ -713,19 +831,262 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------ layout
     def _polish_style(self):
-        """A little breathing room and consistent weights across widgets."""
+        """Use the themeable clam base and give widgets consistent padding."""
         style = ttk.Style(self)
         try:
-            style.configure("TNotebook.Tab", padding=(11, 5))
-            style.configure("TButton", padding=(6, 3))
-            style.configure("TEntry", padding=2)
-            style.configure("TSpinbox", padding=1)
-            style.configure("TCombobox", padding=1)
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self._style_ttk(style)
+
+    @staticmethod
+    def _style_configure(style, name, **options):
+        try:
+            style.configure(name, **options)
         except tk.TclError:
             pass
 
+    @staticmethod
+    def _style_map(style, name, **options):
+        try:
+            style.map(name, **options)
+        except tk.TclError:
+            pass
+
+    def _style_ttk(self, style):
+        """Paint every ttk widget in the current light or dark palette."""
+        colours = self.colors
+        configure = self._style_configure
+        configure(style, "TFrame", background=colours["bg"])
+        configure(style, "TLabel", background=colours["bg"],
+                  foreground=colours["fg"])
+        configure(style, "TButton", background=colours["button"],
+                  foreground=colours["fg"], bordercolor=colours["border"],
+                  lightcolor=colours["border"],
+                  darkcolor=colours["border"],
+                  focuscolor=colours["accent"], relief="flat",
+                  padding=(6, 3))
+        self._style_map(
+            style, "TButton",
+            background=[("active", colours["button_active"]),
+                        ("pressed", colours["button_active"])],
+            foreground=[("disabled", colours["muted"])])
+        configure(style, "TEntry", fieldbackground=colours["field"],
+                  foreground=colours["field_fg"],
+                  insertcolor=colours["field_fg"],
+                  bordercolor=colours["border"],
+                  lightcolor=colours["border"],
+                  darkcolor=colours["border"], padding=2)
+        configure(style, "TCombobox", fieldbackground=colours["field"],
+                  background=colours["button"],
+                  foreground=colours["field_fg"], arrowcolor=colours["fg"],
+                  bordercolor=colours["border"],
+                  lightcolor=colours["border"],
+                  darkcolor=colours["border"], padding=1)
+        self._style_map(
+            style, "TCombobox",
+            fieldbackground=[("readonly", colours["field"])],
+            foreground=[("readonly", colours["field_fg"])],
+            selectbackground=[("readonly", colours["field"])],
+            selectforeground=[("readonly", colours["field_fg"])],
+            arrowcolor=[("active", colours["accent"])])
+        configure(style, "TSpinbox", fieldbackground=colours["field"],
+                  background=colours["button"],
+                  foreground=colours["field_fg"], arrowcolor=colours["fg"],
+                  bordercolor=colours["border"], padding=1)
+        configure(style, "TCheckbutton", background=colours["bg"],
+                  foreground=colours["fg"],
+                  indicatorbackground=colours["field"],
+                  indicatorforeground=colours["accent"],
+                  focuscolor=colours["accent"])
+        self._style_map(style, "TCheckbutton",
+                        background=[("active", colours["bg"])])
+        configure(style, "TRadiobutton", background=colours["bg"],
+                  foreground=colours["fg"],
+                  indicatorbackground=colours["field"],
+                  indicatorforeground=colours["accent"],
+                  focuscolor=colours["accent"])
+        self._style_map(style, "TRadiobutton",
+                        background=[("active", colours["bg"])])
+        configure(style, "TScale", background=colours["bg"],
+                  troughcolor=colours["field"])
+        configure(style, "TNotebook", background=colours["bg"],
+                  borderwidth=0)
+        configure(style, "TNotebook.Tab", background=colours["panel"],
+                  foreground=colours["muted"], font=("Segoe UI", 8),
+                  padding=(8, 6),
+                  bordercolor=colours["border"],
+                  lightcolor=colours["panel"],
+                  darkcolor=colours["panel"])
+        self._style_map(
+            style, "TNotebook.Tab",
+            background=[("selected", colours["tab_selected"])],
+            foreground=[("selected", colours["fg"])])
+        configure(style, "TSeparator", background=colours["border"])
+        configure(style, "TScrollbar", background=colours["button"],
+                  troughcolor=colours["bg"], arrowcolor=colours["fg"],
+                  bordercolor=colours["bg"])
+        self._style_map(style, "TScrollbar",
+                        background=[("active", colours["button_active"])])
+        for option, value in (
+                ("*TCombobox*Listbox.background", colours["field"]),
+                ("*TCombobox*Listbox.foreground", colours["field_fg"]),
+                ("*TCombobox*Listbox.selectBackground", colours["accent"]),
+                ("*TCombobox*Listbox.selectForeground",
+                 colours["accent_fg"])):
+            try:
+                self.option_add(option, value)
+            except tk.TclError:
+                pass
+
+    def _style_menus(self, menu):
+        """Recursively repaint tk menus; Windows accepts these options too."""
+        colours = self.colors
+        try:
+            menu.configure(bg=colours["panel"], fg=colours["fg"],
+                           activebackground=colours["accent"],
+                           activeforeground=colours["accent_fg"],
+                           selectcolor=colours["accent"],
+                           disabledforeground=colours["muted"], bd=0,
+                           relief="flat")
+            end = menu.index("end")
+        except tk.TclError:
+            return
+        if end is None:
+            return
+        for index in range(end + 1):
+            try:
+                if menu.type(index) == "cascade":
+                    sub = menu.nametowidget(menu.entrycget(index, "menu"))
+                    self._style_menus(sub)
+            except tk.TclError:
+                continue
+
+    def _populate_docker_menu(self):
+        """Add one View checkbutton per right-side notebook tab."""
+        if getattr(self, "notebook", None) is None:
+            return
+        self.view_menu.add_separator()
+        for tab in self.notebook.tabs():
+            label = str(self.notebook.tab(tab, "text"))
+            key = label.lower()
+            var = tk.BooleanVar(value=True)
+            self.docker_vars[key] = var
+            self.docker_tabs[key] = tab
+            self.docker_labels[key] = label
+            self.view_menu.add_checkbutton(
+                label=label, variable=var,
+                command=lambda k=key: self.toggle_docker(k))
+        self._style_menus(self.menubar)
+
+    def toggle_docker(self, key):
+        """Show or hide a right-side docker without reordering the tabs."""
+        tab = self.docker_tabs.get(key)
+        var = self.docker_vars.get(key)
+        if tab is None or var is None:
+            return
+        try:
+            self.notebook.tab(tab, state="normal" if var.get()
+                              else "hidden")
+        except tk.TclError:
+            if var.get():
+                self.notebook.add(tab, text=self.docker_labels.get(key, key))
+            else:
+                self.notebook.hide(tab)
+
+    def toggle_dark_mode(self):
+        self.dark_mode = bool(self.dark_var.get())
+        self.colors = THEMES["dark" if self.dark_mode else "light"]
+        self.apply_theme()
+
+    def apply_theme(self):
+        """Repaint ttk, tk widgets, menus and the start page for the theme."""
+        colours = self.colors
+        self.configure(bg=colours["bg"])
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self._style_ttk(style)
+        if getattr(self, "menubar", None) is not None:
+            self._style_menus(self.menubar)
+        if getattr(self, "left_canvas", None) is not None:
+            self.left_canvas.configure(bg=colours["bg"],
+                                       highlightbackground=colours["border"])
+        if getattr(self, "left_rule", None) is not None:
+            self.left_rule.configure(bg=colours["border"])
+        if getattr(self, "right_card", None) is not None:
+            self.right_card.configure(bg=colours["bg"],
+                                      highlightbackground=colours["border"])
+        if getattr(self, "wheel_card", None) is not None:
+            self.wheel_card.configure(bg=colours["card"],
+                                      highlightbackground=colours["border"])
+        if getattr(self, "status_rule", None) is not None:
+            self.status_rule.configure(bg=colours["border"])
+        for name in ("fg_swatch", "bg_swatch"):
+            swatch = getattr(self, name, None)
+            if swatch is not None:
+                swatch.configure(highlightbackground=colours["border"])
+        if getattr(self, "tool_card", None) is not None:
+            self.tool_card.configure(bg=colours["card"],
+                                     highlightbackground=colours["border"])
+            self.tool_grid.configure(bg=colours["card"])
+        if getattr(self, "palette_frame", None) is not None:
+            self.palette_frame.configure(bg=colours["card"],
+                                         highlightbackground=colours["border"])
+            self.palette_canvas.configure(bg=colours["card"])
+            self.palette_grid.configure(bg=colours["card"])
+        if getattr(self, "palette_count_label", None) is not None:
+            self.palette_count_label.configure(foreground=colours["muted"])
+        if getattr(self, "wheel", None) is not None:
+            self.wheel.configure(bg=colours["card"])
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.configure(bg=colours["status_bg"])
+            self.status_label.configure(bg=colours["status_bg"],
+                                        fg=colours["status_fg"])
+            self.status_hint.configure(bg=colours["status_bg"],
+                                       fg=colours["status_hint"])
+        if getattr(self, "options_canvas", None) is not None:
+            self.options_canvas.configure(bg=colours["bg"])
+        if getattr(self, "view", None) is not None:
+            self.view.configure(bg=colours["canvas_bg"],
+                                highlightbackground=colours["canvas_border"])
+        for bar, label in getattr(self, "_heading_widgets", ()):
+            bar.configure(bg=colours["accent"])
+            label.configure(foreground=colours["heading"])
+        for label in getattr(self, "_muted_labels", ()):
+            label.configure(foreground=colours["muted"])
+        for name in ("block_text", "map_text", "pattern_text", "dump_text"):
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(bg=colours["field"], fg=colours["field_fg"],
+                                 insertbackground=colours["field_fg"],
+                                 selectbackground=colours["accent"],
+                                 selectforeground=colours["accent_fg"],
+                                 highlightbackground=colours["border"])
+            except tk.TclError:
+                pass
+        if getattr(self, "layer_list", None) is not None:
+            try:
+                self.layer_list.configure(
+                    bg=colours["field"], fg=colours["field_fg"],
+                    selectbackground=colours["accent"],
+                    selectforeground=colours["accent_fg"],
+                    highlightbackground=colours["border"])
+            except tk.TclError:
+                pass
+        if getattr(self, "home", None) is not None:
+            self.home.apply_theme()
+        if getattr(self, "tool_buttons", None):
+            self._reload_tool_icons()
+            self.refresh_tool_buttons()
+
     def _build_menus(self):
-        bar = tk.Menu(self)
+        bar = tk.Menu(self, tearoff=0)
+        self.menubar = bar
 
         file_menu = tk.Menu(bar, tearoff=0)
         file_menu.add_command(label="Home", command=self.show_home)
@@ -840,6 +1201,11 @@ class hex2pixApp(tk.Tk):
         view_menu.add_separator()
         view_menu.add_command(label="Fullscreen", accelerator="F11",
                               command=self.toggle_fullscreen)
+        view_menu.add_separator()
+        self.dark_var = tk.BooleanVar(value=self.dark_mode)
+        view_menu.add_checkbutton(label="Dark mode", variable=self.dark_var,
+                                  command=self.toggle_dark_mode)
+        self.view_menu = view_menu
         bar.add_cascade(label="View", menu=view_menu)
 
         macro_menu = tk.Menu(bar, tearoff=0)
@@ -868,16 +1234,18 @@ class hex2pixApp(tk.Tk):
     def _build_left(self, parent):
         holder = ttk.Frame(parent)
         holder.pack(side="left", fill="y")
+        self.left_rule = tk.Frame(parent, bg=self.colors["border"], width=1)
+        self.left_rule.pack(side="left", fill="y")
         background = (ttk.Style(self).lookup("TFrame", "background")
                       or "#f0f0f0")
         self.left_canvas = tk.Canvas(holder, highlightthickness=0, bd=0,
-                                     width=170, height=420, bg=background)
+                                     width=184, height=420, bg=background)
         bar = ttk.Scrollbar(holder, orient="vertical",
                             command=self.left_canvas.yview)
         self.left_canvas.configure(yscrollcommand=bar.set)
         self.left_canvas.pack(side="left", fill="y")
         bar.pack(side="right", fill="y")
-        left = ttk.Frame(self.left_canvas, padding=(10, 10))
+        left = ttk.Frame(self.left_canvas, padding=(12, 12, 12, 14))
         self.left_inner = left
         self.left_window = self.left_canvas.create_window((0, 0), window=left,
                                                           anchor="nw")
@@ -889,17 +1257,24 @@ class hex2pixApp(tk.Tk):
         self.tool_buttons = {}
         self.tool_icons = {}
         self._tool_tips = []
-        card = tk.Frame(left, bg="#ffffff", highlightthickness=1,
-                        highlightbackground="#d9dde5", bd=0, padx=3, pady=3)
+        card = tk.Frame(left, bg=self.colors["card"], highlightthickness=1,
+                        highlightbackground=self.colors["border"], bd=0,
+                        padx=4, pady=4)
         card.pack(anchor="w", pady=(2, 0))
-        grid = ttk.Frame(card)
+        self.tool_card = card
+        grid = tk.Frame(card, bg=self.colors["card"])
         grid.pack(anchor="w")
+        self.tool_grid = grid
         for index, (name, label, key, tip) in enumerate(TOOLS):
             button = self._build_tool_button(grid, name, label, key, tip)
-            button.grid(row=index // 4, column=index % 4, padx=1, pady=1)
+            button.grid(row=index // 4, column=index % 4, padx=2, pady=2)
             self.tool_buttons[name] = button
-        ttk.Label(left, text="Hover a tool for its name; Shift+letter picks it",
-                  foreground="#777", wraplength=190).pack(anchor="w", pady=(2, 0))
+        hint = ttk.Label(left,
+                         text="Hover a tool for its name; Shift+letter "
+                              "picks it",
+                         foreground=self.colors["muted"], wraplength=190)
+        hint.pack(anchor="w", pady=(2, 0))
+        self._muted_labels.append(hint)
         self.refresh_tool_buttons()
 
         ttk.Separator(left).pack(fill="x", pady=6)
@@ -908,17 +1283,26 @@ class hex2pixApp(tk.Tk):
         swatches = ttk.Frame(left)
         swatches.pack(anchor="w", pady=2)
         self.fg_swatch = tk.Canvas(swatches, width=42, height=42,
-                                   highlightthickness=1, highlightbackground="#555")
+                                   highlightthickness=1,
+                                   highlightbackground=self.colors["border"])
         self.fg_swatch.pack(side="left")
         self.fg_swatch.bind("<Button-1>", lambda e: self.ask_color("fg"))
         ttk.Label(swatches, text=" ").pack(side="left")
         self.bg_swatch = tk.Canvas(swatches, width=42, height=42,
-                                   highlightthickness=1, highlightbackground="#555")
+                                   highlightthickness=1,
+                                   highlightbackground=self.colors["border"])
         self.bg_swatch.pack(side="left")
         self.bg_swatch.bind("<Button-1>", lambda e: self.ask_color("bg"))
 
-        self.wheel = ColorWheel(left, size=140, command=self.wheel_color)
-        self.wheel.pack(anchor="w", pady=(4, 2))
+        self.wheel_card = tk.Frame(left, bg=self.colors["card"],
+                                   highlightthickness=1,
+                                   highlightbackground=self.colors["border"],
+                                   bd=0, padx=4, pady=4)
+        self.wheel_card.pack(anchor="w", pady=(4, 2))
+        self.wheel = ColorWheel(self.wheel_card, size=140,
+                                command=self.wheel_color)
+        self.wheel.configure(bg=self.colors["card"])
+        self.wheel.pack()
 
         self.hex_entry = tk.StringVar(value=hex_str(*self.fg))
         entry = ttk.Entry(left, textvariable=self.hex_entry, width=12)
@@ -1017,26 +1401,30 @@ class hex2pixApp(tk.Tk):
         palette_combo.pack(fill="x")
         palette_combo.bind("<<ComboboxSelected>>",
                            lambda event: self.load_preset_palette())
-        self.palette_frame = tk.Frame(left, bg="#ffffff",
+        self.palette_frame = tk.Frame(left, bg=self.colors["card"],
                                       highlightthickness=1,
-                                      highlightbackground="#d9dde5")
+                                      highlightbackground=self.colors["border"])
         self.palette_frame.pack(anchor="w", pady=(2, 0), fill="x")
-        self.palette_canvas = tk.Canvas(self.palette_frame, height=92,
-                                        bg="#ffffff", highlightthickness=0,
-                                        bd=0)
+        self.palette_canvas = tk.Canvas(self.palette_frame, width=170,
+                                        height=92,
+                                        bg=self.colors["card"],
+                                        highlightthickness=0, bd=0)
         palette_scroll = ttk.Scrollbar(self.palette_frame, orient="vertical",
                                        command=self.palette_canvas.yview)
         self.palette_canvas.configure(yscrollcommand=palette_scroll.set)
         self.palette_canvas.pack(side="left", fill="both", expand=True)
         palette_scroll.pack(side="right", fill="y")
-        self.palette_grid = tk.Frame(self.palette_canvas, bg="#ffffff")
+        self.palette_grid = tk.Frame(self.palette_canvas,
+                                     bg=self.colors["card"])
         self.palette_canvas.create_window((0, 0), window=self.palette_grid,
                                           anchor="nw")
         self.palette_grid.bind("<Configure>",
                                lambda event: self._update_palette_scroll())
         self.palette_count_var = tk.StringVar(value="")
-        ttk.Label(left, textvariable=self.palette_count_var,
-                  foreground="#6b7280").pack(anchor="w")
+        self.palette_count_label = ttk.Label(
+            left, textvariable=self.palette_count_var,
+            foreground=self.colors["muted"])
+        self.palette_count_label.pack(anchor="w")
         palette_buttons = ttk.Frame(left)
         palette_buttons.pack(fill="x", pady=(2, 0))
         ttk.Button(palette_buttons, text="New...", width=6,
@@ -1083,9 +1471,12 @@ class hex2pixApp(tk.Tk):
         """A small accent bar plus a bold heading, used down the sidebar."""
         row = ttk.Frame(parent)
         row.pack(anchor="w", fill="x", pady=(2, 2))
-        tk.Frame(row, bg="#2f8fd0", width=3, height=14).pack(side="left")
-        ttk.Label(row, text=text, font=("Segoe UI", 9, "bold"),
-                  foreground="#2f3540").pack(side="left", padx=(6, 0))
+        bar = tk.Frame(row, bg=self.colors["accent"], width=3, height=14)
+        bar.pack(side="left")
+        label = ttk.Label(row, text=text, font=("Segoe UI", 9, "bold"),
+                          foreground=self.colors["heading"])
+        label.pack(side="left", padx=(6, 0))
+        self._heading_widgets.append((bar, label))
         return row
 
     def _build_tool_button(self, parent, name, label, key, tip):
@@ -1117,6 +1508,17 @@ class hex2pixApp(tk.Tk):
             return None
         return ImageTk.PhotoImage(art)
 
+    def _reload_tool_icons(self):
+        """Re-tint the palette icons after a theme switch."""
+        for name, button in getattr(self, "tool_buttons", {}).items():
+            if not isinstance(button, tk.Button):
+                continue
+            photo = self._load_tool_icon(name)
+            if photo is None:
+                continue
+            self.tool_icons[name] = photo
+            button.configure(image=photo)
+
     def refresh_tool_buttons(self):
         """Show the active tool on the icon palette."""
         for name, button in getattr(self, "tool_buttons", {}).items():
@@ -1135,11 +1537,8 @@ class hex2pixApp(tk.Tk):
                 return
 
     def _update_left_scrollregion(self):
-        """Keep the tool column scrollable so no control is ever clipped."""
-        try:
-            width = max(150, self.left_inner.winfo_reqwidth())
-        except tk.TclError:
-            return
+        """Keep the tool column a fixed rail, scrolling any extra height."""
+        width = 212
         if str(self.left_canvas.cget("width")) != str(width):
             self.left_canvas.configure(width=width)
             self.left_canvas.itemconfigure(self.left_window, width=width)
@@ -1150,7 +1549,12 @@ class hex2pixApp(tk.Tk):
     def _build_right(self, parent):
         right = ttk.Frame(parent, padding=(8, 8))
         right.pack(side="right", fill="y")
-        self.notebook = ttk.Notebook(right)
+        self.right_card = tk.Frame(right, bg=self.colors["bg"],
+                                   highlightthickness=1,
+                                   highlightbackground=self.colors["border"],
+                                   bd=0, padx=6, pady=6)
+        self.right_card.pack(fill="both", expand=True)
+        self.notebook = ttk.Notebook(self.right_card)
         self.notebook.pack(fill="both", expand=True)
 
         # ---- block placement
@@ -1564,12 +1968,29 @@ class hex2pixApp(tk.Tk):
         return row + 1
 
     def _build_canvas(self, parent):
-        frame = ttk.Frame(parent)
+        frame = ttk.Frame(parent, padding=(8, 8))
         frame.pack(side="left", fill="both", expand=True)
-        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(2, weight=1)
         frame.columnconfigure(0, weight=1)
-        self.tool_options = ttk.Frame(frame, padding=(10, 6))
-        self.tool_options.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.options_bar = ttk.Frame(frame)
+        self.options_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.options_canvas = tk.Canvas(self.options_bar, height=48,
+                                        bg=self.colors["bg"],
+                                        highlightthickness=0, bd=0)
+        self.options_canvas.pack(side="top", fill="x", expand=True)
+        self.tool_options = ttk.Frame(self.options_canvas, padding=(10, 8))
+        self.options_window = self.options_canvas.create_window(
+            (0, 0), window=self.tool_options, anchor="nw")
+        self.options_scroll = ttk.Scrollbar(
+            self.options_bar, orient="horizontal",
+            command=self.options_canvas.xview)
+        self.options_canvas.configure(xscrollcommand=self.options_scroll.set)
+        self.options_canvas.bind("<Configure>",
+                                 lambda event: self._sync_options_scroll())
+        self.tool_options.bind("<Configure>",
+                               lambda event: self._sync_options_scroll())
+        self.options_rule = ttk.Separator(frame, orient="horizontal")
+        self.options_rule.grid(row=1, column=0, columnspan=2, sticky="ew")
         self.sel_mode_var = tk.StringVar(
             value=SEL_MODE_LABELS.get(self.sel_mode, "Replace"))
         self.pick_target_var = tk.StringVar(value="FG")
@@ -1609,9 +2030,9 @@ class hex2pixApp(tk.Tk):
         vbar = ttk.Scrollbar(frame, orient="vertical", command=self.scroll_y)
         hbar = ttk.Scrollbar(frame, orient="horizontal", command=self.scroll_x)
         self.view.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
-        self.view.grid(row=1, column=0, sticky="nsew")
-        vbar.grid(row=1, column=1, sticky="ns")
-        hbar.grid(row=2, column=0, sticky="ew")
+        self.view.grid(row=2, column=0, sticky="nsew")
+        vbar.grid(row=2, column=1, sticky="ns")
+        hbar.grid(row=3, column=0, sticky="ew")
         self.view_image = self.view.create_image(0, 0, anchor="nw")
 
         self.view.bind("<Button-1>", lambda e: self.on_press(e, False))
@@ -1626,15 +2047,16 @@ class hex2pixApp(tk.Tk):
         self.view.bind("<Button-2>", self.on_middle)
         self.view.bind("<B2-Motion>", self.on_middle_drag)
         self.view.bind("<ButtonRelease-2>", self.on_middle_release)
+        self.view.bind("<Double-Button-2>", self.on_middle_double)
         self.view.bind("<Configure>", lambda event: self._on_view_configure())
 
     # ------------------------------------------------------------ tool options
-    def _option_label(self, text, padx=(14, 2)):
+    def _option_label(self, text, padx=(10, 2)):
         label = ttk.Label(self.tool_options, text=text)
         label.pack(side="left", padx=padx)
         return label
 
-    def _option_check(self, text, var, command=None, padx=(14, 0)):
+    def _option_check(self, text, var, command=None, padx=(10, 0)):
         check = ttk.Checkbutton(self.tool_options, text=text, variable=var,
                                 command=command)
         check.pack(side="left", padx=padx)
@@ -1689,6 +2111,31 @@ class hex2pixApp(tk.Tk):
             "name": name,
             "children": tuple(self.tool_options.winfo_children()),
         }
+        self.options_canvas.xview_moveto(0)
+        self._options_reset = True
+        self.after_idle(self._sync_options_scroll)
+
+    def _sync_options_scroll(self):
+        """Show a horizontal scrollbar only when the option row overflows."""
+        if not hasattr(self, "options_scroll"):
+            return
+        try:
+            content = max(1, self.tool_options.winfo_reqwidth())
+            view = max(1, self.options_canvas.winfo_width())
+            height = max(1, self.tool_options.winfo_reqheight())
+        except tk.TclError:
+            return
+        if content > view + 1:
+            if not self.options_scroll.winfo_ismapped():
+                self.options_scroll.pack(side="bottom", fill="x")
+            self.options_canvas.configure(scrollregion=(0, 0, content, height))
+        else:
+            if self.options_scroll.winfo_ismapped():
+                self.options_scroll.pack_forget()
+            self.options_canvas.configure(scrollregion=(0, 0, view, height))
+        if getattr(self, "_options_reset", False):
+            self.options_canvas.xview_moveto(0)
+            self._options_reset = False
 
     def _options_brush(self):
         """Size, tip and mirror: shared by the freehand painting tools."""
@@ -2382,6 +2829,7 @@ class hex2pixApp(tk.Tk):
 
     def on_drag(self, event):
         x, y = self.clamped(event)
+        state = int(getattr(event, "state", 0) or 0)
         self.cursor = (x, y)
         self._hex_incremental_ok = False
         tool = self.tool
@@ -2429,7 +2877,7 @@ class hex2pixApp(tk.Tk):
                              self.airbrush_size() // 2 + 1)
             self.last_paint = (x, y)
         elif tool in SHAPE_TOOLS and self.shape_anchor is not None:
-            self.apply_shape(x, y)
+            self.apply_shape(x, y, bool(state & 0x0001))
         elif tool in ("rect", "ellipse") and self.drag_anchor:
             self.apply_drag_selection(x, y)
         elif tool == "lasso":
@@ -2488,6 +2936,8 @@ class hex2pixApp(tk.Tk):
     def on_double(self, event):
         if self.tool == "polygon":
             self.finish_polygon()
+        elif self.tool == "hand":
+            self.zoom_fit()
 
     def on_motion(self, event):
         x, y = self.clamped(event)
@@ -2503,7 +2953,21 @@ class hex2pixApp(tk.Tk):
 
     def on_wheel(self, event):
         self.cursor = self.clamped(event)
-        self.zoom_step(1 if event.delta > 0 else -1, (event.x, event.y))
+        state = int(getattr(event, "state", 0) or 0)
+        direction = 1 if int(getattr(event, "delta", 0) or 0) > 0 else -1
+        if state & 0x0001:
+            self.view.xview_scroll(-direction * 3, "units")
+            self.request_redraw()
+            return
+        if state & 0x0004 and self.view_mode == "image":
+            self.nudge_brush(direction)
+            return
+        self.zoom_step(direction, (event.x, event.y))
+
+    def nudge_brush(self, direction):
+        """Grow or shrink the brush from Ctrl+wheel without leaving the canvas."""
+        self.brush_var.set(max(1, min(64, int(self.brush) + direction)))
+        self.apply_brush()
 
     def scroll_x(self, *args):
         self.view.xview(*args)
@@ -2567,6 +3031,10 @@ class hex2pixApp(tk.Tk):
     def on_middle_release(self, event):
         self._pan = None
 
+    def on_middle_double(self, event=None):
+        self._pan = None
+        self.zoom_fit()
+
     # ------------------------------------------------------------------- tools
     def set_tool(self, name):
         self.stop_airbrush()
@@ -2578,7 +3046,9 @@ class hex2pixApp(tk.Tk):
         self.blur_source = None
         self._refresh_tool_options()
         if hasattr(self, "view"):
-            self.view.configure(cursor="fleur" if name == "hand" else "")
+            cursors = {"hand": "fleur", "transform": "fleur",
+                       "picker": "hand2", "text": "xterm"}
+            self.view.configure(cursor=cursors.get(name, "crosshair"))
         self.status_tool()
         self.redraw()
 
@@ -3042,9 +3512,31 @@ class hex2pixApp(tk.Tk):
         self.shape_anchor = (x, y)
         self.apply_shape(x, y)
 
-    def apply_shape(self, x, y):
+    def constrained_shape(self, x, y):
+        """Snap a drag for Shift: 45° lines and square/circle shapes."""
+        ax, ay = self.shape_anchor
+        dx, dy = x - ax, y - ay
+        if self.tool == "line":
+            adx, ady = abs(dx), abs(dy)
+            if adx >= ady * 2:
+                dy = 0
+            elif ady >= adx * 2:
+                dx = 0
+            else:
+                step = min(adx, ady)
+                dx = step if dx >= 0 else -step
+                dy = step if dy >= 0 else -step
+            return ax + dx, ay + dy
+        size = max(abs(dx), abs(dy))
+        sx = 1 if dx >= 0 else -1
+        sy = 1 if dy >= 0 else -1
+        return ax + sx * size, ay + sy * size
+
+    def apply_shape(self, x, y, constrain=False):
         if self.shape_anchor is None or self.shape_base is None:
             return
+        if constrain and self.tool != "curve":
+            x, y = self.constrained_shape(x, y)
         self.doc.bitmap = self.shape_base.copy()
         if self.tool == "curve":
             paint_curve(self.doc.bitmap, self.doc.mask(),
@@ -4790,6 +5282,8 @@ class hex2pixApp(tk.Tk):
             "Wheel           smooth zoom around the pointer (12.5%-6400%)\n"
             "Colour wheel    click sets FG, right-click sets BG\n"
             "Palette         New/Set/Del build one; Map quantizes to it\n"
+            "Dark mode       View > Dark mode; on by default\n"
+            "Dockers         View menu hides or shows right-side tabs\n"
             "Shift+T         move / scale / rotate selection: drag to move,\n"
             "                Shift+drag scales, Ctrl+drag rotates in 15 deg\n"
             "                steps, Enter moves it to the cursor\n"
@@ -4811,8 +5305,11 @@ class hex2pixApp(tk.Tk):
             "F5              play the recording back (Escape stops)\n"
             "F11             toggle fullscreen (Escape leaves it)\n"
             "\n"
-            "Mouse: left draws, right erases, middle drags the view, "
-            "wheel zooms. Shift adds to a selection, Ctrl subtracts, "
+            "Mouse: left draws, right erases or subtracts, middle drags "
+            "the view, wheel zooms. Shift+wheel pans sideways, "
+            "Ctrl+wheel changes the brush, double-click middle fits the "
+            "artwork. Shift snaps Line to 45 degrees and Rectangle/Ellipse "
+            "to squares/circles. Shift adds to a selection, Ctrl subtracts, "
             "Alt intersects.", parent=self)
 
     def show_selection_help(self):
@@ -5522,6 +6019,55 @@ def run_selftest(out_path=None):
         app.palette_name = "PICO-8"
         app.draw_palette()
 
+        dark_ok = (app.dark_mode and app.dark_var.get()
+                   and str(app.cget("bg")) == THEMES["dark"]["bg"])
+        app.dark_var.set(False)
+        app.toggle_dark_mode()
+        app.update_idletasks()
+        light_ok = (not app.dark_mode
+                    and str(app.cget("bg")) == THEMES["light"]["bg"])
+        app.dark_var.set(True)
+        app.toggle_dark_mode()
+        app.update_idletasks()
+        dark_ok = dark_ok and app.dark_mode
+        docker_keys = list(app.docker_tabs)
+        dockers_ok = len(docker_keys) >= 7
+        for key in docker_keys:
+            app.docker_vars[key].set(False)
+            app.toggle_docker(key)
+        dockers_ok = dockers_ok and all(
+            str(app.notebook.tab(app.docker_tabs[key], "state")) == "hidden"
+            for key in docker_keys)
+        for key in docker_keys:
+            app.docker_vars[key].set(True)
+            app.toggle_docker(key)
+        dockers_ok = dockers_ok and all(
+            str(app.notebook.tab(app.docker_tabs[key], "state")) == "normal"
+            for key in docker_keys)
+
+        old_tool = app.tool
+        app.tool = "line"
+        app.shape_anchor = (0, 0)
+        mouse_ok = app.constrained_shape(10, 3) == (10, 0)
+        app.tool = "shape_rect"
+        mouse_ok = mouse_ok and app.constrained_shape(10, 3) == (10, 10)
+        app.shape_anchor = None
+        app.tool = old_tool
+        app.set_view_mode("image")
+        app.brush = 5
+        app.brush_var.set(5)
+
+        class Wheel(object):
+            x = 20
+            y = 20
+            delta = 120
+            state = 0x0004
+
+        app.on_wheel(Wheel())
+        mouse_ok = mouse_ok and app.brush == 6
+        app.brush = 1
+        app.brush_var.set(1)
+
         app.set_fullscreen(True)
         app.update_idletasks()
         fullscreen_ok = app.fullscreen
@@ -5564,7 +6110,8 @@ def run_selftest(out_path=None):
                       kb_ok, kb_cancel_ok, record_ok, play_ok, kb_fill_ok,
                       line_fill_ok, structure_ok, pattern_text_ok,
                       fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
-                      gradient_ok, palette_ok, wheel_ok, quantize_ok))
+                      gradient_ok, palette_ok, wheel_ok, quantize_ok,
+                      dark_ok, light_ok, dockers_ok, mouse_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
                      "drag=%s erase=%s export=%s dump=%s canvas=%s props=%s "
                      "canvas_undo=%s dialog=%s default_view=%s hex_view=%s "
@@ -5573,7 +6120,8 @@ def run_selftest(out_path=None):
                      "kb_cancel=%s record=%s play=%s kb_fill=%s line_fill=%s "
                      "structure=%s pattern_text=%s fullscreen=%s "
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
-                     "palette=%s wheel=%s quantize=%s"
+                     "palette=%s wheel=%s quantize=%s dark=%s light=%s "
+                     "dockers=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -5582,7 +6130,8 @@ def run_selftest(out_path=None):
                         kb_ok, kb_cancel_ok, record_ok, play_ok, kb_fill_ok,
                         line_fill_ok, structure_ok, pattern_text_ok,
                         fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
-                        gradient_ok, palette_ok, wheel_ok, quantize_ok))
+                        gradient_ok, palette_ok, wheel_ok, quantize_ok,
+                        dark_ok, light_ok, dockers_ok, mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))
