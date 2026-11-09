@@ -10,7 +10,7 @@ import os
 ICON_FILES = {
     "pencil": "pencilbtn.bmp",
     "eraser": "eraserbtn.bmp",
-    "airbrush": "Spraycanbtn.bmp",
+    "spray": "Spraycanbtn.bmp",
     "picker": "pickerbtn.bmp",
     "fill": "fillbtn.bmp",
     "line": "linebtn.bmp",
@@ -22,7 +22,7 @@ ICON_FILES = {
     "structure": "paternbtn.bmp",
     "contour": "contourbtn.bmp",
     "blur": "blurbtn.bmp",
-    "jumble": "jumblebtn.bmp",
+    "shuffle": "shufflebtn.bmp",
     "text": "textbtn.bmp",
     "rect": "rectselectbtn.bmp",
     "ellipse": "ellipseselectbtn.bmp",

@@ -1,4 +1,4 @@
-"""Destructive pixel effects: softening and jumbling a brush area.
+"""Destructive pixel effects: softening and mixing a brush area.
 
 Both effects work on a brush footprint (`size` and `shape`), can be mirrored
 across the canvas centre lines and only write pixels the selection allows, so
@@ -8,7 +8,7 @@ how many pixels they touched.
 * `blur` replaces each pixel with the average of its 3x3 neighbourhood, mixed
   back towards the original by `strength` (0-100%). A stroke passes one
   snapshot so overlapping dabs of the same drag do not compound.
-* `jumble` reorders the colour bytes inside the footprint:
+* `shuffle` reorders the colour bytes inside the footprint:
   `shuffle` permutes them, `scatter` picks a random colour per pixel (so some
   are duplicated), and `noise` jitters the RGB channels by `amount` percent
   while keeping each pixel's alpha.
@@ -21,7 +21,7 @@ import random
 from .model import clamp
 from .shapes import brush_offsets, line_points, mirror_points
 
-JUMBLE_MODES = ("shuffle", "scatter", "noise")
+SHUFFLE_MODES = ("shuffle", "scatter", "noise")
 
 
 def _put(bitmap, x, y, color):
@@ -171,13 +171,13 @@ def smear_area(bitmap, mask, x, y, size=3, amount=50, shape="square",
     return written
 
 
-def jumble_area(bitmap, mask, x, y, size=3, mode="shuffle", amount=50,
+def shuffle_area(bitmap, mask, x, y, size=3, mode="shuffle", amount=50,
                 shape="square", axes="", rng=None, blur=0, source=None):
     """Mix the pixels under the brush; returns the pixels written."""
     cells = _cells(bitmap, mask, x, y, size, shape, axes)
     if len(cells) < 2:
         return 0
-    if mode not in JUMBLE_MODES:
+    if mode not in SHUFFLE_MODES:
         mode = "shuffle"
     rng = rng if rng is not None else random.Random()
     colors = [bitmap.rgba(px, py) for px, py in cells]
@@ -213,10 +213,10 @@ def jumble_area(bitmap, mask, x, y, size=3, mode="shuffle", amount=50,
     return written
 
 
-def jumble_stroke(bitmap, mask, x0, y0, x1, y1, size=3, mode="shuffle",
-                  amount=50, shape="square", axes="", rng=None, blur=0,
-                  source=None):
-    """Jumble along a stroke between two points, mirrored."""
+def shuffle_stroke(bitmap, mask, x0, y0, x1, y1, size=3, mode="shuffle",
+                   amount=50, shape="square", axes="", rng=None, blur=0,
+                   source=None):
+    """Shuffle along a stroke between two points, mirrored."""
     rng = rng if rng is not None else random.Random()
     if blur and source is None:
         # One snapshot for the whole stroke, so the soften averages stay put
@@ -224,19 +224,47 @@ def jumble_stroke(bitmap, mask, x0, y0, x1, y1, size=3, mode="shuffle",
         source = bitmap.copy()
     written = 0
     for x, y in line_points(x0, y0, x1, y1):
-        written += jumble_area(bitmap, mask, x, y, size, mode, amount, shape,
-                               axes, rng, blur, source)
+        written += shuffle_area(bitmap, mask, x, y, size, mode, amount, shape,
+                                axes, rng, blur, source)
     return written
 
 
-def _spray_pixel(bitmap, px, py, color, blur, radius, centers):
-    """Paint `color`, fading into the pixel underneath near the tip edge."""
+def _tip_depths(cells):
+    """How far inside the footprint each pixel sits; 1 is on the rim.
+
+    A soft spray used to fade by distance from the brush centre, so a hollow
+    or oddly shaped tip had every pixel on that circle's rim and vanished
+    under Blur. Walking inwards from the tip's own edge fades whatever shape
+    the tip has.
+    """
+    inside = set(cells)
+    steps = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    depths = {}
+    edge = []
+    for px, py in inside:
+        for dx, dy in steps:
+            if (px + dx, py + dy) not in inside:
+                depths[(px, py)] = 1
+                edge.append((px, py))
+                break
+    head = 0
+    while head < len(edge):
+        px, py = edge[head]
+        head += 1
+        deeper = depths[(px, py)] + 1
+        for dx, dy in steps:
+            other = (px + dx, py + dy)
+            if other in inside and other not in depths:
+                depths[other] = deeper
+                edge.append(other)
+    return depths
+
+
+def _spray_pixel(bitmap, px, py, color, blur, feather):
+    """Paint `color`, fading into the pixel underneath near the tip's edge."""
     if not blur:
         _put(bitmap, px, py, color)
         return
-    distance = min(((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
-                   for cx, cy in centers)
-    feather = min(1.0, distance / radius)
     mix = 1.0 - (blur / 100.0) * feather
     base = bitmap.rgba(px, py)
     _put(bitmap, px, py,
@@ -251,11 +279,12 @@ def spray_area(bitmap, mask, x, y, size=8, flow=25, color=(255, 255, 255,
     """Spray inside the brush footprint; `flow` and `blur` are percentages.
 
     Every writable pixel of the footprint is painted with `flow`% probability,
-    which is what makes an airbrush build up on the pixels it keeps hitting.
+    which is what makes the spray can build up on the pixels it keeps hitting.
     `colors` picks one of several colours per sprayed pixel instead of `color`.
     `blur` feathers the rim of each dab: at 0 every hit is flat colour, and
-    higher values fade the outer pixels into whatever is already underneath,
-    so the spray gets a soft edge without becoming a different tool.
+    higher values fade the pixels nearest the tip's edge into whatever is
+    already underneath, so the spray gets a soft edge that follows the tip's
+    shape without becoming a different tool.
     """
     cells = _cells(bitmap, mask, x, y, size, shape, axes)
     if not cells:
@@ -269,12 +298,15 @@ def spray_area(bitmap, mask, x, y, size=8, flow=25, color=(255, 255, 255,
         return 0
     blur = _count(blur, 0, 100, 0)
     palette = [tuple(entry) for entry in colors] if colors else []
-    centers = list(mirror_points(x, y, bitmap.width, bitmap.height, axes))
-    radius = max(0.5, _count(size, 1, 64, 8) / 2.0)
+    depths = _tip_depths(cells) if blur else {}
+    deepest = max(depths.values()) if depths else 1
     painted = 0
     for px, py in chosen:
         picked = rng.choice(palette) if palette else color
-        _spray_pixel(bitmap, px, py, picked, blur, radius, centers)
+        feather = 0.0
+        if blur:
+            feather = 1.0 - depths.get((px, py), 1) / float(deepest)
+        _spray_pixel(bitmap, px, py, picked, blur, feather)
         painted += 1
     return painted
 

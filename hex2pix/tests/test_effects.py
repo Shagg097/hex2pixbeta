@@ -1,12 +1,12 @@
-"""Tests for the blur and jumble pixel effects."""
+"""Tests for the blur and shuffle pixel effects."""
 
 import random
 import unittest
 
-from hex2pix.effects import (CONTOUR_SIDES, JUMBLE_MODES, blur_area,
+from hex2pix.effects import (CONTOUR_SIDES, SHUFFLE_MODES, blur_area,
                              blur_stroke, content_mask, contour_mask,
-                             grow_mask, jumble_area, shrink_mask, spray_area,
-                             spray_stroke)
+                             grow_mask, shrink_mask, spray_area, spray_stroke,
+                             shuffle_area)
 from hex2pix.model import Bitmap
 from hex2pix.shapes import paint_mask
 
@@ -80,7 +80,7 @@ class BlurTest(unittest.TestCase):
         self.assertNotEqual(bitmap.rgba(8, 0), WHITE)
 
 
-class JumbleTest(unittest.TestCase):
+class ShuffleTest(unittest.TestCase):
     def four_colors(self):
         bitmap = Bitmap(2, 2)
         bitmap.set_rgba(0, 0, RED)
@@ -96,16 +96,16 @@ class JumbleTest(unittest.TestCase):
     def test_shuffle_keeps_every_colour(self):
         bitmap = self.four_colors()
         before = self.colors(bitmap)
-        self.assertEqual(jumble_area(bitmap, None, 0, 0, 3, "shuffle", 50,
+        self.assertEqual(shuffle_area(bitmap, None, 0, 0, 3, "shuffle", 50,
                                      rng=random.Random(7)), 4)
         self.assertEqual(self.colors(bitmap), before)
 
     def test_shuffle_is_deterministic_for_a_seed(self):
         first = self.four_colors()
         second = self.four_colors()
-        jumble_area(first, None, 0, 0, 3, "shuffle", 50,
+        shuffle_area(first, None, 0, 0, 3, "shuffle", 50,
                     rng=random.Random(3))
-        jumble_area(second, None, 0, 0, 3, "shuffle", 50,
+        shuffle_area(second, None, 0, 0, 3, "shuffle", 50,
                     rng=random.Random(3))
         self.assertEqual(self.colors(first), self.colors(second))
         self.assertEqual([first.rgba(x, y) for y in range(2) for x in range(2)],
@@ -114,14 +114,14 @@ class JumbleTest(unittest.TestCase):
     def test_scatter_only_uses_colours_from_the_area(self):
         bitmap = self.four_colors()
         allowed = set(self.colors(bitmap))
-        jumble_area(bitmap, None, 0, 0, 3, "scatter", 50,
+        shuffle_area(bitmap, None, 0, 0, 3, "scatter", 50,
                     rng=random.Random(11))
         self.assertTrue(set(self.colors(bitmap)) <= allowed)
 
     def test_noise_keeps_alpha_and_stays_in_range(self):
         bitmap = Bitmap(3, 3)
         bitmap.fill((100, 100, 100, 128))
-        jumble_area(bitmap, None, 1, 1, 3, "noise", 20,
+        shuffle_area(bitmap, None, 1, 1, 3, "noise", 20,
                     rng=random.Random(5))
         for y in range(3):
             for x in range(3):
@@ -134,29 +134,29 @@ class JumbleTest(unittest.TestCase):
     def test_noise_with_zero_amount_changes_nothing(self):
         bitmap = self.four_colors()
         before = self.colors(bitmap)
-        jumble_area(bitmap, None, 0, 0, 3, "noise", 0,
+        shuffle_area(bitmap, None, 0, 0, 3, "noise", 0,
                     rng=random.Random(1))
         self.assertEqual(self.colors(bitmap), before)
 
     def test_single_pixel_area_does_nothing(self):
         bitmap = Bitmap(1, 1)
         bitmap.set_rgba(0, 0, RED)
-        self.assertEqual(jumble_area(bitmap, None, 0, 0, 1, "shuffle"), 0)
+        self.assertEqual(shuffle_area(bitmap, None, 0, 0, 1, "shuffle"), 0)
 
     def test_mask_limits_the_area(self):
         bitmap = self.four_colors()
         mask = bytearray(4)
         mask[0] = 255
-        self.assertEqual(jumble_area(bitmap, mask, 0, 0, 3, "shuffle"), 0)
+        self.assertEqual(shuffle_area(bitmap, mask, 0, 0, 3, "shuffle"), 0)
         self.assertEqual(bitmap.rgba(0, 0), RED)
 
     def test_unknown_mode_falls_back_to_shuffle(self):
         bitmap = self.four_colors()
         before = self.colors(bitmap)
-        jumble_area(bitmap, None, 0, 0, 3, "sparkle", 50,
+        shuffle_area(bitmap, None, 0, 0, 3, "sparkle", 50,
                     rng=random.Random(2))
         self.assertEqual(self.colors(bitmap), before)
-        self.assertIn("shuffle", JUMBLE_MODES)
+        self.assertIn("shuffle", SHUFFLE_MODES)
 
 
 class SprayTest(unittest.TestCase):

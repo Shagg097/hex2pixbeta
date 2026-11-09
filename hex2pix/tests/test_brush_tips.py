@@ -3,6 +3,7 @@
 import unittest
 
 from hex2pix import shapes
+from hex2pix.effects import blur_area, shuffle_area, spray_area
 from hex2pix.model import Bitmap
 from hex2pix.shapes import (brush_offsets, custom_brush, custom_brush_from_text,
                             custom_brush_text, set_custom_brush,
@@ -34,6 +35,43 @@ class CustomBrushTest(unittest.TestCase):
             set(brush_offsets(4, "custom")),
             {(-2, -2), (-1, -2), (-2, -1), (-1, -1),
              (0, 0), (1, 0), (0, 1), (1, 1)})
+
+    def test_a_thin_tip_survives_a_small_size(self):
+        # Point sampling used to miss this tip below 9 cells and fall back to
+        # a square, which made Blur and Shuffle ignore the custom shape.
+        set_custom_brush(["000", "010", "000"])
+        self.assertEqual(brush_offsets(1, "custom"), [(0, 0)])
+        four = set(brush_offsets(4, "custom"))
+        self.assertTrue(four)
+        self.assertNotEqual(four, set(brush_offsets(4, "square")))
+
+    def test_blur_and_shuffle_take_the_custom_footprint(self):
+        set_custom_brush(["100", "010", "001"])
+        bitmap = Bitmap(7, 7)
+        bitmap.fill(RED)
+        self.assertEqual(blur_area(bitmap, None, 3, 3, 3, 100, "custom"), 3)
+        bitmap.fill(RED)
+        self.assertEqual(shuffle_area(bitmap, None, 3, 3, 3, "shuffle", 100,
+                                      "custom"), 3)
+
+    def test_spray_takes_the_custom_footprint(self):
+        set_custom_brush(["100", "010", "001"])
+        bitmap = Bitmap(7, 7)
+        self.assertEqual(spray_area(bitmap, None, 3, 3, 3, 100, RED,
+                                    "custom"), 3)
+
+    def test_spray_feather_follows_a_hollow_tip(self):
+        # Every ring pixel used to sit on the circular feather rim, so Blur
+        # faded the whole tip away instead of softening its edge.
+        ring = [(1 if x in (0, 8) or y in (0, 8) else 0)
+                for y in range(9) for x in range(9)]
+        set_custom_brush([ring[y * 9:(y + 1) * 9] for y in range(9)])
+        bitmap = Bitmap(11, 11)
+        spray_area(bitmap, None, 5, 5, 4, 100, RED, "custom", blur=100)
+        painted = [bitmap.rgba(x, y) for y in range(11) for x in range(11)
+                   if bitmap.rgba(x, y)[3]]
+        self.assertTrue(painted)
+        self.assertGreater(min(color[3] for color in painted), 0)
 
     def test_an_empty_tip_falls_back_to_a_square(self):
         set_custom_brush(["00", "00"])

@@ -97,7 +97,13 @@ def custom_brush_from_text(text):
 
 
 def _custom_offsets(size):
-    """Scale the custom tip onto a `size` x `size` brush box."""
+    """Scale the custom tip onto a `size` x `size` brush box.
+
+    Each box cell takes every grid cell it covers, so a thin tip still shows
+    up when the tool's Size is smaller than the 9x9 grid. Sampling a single
+    grid cell per box cell used to miss thin tips at common sizes, which made
+    the tool quietly fall back to a square.
+    """
     mask = custom_brush()
     rows = len(mask)
     columns = max(len(row) for row in mask) if rows else 0
@@ -106,11 +112,13 @@ def _custom_offsets(size):
     half = size // 2
     offsets = []
     for dy in range(-half, size - half):
-        source_y = min(rows - 1, int((dy + half + 0.5) * rows / size))
+        y0 = (dy + half) * rows // size
+        y1 = min(rows, ((dy + half + 1) * rows + size - 1) // size)
         for dx in range(-half, size - half):
-            source_x = min(columns - 1,
-                           int((dx + half + 0.5) * columns / size))
-            if mask[source_y][source_x]:
+            x0 = (dx + half) * columns // size
+            x1 = min(columns, ((dx + half + 1) * columns + size - 1) // size)
+            if any(x < len(mask[y]) and mask[y][x]
+                   for y in range(y0, y1) for x in range(x0, x1)):
                 offsets.append((dx, dy))
     return offsets
 
