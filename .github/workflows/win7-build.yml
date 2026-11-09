@@ -27,15 +27,29 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      - name: Cache stand-alone CPython 3.8.20
+        uses: actions/cache@v4
+        with:
+          path: .py38
+          key: cpython-3.8.20+20240909-windows-x86_64
+
       - name: Install stand-alone CPython 3.8.20
         shell: bash
         run: |
           set -euo pipefail
           url="https://github.com/astral-sh/python-build-standalone/releases/download/20240909/cpython-3.8.20%2B20240909-x86_64-pc-windows-msvc-install_only.tar.gz"
-          mkdir -p .py38
-          curl --fail --location --silent --show-error --retry 3 -o pbs38.tar.gz "$url"
-          tar -xzf pbs38.tar.gz -C .py38
-          rm -f pbs38.tar.gz
+          # That release asset intermittently answers 429/5xx through the CDN, and
+          # --fail reports it as exit 22. curl retries 408/429/5xx itself, so give
+          # it room, and skip the download entirely when the cache holds the runtime.
+          if ./.py38/python/python.exe -c "import sys" 2>/dev/null; then
+            echo "using the cached stand-alone CPython"
+          else
+            rm -rf .py38
+            mkdir -p .py38
+            curl --fail --location --silent --show-error               --retry 8 --retry-delay 5 --retry-max-time 300 --connect-timeout 20               -o pbs38.tar.gz "$url"
+            tar -xzf pbs38.tar.gz -C .py38
+            rm -f pbs38.tar.gz
+          fi
           test -f .py38/python/python.exe
           ./.py38/python/python.exe -c "import sys, tkinter; print(sys.version); print('Tk', tkinter.TkVersion)"
 
