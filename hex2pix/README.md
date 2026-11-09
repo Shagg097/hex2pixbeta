@@ -47,14 +47,19 @@ command line skips the page and opens that image.
 
 ## Automatic updates
 
-The update check is optional and uses only the Python standard library.
+The update check is optional, uses only the Python standard library, and every
+update is opted into separately.
 
-Packaged Windows builds check GitHub Releases after launch; **Help > Check for
-updates...** checks immediately and **Check for updates automatically**
-toggles the startup check. A newer release asks first, then downloads with a
-size check and the SHA-256 digest published by GitHub. After the editor closes,
-a helper replaces `hex2pix.exe` and restarts it. Stable installs ignore
-prereleases; prerelease installs may receive them. The folder must be writable
+Packaged Windows builds check GitHub Releases shortly after launch; **Help >
+Check for updates...** checks immediately and **Check for updates
+automatically** toggles the startup check. When a newer release exists the
+prompt shows its version and notes with **Download and install**, **Skip this
+version** and **Later**; only the first downloads it, skipping remembers that
+release until a newer one appears, and later asks again on the next launch.
+The download is checked against the asset size and the SHA-256 digest
+published by GitHub, then, after the editor closes, a helper replaces
+`hex2pix.exe` and restarts it. Stable installs ignore prereleases; prerelease
+installs may receive them. The folder must be writable
 (portable installs are fine, `Program Files` is not). Source checkouts do not
 self-replace and instead offer the release page. Attach the built
 `hex2pix.exe` to a GitHub Release (with a version tag such as `v1.3.0b1`) for
@@ -254,10 +259,13 @@ spreads stay smooth.
 
 Aseprite-style drawing aids on top of the brush:
 
-- **Line** (Shift+N), **Rectangle** (Shift+R) and **Ellipse** (Shift+U) drag
-  between two points with a live preview; the **Filled shapes** checkbox picks
-  outline or solid. From the keyboard, Enter sets one end and Enter again
-  commits, with arrows stretching the preview.
+- **Line** (Shift+N), **Rectangle** (Shift+R), **Ellipse** (Shift+U),
+  **Triangle**, **Diamond**, **Star** and **Arrow** drag between two points
+  with a live preview; the **Filled shapes** checkbox picks outline or solid,
+  and **Background** paints the shape in the background colour so it cuts into
+  the artwork. The four preset polygons have no Shift shortcut; open the
+  Shapes folder in the tool palette for them. From the keyboard, Enter sets
+  one end and Enter again commits, with arrows stretching the preview.
 - **Gradient** (Shift+V) drags a direction and interpolates the foreground to
   the background colour across the selection; **Radial** uses the distance
   from the drag start, **Whole palette** walks the palette instead, and
@@ -331,8 +339,13 @@ it to move those pixels (the original area is cleared), hold **Shift** while
 dragging to scale them from the corner opposite the one you grabbed, hold
 **Ctrl** to rotate them around their centre in 15° steps (nearest-neighbour
 sampling, so quarter turns are exact), or press `Enter` to drop the piece with
-its corner on the cursor. `Escape` puts the piece back untouched. The
-selection follows the pixels, and the whole drag is one undo step.
+its corner on the cursor. `Escape` puts the piece back untouched. Scaling is
+uniform and anchored: one factor drives both axes, the opposite corner stays
+put, and the drag starts from whatever size the piece already has, so it
+cannot squash the artwork or collapse on the first pixel of movement. A
+rotation grab inside the middle three pixels holds the current angle until
+the pointer leaves that dead zone, so a click near the centre cannot spin the
+piece. The selection follows the pixels, and the whole drag is one undo step.
 
 The **Dump** tab shows the selected bytes as `offset  RRGGBBAA` rows, with the
 selection's pixel count and byte count. **Copy dump** puts that text on the
@@ -392,8 +405,8 @@ state the tool uses:
 | Pencil, Eraser | Size, Tip (square, circle or custom), Mirror, Pattern tip (Pencil) |
 | Picker | pick the colour into FG or BG |
 | Fill | Tolerance |
-| Line | Width, Tip |
-| Rectangle, Ellipse | Fill, Width, Tip |
+| Line | Width, Tip, Background |
+| Rectangle, Ellipse, Triangle, Diamond, Star, Arrow | Fill, Background, Width, Tip |
 | Gradient | Radial, Whole palette, reverse the direction (BG to FG), Spread (Clamp, Repeat, Reflect), Dither mode (two-colour linear gradients; Bias/Strength/Scale from the Dither tab) |
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
@@ -429,7 +442,8 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
   button erases; with a selection tool it subtracts; on controls it keeps the
   control's own secondary action.
 * **Move / Scale**: left drag inside a selection moves it; **Shift**+drag
-  scales it; **Ctrl**+drag rotates it.
+  scales it while keeping its proportions; **Ctrl**+drag rotates it around
+  its centre.
 * **Shift** while dragging **Line** snaps to horizontal, vertical or 45°;
   with **Rectangle** and **Ellipse** it draws a square or circle.
 * Selection tools: **Shift** adds, **Ctrl** subtracts, **Alt** intersects and
@@ -455,14 +469,14 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
 | `+` / `-` | brush size |
 | `[` / `]` | zoom out / in |
 | Space | swap foreground and background |
-| Shift + letter | pick a tool (Pencil, Eraser, Spray can, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Shuffle, Text, Line pattern, Structure fill, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
+| Shift + letter | pick a tool (Pencil, Eraser, Spray can, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Shuffle, Text, Line pattern, Structure fill, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand; Triangle, Diamond, Star and Arrow live in the Shapes folder) |
 | Shift+T | move the selection by dragging, scale it with Shift+drag, rotate it with Ctrl+drag, or move its corner to the cursor with `Enter` |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+A / Ctrl+D | select all / deselect (the sidebar buttons do the same) |
 | Escape | cancel the current step, leave fullscreen and deselect |
 | Ctrl+C / Ctrl+V | copy / paste hex block text |
 | Ctrl+O / Ctrl+S | open / save |
-| Ctrl+E | export tab |
+| Ctrl+E | save and export docker |
 | Ctrl+Shift+N | new layer |
 | Alt+N / Alt+C / Alt+Delete | new / copy / delete the active layer |
 | Alt+Up / Alt+Down | restack the active layer |
@@ -485,15 +499,25 @@ view.
 **File > Open project...** (or **Open...**, which recognises `.h2p`) restores
 all of it in one step. Once the document path is a `.h2p`, **Ctrl+S** saves the
 project rather than flattening it to an image, and **File > Save As...** offers
-the project type next to PNG, BMP, TGA and hex text. A malformed or foreign zip
+the project type next to every image write format. A malformed or foreign zip
 is reported as an error instead of being loaded partially.
+
+The **Export** docker (**Ctrl+E**) holds saving and exporting in one place.
+**Save** and **Save as...** write the project file and show its path; the image
+half collects the format, source (whole image, current layer, selection, or one
+file per visible layer), trim, scale, sampling, PPI, transparency or matte,
+JPEG quality, GIF colours and PNG level, then **Export image** writes the file
+from the same panel.
 
 ## File formats
 
 Reading goes through Pillow, so PNG, BMP, GIF, TGA, ICO, TIFF, WEBP, JPEG and
 PPM all open; `.txt`/`.hex` files open as hex blocks.
 
-Writing:
+Writing, from the Save dialog or the Export docker. The docker's image options
+apply to every format: source, trim transparent edges, 1–32× scale with nearest
+or bilinear sampling, the PPI stored in the file, keeping alpha or blending
+onto a matte colour, JPEG quality, GIF palette size and PNG compression level.
 
 | Format | Alpha | Notes |
 | --- | --- | --- |
@@ -501,7 +525,7 @@ Writing:
 | BMP 24-bit | no | hand-written header, transparency blended onto the matte |
 | BMP 32-bit | yes | hand-written, alpha bytes preserved |
 | TGA | yes | 32-bit |
-| GIF | no | 256-color adaptive palette |
+| GIF | no | adaptive palette, colour count adjustable |
 | ICO | yes | padded to a square entry, never resampled |
 | TIFF | yes | RGBA |
 | WEBP | yes | lossless |

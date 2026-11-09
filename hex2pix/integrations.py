@@ -31,6 +31,7 @@ USER_AGENT = "hex2pix/%s" % __version__
 
 DEFAULT_SETTINGS = {
     "check_updates": True,
+    "skipped_version": "",
     "custom_brush": "",
 }
 

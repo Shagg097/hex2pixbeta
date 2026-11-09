@@ -37,7 +37,7 @@ from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
 from .shapes import (brush_offsets, custom_brush, custom_brush_from_text,
                      custom_brush_text, gradient_fill, line_points,
                      mirror_points, paint_curve, paint_dab, paint_mask,
-                     paint_shape, paint_stroke, set_custom_brush,
+                     paint_shape, paint_stroke, set_custom_brush, shape_color,
                      stamp_pattern, stamp_text)
 from .canvas import (ANCHOR_CODES, ANCHOR_LABELS, MAX_SIDE, UNITS, CanvasSpec,
                      apply_spec_to_document, physical_size, px_per_unit,
@@ -49,7 +49,8 @@ from .model import (
     flip_horizontal, flip_vertical, flood_fill, format_dump, hex_str,
     clean_path, invert_colors, paint_brush, paint_line, parse_block,
     parse_hex, parse_hex_map, pick_related, piece_mask, place_block, rotate90,
-    rotate_piece, selected_bytes, selection_ellipse_mask,
+    RotationDrag, rotate_piece, scale_box, selected_bytes,
+    selection_ellipse_mask,
     selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block,
 )
@@ -64,6 +65,11 @@ TOOLS = (
     ("curve", "Curve", "c", "Drag a curved line; Bend sets the arc"),
     ("shape_rect", "Rectangle", "r", "Drag a rectangle, outline or filled"),
     ("shape_ellipse", "Ellipse", "u", "Drag an ellipse, outline or filled"),
+    ("shape_triangle", "Triangle", "",
+     "Drag a triangle, outline or filled"),
+    ("shape_diamond", "Diamond", "", "Drag a diamond, outline or filled"),
+    ("shape_star", "Star", "", "Drag a star, outline or filled"),
+    ("shape_arrow", "Arrow", "", "Drag an arrow, outline or filled"),
     ("gradient", "Gradient", "v", "Drag a linear, radial or palette gradient"),
     ("pattern", "Line pattern", "l", "Fill lines with the pattern, row by row"),
     ("structure", "Structure fill", "k", "Fill with a mirrored structural pattern"),
@@ -81,17 +87,47 @@ TOOLS = (
      "Drag a selection to move it, Shift to scale, Ctrl to rotate"),
     ("hand", "Hand", "h", "Drag to pan; the wheel zooms at the pointer"),
 )
-TOOL_BY_KEY = {key: name for name, _, key, _ in TOOLS}
+TOOL_BY_KEY = {key: name for name, _, key, _ in TOOLS if key}
 TOOL_TIPS = {name: tip for name, _, _, tip in TOOLS}
 HEX_CHARS = set("0123456789abcdef")
 
 SELECTION_TOOLS = ("rect", "ellipse", "polygon", "lasso", "wand",
                    "similar", "transform")
 PAINT_TOOLS = ("pencil", "eraser")
-SHAPE_TOOLS = ("line", "curve", "shape_rect", "shape_ellipse")
+SHAPE_TOOLS = ("line", "curve", "shape_rect", "shape_ellipse",
+               "shape_triangle", "shape_diamond", "shape_star",
+               "shape_arrow")
+
+# The palette is a grid of dropdown folders; related tools share a button.
+TOOL_GROUPS = (
+    ("brush", "Brush", ("pencil", "eraser", "spray", "blur", "shuffle")),
+    ("shape", "Shapes", ("line", "curve", "shape_rect", "shape_ellipse",
+                         "shape_triangle", "shape_diamond", "shape_star",
+                         "shape_arrow")),
+    ("fill", "Fill", ("fill", "gradient", "pattern", "structure",
+                      "contour")),
+    ("select", "Select", ("rect", "ellipse", "polygon", "lasso", "wand",
+                          "similar")),
+    ("transform", "Transform", ("transform", "hand")),
+    ("utility", "Text and pick", ("picker", "text")),
+)
 
 # Dockers hidden on startup; the View menu shows them again.
 DEFAULT_HIDDEN_DOCKERS = ("block", "bytes", "dump", "export")
+
+EXPORT_SOURCES = ("Whole image", "Current layer", "Selection",
+                  "Each visible layer")
+
+
+def _layer_export_path(path, name, index, ext):
+    """A unique file path for one layer exported beside `path`."""
+    stem, current = os.path.splitext(path)
+    if current.lower() != ext:
+        stem = path
+    safe = "".join(char if char.isalnum() or char in "-_" else "-"
+                   for char in name).strip("-")
+    safe = safe or "layer"
+    return "%s_%02d_%s%s" % (stem, index, safe, ext)
 
 MAX_PIXELS = 12000000
 MIN_ZOOM = 1e-9           # keeps Tk's coordinate maths finite on huge canvases
@@ -1066,7 +1102,7 @@ class hex2pixApp(tk.Tk):
         self.transform_fixed = None
         self.transform_mode = "move"
         self.transform_angle = 0.0
-        self.transform_grab_angle = None
+        self.transform_rotation = None
         self.layer_alpha_before = None
         self.layer_alpha_dirty = False
         self._layer_alpha_syncing = False
@@ -1111,7 +1147,7 @@ class hex2pixApp(tk.Tk):
         self.dark_mode = True
         self.colors = THEMES["dark"]
         self.update_auto_var = tk.BooleanVar(
-            value=bool(self.settings.get("check_updates", True)))
+            value=bool(self.settings.get("check_updates")))
         self.docker_vars = {}
         self.docker_tabs = {}
         self.docker_labels = {}
@@ -1628,7 +1664,12 @@ class hex2pixApp(tk.Tk):
         self.tool_var = tk.StringVar(value=self.tool)
         self.tool_buttons = {}
         self.tool_icons = {}
+        self.tool_groups = []
         self._tool_tips = []
+        for name, _, _, _ in TOOLS:
+            photo = self._load_tool_icon(name)
+            if photo is not None:
+                self.tool_icons[name] = photo
         card = tk.Frame(left, bg=self.colors["card"], highlightthickness=1,
                         highlightbackground=self.colors["border"], bd=0,
                         padx=4, pady=4)
@@ -1637,10 +1678,13 @@ class hex2pixApp(tk.Tk):
         grid = tk.Frame(card, bg=self.colors["card"])
         grid.pack(anchor="w")
         self.tool_grid = grid
-        for index, (name, label, key, tip) in enumerate(TOOLS):
-            button = self._build_tool_button(grid, name, label, key, tip)
-            button.grid(row=index // 4, column=index % 4, padx=2, pady=2)
-            self.tool_buttons[name] = button
+        for index, (group_id, label, names) in enumerate(TOOL_GROUPS):
+            group = self._build_tool_group(grid, group_id, label, names)
+            group["button"].grid(row=index // 3, column=index % 3,
+                                 padx=2, pady=2)
+            self.tool_groups.append(group)
+            for name in names:
+                self.tool_buttons[name] = group["button"]
         hint = ttk.Label(left,
                          text="Hover a tool for its name; Shift+letter "
                               "picks it",
@@ -1730,6 +1774,7 @@ class hex2pixApp(tk.Tk):
         self.shape_filled = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Filled shapes",
                         variable=self.shape_filled).pack(anchor="w")
+        self.shape_bg_var = tk.BooleanVar(value=False)
 
         zrow = ttk.Frame(left)
         zrow.pack(fill="x", pady=(2, 0))
@@ -1862,21 +1907,41 @@ class hex2pixApp(tk.Tk):
         self._heading_widgets.append((bar, label))
         return row
 
-    def _build_tool_button(self, parent, name, label, key, tip):
-        photo = self._load_tool_icon(name)
-        if photo is None:
-            return ttk.Button(parent, text=label, width=13,
-                              command=lambda: self.set_tool(name))
-        self.tool_icons[name] = photo
-        button = tk.Button(parent, image=photo, width=icons.BUTTON_SIZE,
-                           height=icons.BUTTON_SIZE, bd=1, padx=1, pady=1,
-                           relief="raised", background="#ffffff",
-                           activebackground="#eef4fb", highlightthickness=2,
-                           highlightbackground="#dbe0e8",
-                           command=lambda: self.set_tool(name))
+    def _build_tool_group(self, parent, group_id, label, names):
+        """A dropdown folder button; its icon shows the active tool."""
+        button = tk.Menubutton(
+            parent, image=self.tool_icons.get(names[0]),
+            width=icons.BUTTON_SIZE, height=icons.BUTTON_SIZE, bd=1,
+            padx=1, pady=1, relief="raised", background="#ffffff",
+            activebackground="#eef4fb", highlightthickness=2,
+            highlightbackground="#dbe0e8", indicatoron=False,
+            compound="right", text="\u25be", foreground="#5b6270",
+            font=("Segoe UI", 7), cursor="hand2")
+        menu = tk.Menu(button, tearoff=0)
+        button.configure(menu=menu)
+        group = {"id": group_id, "label": label, "button": button,
+                 "menu": menu, "tools": tuple(names), "default": names[0]}
+        self._fill_tool_menu(group)
+        labels = dict((name, text) for name, text, _, _ in TOOLS)
         self._tool_tips.append(_ToolTip(
-            button, "%s  (Shift+%s)\n%s" % (label, key.upper(), tip)))
-        return button
+            button, "%s tools\n%s" % (label, ", ".join(labels[name]
+                                                       for name in names))))
+        return group
+
+    def _fill_tool_menu(self, group):
+        """(Re)build a folder's menu so it carries the current icons."""
+        menu = group["menu"]
+        menu.delete(0, "end")
+        labels = dict((name, text) for name, text, _, _ in TOOLS)
+        keys = dict((name, key) for name, _, key, _ in TOOLS)
+        for name in group["tools"]:
+            text = labels[name]
+            key = keys.get(name, "")
+            if key:
+                text += "     Shift+" + key.upper()
+            menu.add_command(label=text, image=self.tool_icons.get(name),
+                             compound="left",
+                             command=lambda tool=name: self.set_tool(tool))
 
     def _load_tool_icon(self, name):
         path = icons.icon_path(name)
@@ -1905,30 +1970,28 @@ class hex2pixApp(tk.Tk):
             self._logo_photo = None
 
     def _reload_tool_icons(self):
-        """Re-tint the palette icons after a theme switch."""
-        for name, button in getattr(self, "tool_buttons", {}).items():
-            if not isinstance(button, tk.Button):
-                continue
+        """Rebuild the palette artwork after a theme switch."""
+        for name, _, _, _ in TOOLS:
             photo = self._load_tool_icon(name)
-            if photo is None:
-                continue
-            self.tool_icons[name] = photo
-            button.configure(image=photo)
+            if photo is not None:
+                self.tool_icons[name] = photo
+        for group in getattr(self, "tool_groups", []):
+            self._fill_tool_menu(group)
+        self.refresh_tool_buttons()
 
     def refresh_tool_buttons(self):
-        """Show the active tool on the icon palette."""
-        for name, button in getattr(self, "tool_buttons", {}).items():
-            active = name == self.tool
+        """Show each folder's current tool and highlight the active one."""
+        for group in getattr(self, "tool_groups", []):
+            active = self.tool in group["tools"]
+            name = self.tool if active else group["default"]
             try:
-                if isinstance(button, tk.Button):
-                    button.configure(
-                        relief="sunken" if active else "raised",
-                        background="#bcdcff" if active else "#ffffff",
-                        activebackground="#a8d2ff" if active else "#eef4fb",
-                        highlightbackground=("#2f8fd0" if active
-                                             else "#dbe0e8"))
-                else:
-                    button.configure(relief="sunken" if active else "raised")
+                group["button"].configure(
+                    image=self.tool_icons.get(name),
+                    relief="sunken" if active else "raised",
+                    background="#bcdcff" if active else "#ffffff",
+                    activebackground="#a8d2ff" if active else "#eef4fb",
+                    highlightbackground=("#2f8fd0" if active
+                                         else "#dbe0e8"))
             except tk.TclError:
                 return
 
@@ -2163,30 +2226,115 @@ class hex2pixApp(tk.Tk):
         export = ttk.Frame(self.notebook, padding=6)
         self.notebook.add(export, text="Export")
         self.export_tab = export
-        ttk.Label(export, text="Format").pack(anchor="w")
+        ttk.Label(export, text="Save project").pack(anchor="w")
+        self.project_path_var = tk.StringVar(value="not saved yet")
+        ttk.Label(export, textvariable=self.project_path_var, wraplength=266,
+                  foreground="#7ddc7d").pack(anchor="w")
+        project_row = ttk.Frame(export)
+        project_row.pack(fill="x", pady=(2, 4))
+        ttk.Button(project_row, text="Save", command=self.save_document).pack(
+            side="left", expand=True, fill="x")
+        ttk.Button(project_row, text="Save as...",
+                   command=self.save_document_as).pack(
+            side="left", expand=True, fill="x")
+        ttk.Separator(export).pack(fill="x", pady=4)
+
+        ttk.Label(export, text="Image format").pack(anchor="w")
         self.format_var = tk.StringVar(value=formats.FORMAT_LABELS[0])
-        ttk.Combobox(export, values=formats.FORMAT_LABELS,
-                     textvariable=self.format_var, state="readonly"
-                     ).pack(fill="x", pady=(0, 4))
-        ttk.Label(export, text="Matte (for formats without alpha)").pack(anchor="w")
+        format_box = ttk.Combobox(export, values=formats.FORMAT_LABELS,
+                                  textvariable=self.format_var,
+                                  state="readonly")
+        format_box.pack(fill="x", pady=(0, 4))
+        format_box.bind("<<ComboboxSelected>>", self._format_changed)
+
+        ttk.Label(export, text="Source").pack(anchor="w")
+        self.export_source = tk.StringVar(value=EXPORT_SOURCES[0])
+        source_box = ttk.Combobox(export, values=EXPORT_SOURCES,
+                                  textvariable=self.export_source,
+                                  state="readonly")
+        source_box.pack(fill="x", pady=(0, 4))
+        source_box.bind("<<ComboboxSelected>>", self._update_export_hint)
+
+        self.export_trim = tk.BooleanVar(value=False)
+        ttk.Checkbutton(export, text="Trim transparent edges",
+                        variable=self.export_trim,
+                        command=self._update_export_hint).pack(anchor="w")
+
+        scale_row = ttk.Frame(export)
+        scale_row.pack(fill="x", pady=2)
+        ttk.Label(scale_row, text="Scale").pack(side="left")
+        self.export_scale = tk.IntVar(value=1)
+        scale_spin = ttk.Spinbox(scale_row, from_=1, to=32, width=4,
+                                 textvariable=self.export_scale,
+                                 command=self._update_export_hint)
+        scale_spin.pack(side="left", padx=(4, 2))
+        scale_spin.bind("<KeyRelease>", self._update_export_hint)
+        ttk.Label(scale_row, text="x").pack(side="left")
+        self.export_resample = tk.StringVar(value="Nearest")
+        ttk.Combobox(scale_row, values=("Nearest", "Bilinear"), width=9,
+                     state="readonly",
+                     textvariable=self.export_resample).pack(side="right")
+
+        ppi_row = ttk.Frame(export)
+        ppi_row.pack(fill="x", pady=2)
+        ttk.Label(ppi_row, text="Resolution").pack(side="left")
+        self.export_ppi = tk.IntVar(value=72)
+        ttk.Spinbox(ppi_row, from_=1, to=2400, width=6,
+                    textvariable=self.export_ppi).pack(side="right")
+        ttk.Label(ppi_row, text="PPI").pack(side="right", padx=2)
+
+        alpha_row = ttk.Frame(export)
+        alpha_row.pack(fill="x", pady=2)
+        self.export_alpha = tk.BooleanVar(value=True)
+        self.alpha_check = ttk.Checkbutton(
+            alpha_row, text="Keep transparency", variable=self.export_alpha,
+            command=self._update_export_options)
+        self.alpha_check.pack(side="left")
         self.matte_var = tk.StringVar(value="FFFFFF")
-        ttk.Entry(export, textvariable=self.matte_var, width=10).pack(anchor="w")
-        qrow = ttk.Frame(export)
-        qrow.pack(fill="x", pady=2)
-        ttk.Label(qrow, text="JPEG quality").pack(side="left")
+        self.matte_entry = ttk.Entry(alpha_row, textvariable=self.matte_var,
+                                     width=8)
+        self.matte_entry.pack(side="right")
+        ttk.Label(alpha_row, text="Matte").pack(side="right", padx=2)
+
+        quality_row = ttk.Frame(export)
+        quality_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(quality_row, text="JPEG quality").pack(side="left")
         self.quality_var = tk.IntVar(value=92)
-        ttk.Spinbox(qrow, from_=1, to=100, width=5,
-                    textvariable=self.quality_var).pack(side="right")
+        self.quality_spin = ttk.Spinbox(quality_row, from_=1, to=100, width=5,
+                                        textvariable=self.quality_var)
+        self.quality_spin.pack(side="right")
+
+        gif_row = ttk.Frame(export)
+        gif_row.pack(fill="x", pady=2)
+        ttk.Label(gif_row, text="GIF colours").pack(side="left")
+        self.gif_colors_var = tk.IntVar(value=256)
+        self.gif_spin = ttk.Spinbox(gif_row, from_=2, to=256, increment=2,
+                                   width=5,
+                                   textvariable=self.gif_colors_var)
+        self.gif_spin.pack(side="right")
+
+        png_row = ttk.Frame(export)
+        png_row.pack(fill="x", pady=2)
+        ttk.Label(png_row, text="PNG level").pack(side="left")
+        self.png_compress_var = tk.IntVar(value=6)
+        self.png_spin = ttk.Spinbox(png_row, from_=0, to=9, width=5,
+                                    textvariable=self.png_compress_var)
+        self.png_spin.pack(side="right")
+
         ttk.Label(export, text="Path").pack(anchor="w", pady=(4, 0))
         self.export_path = tk.StringVar(value="")
         ttk.Entry(export, textvariable=self.export_path).pack(fill="x")
         ttk.Button(export, text="Browse...", command=self.browse_export).pack(
             fill="x", pady=1)
-        ttk.Button(export, text="Write file", command=self.export_now).pack(
+        ttk.Button(export, text="Export image", command=self.export_now).pack(
             fill="x", pady=(4, 2))
+        self.export_hint = tk.StringVar(value="")
+        ttk.Label(export, textvariable=self.export_hint, wraplength=270,
+                  foreground="#9fb3c8").pack(anchor="w")
         self.export_info = tk.StringVar(value="")
         ttk.Label(export, textvariable=self.export_info, wraplength=280,
                   foreground="#7ddc7d").pack(anchor="w")
+        self._update_export_options()
 
         # ---- pattern fill
         pattern = ttk.Frame(self.notebook, padding=6)
@@ -2582,9 +2730,11 @@ class hex2pixApp(tk.Tk):
         self._option_label("Tip")
         self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
                            command=self.tip_chosen)
+        self._option_check("Background", self.shape_bg_var)
 
     def _options_shape(self):
         self._option_check("Fill", self.shape_filled)
+        self._option_check("Background", self.shape_bg_var)
         self._option_label("Width")
         self._option_spin(self.brush_var, 1, 64, command=self.apply_brush)
         self._option_label("Tip")
@@ -2595,6 +2745,18 @@ class hex2pixApp(tk.Tk):
         self._options_shape()
 
     def _options_shape_ellipse(self):
+        self._options_shape()
+
+    def _options_shape_triangle(self):
+        self._options_shape()
+
+    def _options_shape_diamond(self):
+        self._options_shape()
+
+    def _options_shape_star(self):
+        self._options_shape()
+
+    def _options_shape_arrow(self):
         self._options_shape()
 
     def _options_gradient(self):
@@ -2711,6 +2873,7 @@ class hex2pixApp(tk.Tk):
         self._option_label("Side")
         self._option_combo(self.curve_direction_var,
                            ("Left", "Right", "Alternate"), 10)
+        self._option_check("Background", self.shape_bg_var)
 
     def _options_contour(self):
         self._option_label("Width")
@@ -3761,9 +3924,8 @@ class hex2pixApp(tk.Tk):
         self.transform_grab = (x, y)
         self.transform_mode = mode
         self.transform_angle = 0.0
-        self.transform_grab_angle = math.degrees(
-            math.atan2(y + 0.5 - (top + height / 2.0),
-                       x + 0.5 - (left + width / 2.0)))
+        self.transform_rotation = RotationDrag(
+            (left + width / 2.0, top + height / 2.0), (x, y))
         near_left = abs(x - left) <= abs(x - (left + width - 1))
         near_top = abs(y - top) <= abs(y - (top + height - 1))
         self.transform_fixed = (left + width - 1 if near_left else left,
@@ -3783,22 +3945,17 @@ class hex2pixApp(tk.Tk):
         piece = self.transform_piece
         left, top, width, height = self.transform_origin_box
         if mode == "scale":
-            fixed_x, fixed_y = self.transform_fixed
-            new_w = max(1, min(self.doc.width, abs(x - fixed_x) + 1))
-            new_h = max(1, min(self.doc.height, abs(y - fixed_y) + 1))
-            nx = min(fixed_x, x)
-            ny = min(fixed_y, y)
+            nx, ny, new_w, new_h = scale_box(
+                self.transform_origin_box, self.transform_fixed,
+                self.transform_grab, (x, y),
+                (self.doc.width, self.doc.height))
             piece = scale_image(piece, new_w, new_h)
         elif mode == "rotate":
-            centre_x = left + width / 2.0
-            centre_y = top + height / 2.0
-            pointer = math.degrees(math.atan2(y + 0.5 - centre_y,
-                                              x + 0.5 - centre_x))
             snap = max(1, int(getattr(self, "rotate_snap", ROTATE_SNAP)))
-            angle = (pointer - (self.transform_grab_angle or 0.0)) % 360.0
-            angle = round(angle / snap) * snap
+            angle = self.transform_rotation.update((x, y), snap)
             self.transform_angle = angle
             piece = rotate_piece(piece, angle)
+            centre_x, centre_y = self.transform_rotation.centre
             nx = int(round(centre_x - piece.width / 2.0))
             ny = int(round(centre_y - piece.height / 2.0))
         else:
@@ -3831,7 +3988,7 @@ class hex2pixApp(tk.Tk):
         self.transform_fixed = None
         self.transform_mode = "move"
         self.transform_angle = 0.0
-        self.transform_grab_angle = None
+        self.transform_rotation = None
         self.refresh_bytes()
         self.refresh_status()
 
@@ -3852,7 +4009,7 @@ class hex2pixApp(tk.Tk):
         self.transform_fixed = None
         self.transform_mode = "move"
         self.transform_angle = 0.0
-        self.transform_grab_angle = None
+        self.transform_rotation = None
         self.refresh_bytes()
         self.refresh_status()
 
@@ -4076,6 +4233,14 @@ class hex2pixApp(tk.Tk):
             self.symmetry_option_var.set(
                 SYMMETRY_LABELS.get(self.symmetry, "Off"))
 
+    def shape_paint_color(self):
+        """Shape tools paint in BG instead of FG when Background is on."""
+        try:
+            enabled = bool(self.shape_bg_var.get())
+        except (AttributeError, tk.TclError):
+            enabled = False
+        return shape_color(self.fg, self.bg, enabled)
+
     def begin_shape(self, x, y):
         self.shape_before = self.doc.begin()
         self.shape_base = self.doc.bitmap.copy()
@@ -4108,18 +4273,19 @@ class hex2pixApp(tk.Tk):
         if constrain and self.tool != "curve":
             x, y = self.constrained_shape(x, y)
         self.doc.bitmap = self.shape_base.copy()
+        color = self.shape_paint_color()
         if self.tool == "curve":
             paint_curve(self.doc.bitmap, self.doc.mask(),
                         self.shape_anchor[0], self.shape_anchor[1], x, y,
-                        self.brush, self.fg, self.curve_bend(),
+                        self.brush, color, self.curve_bend(),
                         self.brush_shape(), self.symmetry,
                         self.curve_vectors(), self.curve_direction())
         else:
-            kind = {"line": "line", "shape_rect": "rect",
-                    "shape_ellipse": "ellipse"}.get(self.tool, "line")
+            kind = (self.tool[len("shape_"):]
+                    if self.tool.startswith("shape_") else self.tool)
             paint_shape(self.doc.bitmap, self.doc.mask(), kind,
                         self.shape_anchor[0], self.shape_anchor[1], x, y,
-                        self.brush, self.fg, bool(self.shape_filled.get()),
+                        self.brush, color, bool(self.shape_filled.get()),
                         self.brush_shape(), self.symmetry)
         self.refresh_bytes()
         self.request_redraw()
@@ -5147,23 +5313,125 @@ class hex2pixApp(tk.Tk):
         self.export_info.set("saved %s" % os.path.basename(path))
 
     # ---------------------------------------------------------------- export
-    def _set_default_export_path(self):
-        if self.doc.path:
-            base = os.path.splitext(self.doc.path)[0] + ".png"
+    def refresh_export_panel(self):
+        """Mirror the active document in the export docker."""
+        if not hasattr(self, "project_path_var"):
+            return
+        path = getattr(self.doc, "path", "") or ""
+        self.project_path_var.set(path or "not saved yet")
+        try:
+            self.export_ppi.set(int(round(self.doc.ppi)))
+        except (tk.TclError, ValueError, AttributeError):
+            pass
+        self._update_export_options()
+
+    def _export_format(self):
+        return formats.FORMAT_BY_LABEL.get(self.format_var.get(),
+                                           formats.FORMATS[0])
+
+    def _format_changed(self, event=None):
+        item = self._export_format()
+        path = self.export_path.get().strip()
+        if path:
+            stem, ext = os.path.splitext(path)
+            if ext.lower() != item["ext"]:
+                self.export_path.set(stem + item["ext"])
+        self._update_export_options()
+
+    def _update_export_options(self, event=None):
+        if not hasattr(self, "matte_entry"):
+            return
+        item = self._export_format()
+        key = item["key"]
+        if item["alpha"]:
+            self.alpha_check.state(["!disabled"])
+            keep = bool(self.export_alpha.get())
         else:
-            base = os.path.join(os.path.expanduser("~"), "hex2pix.png")
+            self.alpha_check.state(["disabled"])
+            keep = False
+        self.matte_entry.state(["disabled"] if keep else ["!disabled"])
+        for widget, active in ((self.quality_spin, key == "jpg"),
+                               (self.gif_spin, key == "gif"),
+                               (self.png_spin, key == "png")):
+            widget.state(["!disabled"] if active else ["disabled"])
+        self._update_export_hint()
+
+    def _update_export_hint(self, event=None):
+        if not hasattr(self, "export_hint") or not hasattr(self, "doc"):
+            return
+        if self.export_source.get() == "Each visible layer":
+            count = sum(1 for layer in self.doc.layers if layer.visible)
+            self.export_hint.set("%d visible layer%s, %d x %d px each"
+                                 % (count, "" if count == 1 else "s",
+                                    self.doc.width, self.doc.height))
+            return
+        if self.export_source.get() == "Selection":
+            bounds = self.doc.selection.bounds()
+            if not bounds:
+                self.export_hint.set("select an area to export it")
+                return
+            width, height = bounds[2], bounds[3]
+        else:
+            width, height = self.doc.width, self.doc.height
+        try:
+            scale = _bounded(int(self.export_scale.get()), 1, 32, 1)
+        except (tk.TclError, ValueError):
+            scale = 1
+        trimmed = " then trimmed" if self.export_trim.get() else ""
+        self.export_hint.set("%d x %d px -> %d x %d px%s"
+                             % (width, height, width * scale,
+                                height * scale, trimmed))
+
+    def _set_default_export_path(self):
+        item = (self._export_format() if hasattr(self, "format_var")
+                else formats.FORMATS[0])
+        if self.doc.path:
+            base = os.path.splitext(self.doc.path)[0] + item["ext"]
+        else:
+            base = os.path.join(os.path.expanduser("~"),
+                                "hex2pix" + item["ext"])
         self.export_path.set(base)
+        self.refresh_export_panel()
 
     def browse_export(self):
-        current = self.format_var.get()
-        item = formats.FORMAT_BY_LABEL.get(current, formats.FORMATS[0])
-        guess = os.path.splitext(self.export_path.get())[0] + item["ext"]
+        item = self._export_format()
+        current = self.export_path.get().strip()
+        if current:
+            guess = os.path.splitext(current)[0] + item["ext"]
+        elif self.doc.path:
+            guess = os.path.splitext(self.doc.path)[0] + item["ext"]
+        else:
+            guess = "hex2pix" + item["ext"]
         path = filedialog.asksaveasfilename(
-            parent=self, title="Export image", initialfile=os.path.basename(guess),
+            parent=self, title="Export image",
+            initialfile=os.path.basename(guess),
             defaultextension=item["ext"],
-            filetypes=[(item["label"], "*" + item["ext"]), ("All files", "*.*")])
+            filetypes=[(item["label"], "*" + item["ext"]),
+                       ("All files", "*.*")])
         if path:
             self.export_path.set(path)
+
+    def _export_source_bitmap(self):
+        """The pixels for the chosen source, before trim/scale/flatten."""
+        source = self.export_source.get()
+        if source == "Current layer":
+            return self.doc.bitmap.copy()
+        if source == "Selection":
+            bounds = self.doc.selection.bounds()
+            if not bounds:
+                raise HexError("Nothing is selected.")
+            left, top, width, height = bounds
+            piece = self.doc.flatten().rect_rgba(left, top, width, height)
+            data = bytearray(piece.data)
+            mask = self.doc.selection.mask
+            canvas_width = self.doc.width
+            for row in range(height):
+                for col in range(width):
+                    if not mask[(top + row) * canvas_width + left + col]:
+                        start = (row * width + col) * 4
+                        data[start:start + 4] = b"\x00\x00\x00\x00"
+            return Bitmap(width, height, data)
+        return self.doc.flatten()
 
     def export_now(self):
         path = self.export_path.get().strip()
@@ -5172,20 +5440,63 @@ class hex2pixApp(tk.Tk):
             path = self.export_path.get().strip()
             if not path:
                 return
-        item = formats.FORMAT_BY_LABEL.get(self.format_var.get(),
-                                           formats.FORMATS[0])
+        item = self._export_format()
+        ext = item["ext"]
+        if not os.path.splitext(path)[1]:
+            path += ext
+            self.export_path.set(path)
         try:
-            matte = parse_hex(self.matte_var.get())[:3]
+            matte = parse_hex(self.matte_var.get() or "FFFFFF")[:3]
         except HexError:
             matte = (255, 255, 255)
         try:
-            size = formats.save(self.doc.flatten(), path, item["key"], matte,
-                                int(self.quality_var.get()), self.doc.ppi)
+            scale = _bounded(int(self.export_scale.get()), 1, 32, 1)
+            ppi = _bounded(int(self.export_ppi.get()), 1, 2400, 72)
+            quality = _bounded(int(self.quality_var.get()), 1, 100, 92)
+            gif_colors = _bounded(int(self.gif_colors_var.get()), 2, 256, 256)
+            png_compress = _bounded(int(self.png_compress_var.get()), 0, 9, 6)
+        except (tk.TclError, ValueError):
+            self.report_error("Export options need whole numbers.")
+            return
+        resample = ("bilinear" if self.export_resample.get().lower()
+                    == "bilinear" else "nearest")
+        keep_alpha = bool(item["alpha"]) and bool(self.export_alpha.get())
+        options = {
+            "scale": scale,
+            "resample": resample,
+            "trim": bool(self.export_trim.get()),
+            "keep_alpha": keep_alpha,
+            "matte": matte,
+        }
+        save_options = {
+            "keep_alpha": keep_alpha,
+            "gif_colors": gif_colors,
+            "png_compress": png_compress,
+        }
+        try:
+            if self.export_source.get() == "Each visible layer":
+                layers = [layer for layer in self.doc.layers if layer.visible]
+                if not layers:
+                    raise HexError("No visible layers to export.")
+                for index, layer in enumerate(layers, 1):
+                    target = _layer_export_path(path, layer.name, index, ext)
+                    prepared = formats.prepare_export(layer.bitmap, **options)
+                    formats.save(prepared, target, item["key"], matte,
+                                 quality, ppi, **save_options)
+                message = ("wrote %d layer file%s beside %s"
+                           % (len(layers), "" if len(layers) == 1 else "s",
+                              os.path.basename(path)))
+            else:
+                bitmap = self._export_source_bitmap()
+                prepared = formats.prepare_export(bitmap, **options)
+                size = formats.save(prepared, path, item["key"], matte,
+                                    quality, ppi, **save_options)
+                message = ("wrote %s (%d x %d, %d bytes, %s)"
+                           % (os.path.basename(path), prepared.width,
+                              prepared.height, size, item["label"]))
         except (OSError, HexError, ValueError) as exc:
             self.report_error("Export failed: %s" % exc)
             return
-        message = "wrote %s (%d bytes, %s)" % (os.path.basename(path), size,
-                                               item["label"])
         self.export_info.set(message)
         self.refresh_status()
 
@@ -5681,6 +5992,9 @@ class hex2pixApp(tk.Tk):
         self.doc.dirty = False
         self.refresh_tabs()
         self.refresh_status()
+        self.refresh_export_panel()
+        if getattr(self, "export_info", None) is not None and self.doc.path:
+            self.export_info.set("saved %s" % os.path.basename(self.doc.path))
         return True
 
     def save_project(self):
@@ -5731,9 +6045,7 @@ class hex2pixApp(tk.Tk):
     def save_document_as(self):
         path = filedialog.asksaveasfilename(
             parent=self, title="Save image", defaultextension=".png",
-            filetypes=[("hex2pix project", "*.h2p"), ("PNG", "*.png"),
-                       ("BMP 24-bit", "*.bmp"), ("TGA", "*.tga"),
-                       ("Hex text", "*.txt"), ("All files", "*.*")])
+            filetypes=formats.SAVE_FILETYPES)
         if not path:
             return False
         if formats.is_project_path(path):
@@ -6164,6 +6476,55 @@ class hex2pixApp(tk.Tk):
     def _update_auto_changed(self):
         self.settings.set("check_updates", bool(self.update_auto_var.get()))
 
+    def _ask_update_choice(self, release):
+        """Per-update opt-in: install this release, skip it, or ask later."""
+        background = self.colors["bg"]
+        foreground = self.colors.get("fg") or self.colors.get("text")
+        dialog = tk.Toplevel(self)
+        dialog.title("Update available")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.configure(bg=background)
+        body = tk.Frame(dialog, bg=background, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="hex2pix %s is available." % release.version,
+                 bg=background, fg=foreground,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(body,
+                 text="You have %s. Download and install this update?"
+                 % __version__, bg=background, fg=foreground,
+                 wraplength=440, justify="left",
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 8))
+        notes = str(release.notes or "").strip()
+        if notes:
+            if len(notes) > 600:
+                notes = notes[:600].rstrip() + "..."
+            tk.Label(body, text=notes, bg=background,
+                     fg=self.colors.get("muted") or foreground,
+                     wraplength=440, justify="left",
+                     font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 12))
+        buttons = tk.Frame(body, bg=background)
+        buttons.pack(fill="x", pady=(10, 0))
+        choice = {"value": "later"}
+
+        def pick(value):
+            choice["value"] = value
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Download and install",
+                   command=lambda: pick("install")).pack(side="left")
+        ttk.Button(buttons, text="Skip this version",
+                   command=lambda: pick("skip")).pack(side="left", padx=8)
+        ttk.Button(buttons, text="Later",
+                   command=lambda: pick("later")).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", lambda: pick("later"))
+        dialog.update_idletasks()
+        dialog.geometry("+%d+%d" % (self.winfo_rootx() + 120,
+                                    self.winfo_rooty() + 140))
+        dialog.grab_set()
+        self.wait_window(dialog)
+        return choice["value"]
+
     def check_for_updates(self, manual=True):
         if self._closing:
             return
@@ -6238,12 +6599,15 @@ class hex2pixApp(tk.Tk):
                         parent=self):
                     webbrowser.open(release.page_url)
                 return
-            if messagebox.askyesno(
-                    "Update available",
-                    "hex2pix %s is available. Download and install it now?\n\n"
-                    "hex2pix will close, replace the executable, and restart."
-                    % release.version, parent=self):
+            if (not manual
+                    and self.settings.get("skipped_version", "")
+                    == release.version):
+                return
+            choice = self._ask_update_choice(release)
+            if choice == "install":
                 self._download_update(release)
+            elif choice == "skip":
+                self.settings.set("skipped_version", release.version)
             return
         if kind == "download":
             if error:
@@ -6350,7 +6714,7 @@ class hex2pixApp(tk.Tk):
             "Escape          cancel everything and deselect at once\n"
             "Ctrl+C / Ctrl+V copy / paste hex block text\n"
             "Ctrl+O / Ctrl+S open / save\n"
-            "Ctrl+E          export formats\n"
+            "Ctrl+E          save / export docker\n"
             "Ctrl+Shift+N    new layer (Normal operation)\n"
             "Alt+N / Alt+C   new layer / copy layer\n"
             "Alt+Delete      delete the active layer\n"

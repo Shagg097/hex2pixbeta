@@ -35,8 +35,9 @@ keyboard is the primary instrument.
   contour, text, gradients, symmetry and a color wheel.
 - **Palettes and dithering** — PICO-8, DB16, Grayscale, a 256-color cube and
   user palettes, plus ordered and error-diffusion dithering.
-- **Projects, layers and formats** — layered `.h2p` projects and export to the
-  common pixel-art formats.
+- **Projects, layers and formats** — layered `.h2p` projects plus an Export
+  docker that saves the project and writes images with scale, trim, matte,
+  resolution and per-format options.
 - **Packaged Windows build** — `hex2pix.exe` needs no Python installation,
   and a portable folder ZIP covers machines whose antivirus blocks the
   single file's temporary unpacking.
@@ -100,7 +101,7 @@ Verified on this branch with CPython 3.8.20 (64-bit, Tcl/Tk 8.6, MSC v.1929):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 399 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 429 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
 | `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
@@ -256,14 +257,24 @@ an exact byte match.
 
 **Move / Scale** turns a selection into a floating piece. Drag inside it to
 move, `Shift`+drag to scale from the opposite corner, or `Ctrl`+drag to rotate
-in 15° steps. Press `Enter` to drop it at the cursor and `Escape` to put it
-back. The selection follows the pixels, and the whole operation is one undo
-step.
+in 15° steps. Scaling keeps the piece's proportions and holds the opposite
+corner still, so a drag can neither squash the artwork nor flip it, and
+rotation only starts once the pointer leaves the middle, so grabbing the
+centre cannot spin the piece wildly. Press `Enter` to drop it at the cursor
+and `Escape` to put it back. The selection follows the pixels, and the whole
+operation is one undo step.
 
 Polygon and lasso paths are filled solid, including enclosed pockets, so a
 self-crossing outline cannot leave holes in the mask.
 
 ## Tools
+
+The tool palette is a grid of dropdown folders, grouped by what the tools do:
+**Brush**, **Shapes**, **Fill**, **Select**, **Transform**, and **Text and
+pick**. Click a folder to open its tools; the button shows the tool you last
+used from that folder, and hovering it lists what is inside.
+
+![The rectangle tile beside the new triangle, diamond, star and arrow tiles](docs/shape-icons.png)
 
 ### Painting and shapes
 
@@ -273,9 +284,9 @@ self-crossing outline cannot leave holes in the mask.
 | Spray can | Spray foreground pixels inside the brush footprint; **Flow**, feathered **Blur** and **Multicolor** |
 | Fill | Flood fill with adjustable tolerance |
 | Picker | Pick a color into the foreground or background |
-| Line | Drag a straight line; `Shift` snaps to 0°, 45° or 90° |
-| Curve | Bend a line by a percentage, split it into 1–8 arcs and choose left, right or alternating sides |
-| Rectangle / Ellipse | Outline or filled shapes; `Shift` constrains to a square or circle |
+| Line | Drag a straight line; `Shift` snaps to 0°, 45° or 90°; **Background** paints in the BG color |
+| Curve | Bend a line by a percentage, split it into 1–8 arcs and choose left, right or alternating sides; **Background** paints in the BG color |
+| Rectangle / Ellipse / Triangle / Diamond / Star / Arrow | Outline or filled preset shapes; `Shift` constrains to a square or circle, and **Background** paints with the BG color so the shape cuts into the artwork |
 | Gradient | Interpolate foreground to background (linear or radial), or step through the whole palette; Spread clamps, repeats or reflects; optional dithering |
 | Contour | Draw an inside or outside ring around a selection or opaque artwork |
 | Blur | Soften with a 3×3 neighborhood; strength controls the mix, smear drags colour along the stroke, and the tip picks the footprint |
@@ -441,6 +452,15 @@ Reopening it restores the layer stack, names, order, visibility, opacity,
 operations, canvas settings, active layer, palette, pattern, mirror setting,
 foreground/background colors and current view.
 
+Saving and exporting live together in the **Export** docker (**Ctrl+E**), not
+just the File menu: **Save** and **Save as...** write the project (or the
+image, once the document path is an image), and the panel below writes image
+files. Choose a source (whole image, current layer, selection, or one file per
+visible layer), trim transparent edges, scale 1–32× with nearest or bilinear
+sampling, set the PPI stored in the file, keep or drop transparency against a
+matte, and tune JPEG quality, GIF palette size and PNG compression. The docker
+shows the active project file and the resulting pixel size before you write.
+
 **File > Open…** recognizes `.h2p` automatically. Once a document is a `.h2p`,
 `Ctrl+S` saves the project instead of flattening it to an image.
 
@@ -478,16 +498,21 @@ the editor. Passing a filename on the command line skips the start page.
 
 ## Automatic updates
 
-The update check is optional; the editor still works offline without it.
+The update check is optional; the editor works offline without it, and it
+never downloads an update you have not opted into.
 
 Packaged Windows builds check the repository's GitHub Releases shortly after
-launch. **Help > Check for updates...** checks on demand. When a newer build
-exists, hex2pix asks before downloading it, verifies the asset size and the
-SHA-256 digest published by GitHub, then closes, replaces `hex2pix.exe` and
-restarts.
+launch, but consent is per update: when a newer build exists, hex2pix shows
+its version and release notes with **Download and install**, **Skip this
+version** and **Later**. Only **Download and install** fetches anything; it
+verifies the asset size and the SHA-256 digest published by GitHub, then
+closes, replaces `hex2pix.exe` and restarts. **Skip this version** remembers
+that one release — a newer version still asks — and **Later** asks again on
+the next launch.
 
-- **Check for updates automatically** in the Help menu controls the startup
-  check.
+- **Check for updates automatically** in the Help menu turns the startup check
+  on or off. **Help > Check for updates...** checks on demand and offers a
+  newer build even if you skipped it before.
 - Stable builds skip prereleases; prerelease builds may be offered
   prereleases.
 - The updater needs write access beside the executable. Portable folders work;
@@ -534,7 +559,7 @@ controls than fit.
 | Left rail | Tools, color wheel, foreground/background, alpha, brush size, tip, mirror, palette, macros, selection info |
 | Tool options | Controls for the active tool, from brush settings to selection mode |
 | Canvas | Pixel or hex editing surface |
-| Right dockers | Block placement, layers, byte operations, dump, export, pattern, dither and filters |
+| Right dockers | Block placement, layers, byte operations, dump, save and export, pattern, dither and filters |
 | Status bar | Canvas size, resolution, color mode, cursor, tool, view, brush, selection and mode hints |
 
 | Shortcut | Action |
@@ -554,7 +579,7 @@ controls than fit.
 | `Ctrl+A` / `Ctrl+D` | Select all / deselect; `Escape` deselects instantly |
 | `Ctrl+C` / `Ctrl+V` | Copy / paste hex block text |
 | `Ctrl+O` / `Ctrl+S` | Open / save |
-| `Ctrl+E` | Jump to the Export tab |
+| `Ctrl+E` | Open the Export docker (save the project or export an image) |
 | `Ctrl+Shift+N` | New layer |
 | `Alt+N` / `Alt+C` / `Alt+Delete` | New / copy / delete the active layer |
 | `Alt+Up` / `Alt+Down` | Raise / lower the active layer |

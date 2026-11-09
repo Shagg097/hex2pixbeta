@@ -3,9 +3,10 @@
 import unittest
 
 from hex2pix.model import Bitmap, Block, HexError
-from hex2pix.shapes import (brush_offsets, curve_points, gradient_fill,
-                            mirror_points, paint_curve, paint_dab, paint_shape,
-                            paint_stroke, shape_points)
+from hex2pix.shapes import (SHAPE_KINDS, brush_offsets, curve_points,
+                            gradient_fill, mirror_points, paint_curve,
+                            paint_dab, paint_shape, paint_stroke, shape_color,
+                            shape_points)
 
 RED = (255, 0, 0, 255)
 BLUE = (0, 0, 255, 255)
@@ -99,6 +100,52 @@ class ShapeTest(unittest.TestCase):
         painted = paint_stroke(bitmap, None, 1, 1, 3, 1, 3, BLUE)
         self.assertEqual(painted, 15)
         self.assertEqual(bitmap.rgba(2, 0), BLUE)
+
+
+class PresetShapeTests(unittest.TestCase):
+    def test_every_preset_kind_is_known(self):
+        for kind in ("triangle", "diamond", "star", "arrow"):
+            self.assertIn(kind, SHAPE_KINDS)
+
+    def test_triangle_fill_is_wide_at_the_base(self):
+        filled = set(shape_points("triangle", 0, 0, 4, 4, True))
+        self.assertIn((2, 3), filled)
+        self.assertNotIn((0, 0), filled)
+        self.assertTrue(all(0 <= x <= 4 and 0 <= y <= 4 for x, y in filled))
+
+    def test_diamond_is_symmetric(self):
+        outline = shape_points("diamond", 0, 0, 8, 8)
+        corners = set(outline)
+        self.assertTrue(corners)
+        for x, y in outline:
+            self.assertIn((8 - x, y), corners)
+            self.assertIn((x, 8 - y), corners)
+
+    def test_star_fill_covers_its_centre_and_box(self):
+        outline = set(shape_points("star", 0, 0, 12, 12))
+        filled = set(shape_points("star", 0, 0, 12, 12, True))
+        self.assertTrue(outline)
+        self.assertIn((6, 6), filled)
+        self.assertTrue(all(0 <= x <= 12 and 0 <= y <= 12
+                            for x, y in filled))
+        self.assertLessEqual(min(y for _, y in filled), 2)
+        self.assertGreaterEqual(max(y for _, y in filled), 10)
+
+    def test_arrow_points_right(self):
+        filled = set(shape_points("arrow", 0, 0, 12, 8, True))
+        self.assertIn((11, 4), filled)
+        self.assertIn((1, 4), filled)
+        self.assertNotIn((0, 0), filled)
+
+    def test_preset_shapes_clip_to_the_canvas(self):
+        points = shape_points("star", -20, -20, 20, 20, True, bounds=(6, 6))
+        self.assertTrue(points)
+        self.assertTrue(all(0 <= x < 6 and 0 <= y < 6 for x, y in points))
+
+    def test_background_toggle_swaps_the_paint_colour(self):
+        self.assertEqual(shape_color(RED, BLUE, True), BLUE)
+        self.assertEqual(shape_color(RED, BLUE, False), RED)
+        self.assertEqual(shape_color(RED, BLUE), RED)
 
 
 class GradientTest(unittest.TestCase):
