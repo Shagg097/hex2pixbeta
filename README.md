@@ -140,8 +140,8 @@ Then install the pinned requirements into it and call the specs directly, becaus
 - **Distribution.** Version tags on `main` build the 3.10 executable through
   `.github/workflows/release.yml`; this branch is checked by
   `.github/workflows/win7-build.yml` instead, which publishes this build in the
-  [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat) and keeps each run's files as an `hex2pix-py38-win7`
-  artifact for 90 days.
+  [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat)
+  and keeps each run's files as an `hex2pix-py38-win7` artifact for 90 days.
 
 ## Quick start
 
