@@ -183,6 +183,20 @@ class SelectionTests(unittest.TestCase):
         mask = selection_rect_mask(4, 4, -5, -5, 1, 1)
         self.assertEqual(sum(1 for v in mask if v), 4)
 
+    def test_rect_outside_selects_nothing(self):
+        mask = selection_rect_mask(4, 4, -9, -9, -3, -3)
+        self.assertEqual(sum(1 for v in mask if v), 0)
+
+    def test_ellipse_keeps_its_shape_past_the_edge(self):
+        inside = selection_ellipse_mask(10, 10, 0, 0, 9, 9)
+        past = selection_ellipse_mask(10, 10, -5, -5, 9, 9)
+        self.assertLess(sum(1 for v in inside[0:10] if v), 10)
+        self.assertEqual(sum(1 for v in past[0:10] if v), 10)
+
+    def test_ellipse_outside_selects_nothing(self):
+        mask = selection_ellipse_mask(4, 4, -9, -9, -3, -3)
+        self.assertEqual(sum(1 for v in mask if v), 0)
+
     def test_ellipse_area(self):
         mask = selection_ellipse_mask(10, 10, 0, 0, 9, 9)
         area = sum(1 for v in mask if v)
