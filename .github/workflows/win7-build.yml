@@ -1,0 +1,83 @@
+name: Windows 7 build (CPython 3.8.20)
+
+# Compatibility line only: `main` stays on Python 3.10 through release.yml.
+# CPython 3.8 is the last release that runs on Windows 7, and python.org ships
+# no Windows installer for 3.8.20 (3.8.11 and later were security-only), so the
+# build uses a stand-alone CPython that includes Tcl/Tk.
+on:
+  push:
+    branches:
+      - win7-compat
+  pull_request:
+    branches:
+      - win7-compat
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test on Python 3.8.20
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install stand-alone CPython 3.8.20
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL -o "$RUNNER_TEMP/pbs38.tar.gz" \
+            "https://github.com/astral-sh/python-build-standalone/releases/download/20240909/cpython-3.8.20%2B20240909-x86_64-pc-windows-msvc-install_only.tar.gz"
+          mkdir -p "$RUNNER_TEMP/py38"
+          tar -xzf "$RUNNER_TEMP/pbs38.tar.gz" -C "$RUNNER_TEMP/py38"
+          rm -f "$RUNNER_TEMP/pbs38.tar.gz"
+          "$RUNNER_TEMP/py38/python/python.exe" -c "import sys, tkinter; print(sys.version); print('Tk', tkinter.TkVersion)"
+          echo "$RUNNER_TEMP/py38/python" >> "$GITHUB_PATH"
+
+      - name: Install build requirements
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Run the unit tests
+        run: python -m unittest discover -s hex2pix/tests -t .
+
+      - name: Build hex2pix.exe
+        run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix.spec
+
+      - name: Build the portable folder
+        run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix_onedir.spec
+
+      - name: Confirm the frozen interpreter is 3.8
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/hex2pix-portable/_internal/python38.dll
+          if grep -aq python310.dll dist/hex2pix.exe; then
+            echo "dist/hex2pix.exe still embeds python310.dll" >&2
+            exit 1
+          fi
+          grep -aq python38.dll dist/hex2pix.exe
+
+      - name: Smoke-test both builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist/hex2pix-portable/hex2pix.exe --selftest
+          grep -q "RESULT: PASS" hex2pix-selftest.txt
+          rm -f hex2pix-selftest.txt
+          dist/hex2pix.exe --selftest
+          grep -q "RESULT: PASS" hex2pix-selftest.txt
+          rm -f hex2pix-selftest.txt
+
+      - name: Zip the portable folder
+        shell: pwsh
+        run: Compress-Archive -Path dist/hex2pix-portable -DestinationPath dist/hex2pix-portable.zip -Force
+
+      - name: Upload the Windows 7 builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: hex2pix-py38-win7
+          path: |
+            dist/hex2pix.exe
+            dist/hex2pix-portable.zip

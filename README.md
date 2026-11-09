@@ -11,6 +11,13 @@ document can be inspected as a normal image or as a grid of live hex codes.
 The mouse is fully supported for drawing, selecting and navigating. The
 keyboard is the primary instrument.
 
+> **Windows 7 compatibility branch.** This branch, `win7-compat`, keeps the
+> editor identical to `main` but freezes it against **CPython 3.8.20**, the last
+> CPython release with Windows 7 support, so the packaged executable runs on
+> 64-bit Windows 7 SP1 and newer. `main` remains the 3.10 release line. See
+> [Windows 7 compatibility](#windows-7-compatibility).
+
+
 ![hex2pix editor showing a pixel-art night scene, tool palette, color wheel and layer stack](docs/hex2pix-pixel-view.png)
 
 ## Highlights
@@ -49,7 +56,7 @@ This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
 
 **You do not need Python, pip or any other runtime installed.** The release
 executable is a self-contained Windows program: PyInstaller bundles CPython
-3.10 (64-bit), Tcl/Tk and Pillow together with the hex2pix code, so it runs on a
+3.8.20 (64-bit), Tcl/Tk and Pillow together with the hex2pix code, so it runs on a
 machine that has never had Python on it. There is no installer and nothing to
 add to `PATH` — it is an ordinary windowed `.exe`.
 
@@ -65,7 +72,7 @@ Put the executable (or the unzipped folder) anywhere you can write — Desktop,
 `D:\Tools`, a USB stick — and double-click it. No administrator rights are
 needed.
 
-- **Requirements:** 64-bit Windows 10 or 11.
+- **Requirements:** 64-bit Windows 7 SP1 or newer on this branch.
 - **First start takes a few seconds:** the single file unpacks its bundled
   runtime into `%TEMP%\_MEIxxxxxx` on each start and removes it on exit.
 - **SmartScreen:** the download is not code-signed, so Windows may show
@@ -77,6 +84,62 @@ Python is only needed to run or build from source; see
 [Run from source](#run-from-source) and
 [Build the executable](#build-the-executable).
 
+## Windows 7 compatibility
+
+`main` freezes CPython 3.10, and CPython has required Windows 8.1 or newer from
+3.10 onward (3.12 and newer need Windows 10). This branch freezes **CPython
+3.8.20** instead, the last CPython release that supports Windows 7, so the same
+editor starts on 64-bit Windows 7 SP1 and on every later Windows.
+
+The Python source is unchanged: everything under `hex2pix/` is identical to
+`main`, because it already runs on 3.8. Only the frozen toolchain differs, so the
+executable carries `python38.dll` and Tcl/Tk 8.6 rather than `python310.dll`.
+
+Verified on this branch with CPython 3.8.20 (64-bit, Tcl/Tk 8.6, MSC v.1929):
+
+| Check | Result |
+| --- | --- |
+| `python -m unittest discover -s hex2pix/tests -t .` | 357 tests, 0 failures, 0 errors |
+| `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
+| `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
+| `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
+| Interpreter inside both builds | `python38.dll`, no `python310.dll` |
+
+### Building it
+
+Python 3.8.11 and later were security-only releases, so python.org publishes no
+Windows installer for 3.8.20. Use a stand-alone build that includes Tcl/Tk, such as
+the one CI downloads in `.github/workflows/win7-build.yml`:
+
+```bash
+curl -sSL -o pbs38.tar.gz \
+  "https://github.com/astral-sh/python-build-standalone/releases/download/20240909/cpython-3.8.20%2B20240909-x86_64-pc-windows-msvc-install_only.tar.gz"
+mkdir -p .py38 && tar -xzf pbs38.tar.gz -C .py38 && rm pbs38.tar.gz
+.py38/python/python.exe -c "import tkinter; print('tkinter ok')"
+```
+
+Then install the pinned requirements into it and call the specs directly, because
+`packaging\build_exe.cmd` builds with whichever interpreter `py -3` resolves to:
+
+```bat
+.py38\python\python.exe -m pip install -r requirements.txt
+.py38\python\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
+.py38\python\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
+```
+
+### What this branch costs
+
+- **Both Windows 7 and the frozen interpreter are out of support.** CPython 3.8
+  reached end of life on 7 October 2024, so no security fix after that date can
+  reach the interpreter inside the executable. Treat this as a compatibility line
+  for machines that cannot move, not as the recommended download.
+- **Dependency ceiling.** Pillow 10.4.0 is the last release that supports 3.8, and
+  `requirements.txt` pins the exact Pillow and PyInstaller versions verified here,
+  so newer library features will not arrive on this branch.
+- **No releases from this branch.** Tags on `main` build the 3.10 executable through
+  `.github/workflows/release.yml`; this branch is checked by
+  `.github/workflows/win7-build.yml` instead.
+
 ## Quick start
 
 ```text
@@ -87,13 +150,13 @@ hex2pix.exe art.bmp         # open an image in the editor
 ### If the packaged executable does not start
 
 `hex2pix.exe` is a single-file build: on every start it unpacks its Python
-runtime into `%TEMP%\_MEIxxxxxx` and loads `python310.dll` from there. Some
+runtime into `%TEMP%\_MEIxxxxxx` and loads `python38.dll` from there. Some
 antivirus products quarantine or block that freshly written DLL, which appears
 as
 
 ```text
 Failed to load Python DLL
-C:\Users\<you>\AppData\Local\Temp\_MEIxxxxxx\python310.dll
+C:\Users\<you>\AppData\Local\Temp\_MEIxxxxxx\python38.dll
 ```
 
 Use `hex2pix-portable.zip` from the same release instead. Unzip it anywhere you
@@ -110,7 +173,7 @@ Only this path needs Python installed:
 py -3 run_hex2pix.py
 ```
 
-Requirements: **Python 3.10+**, **tkinter** and **Pillow**. Tkinter is included
+Requirements: **Python 3.8.20** on this branch, **tkinter** and **Pillow**. Tkinter is included
 with the standard Windows Python installer. On Linux, install the distribution's
 `python3-tk` package.
 

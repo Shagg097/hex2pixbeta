@@ -1,6 +1,9 @@
 # Runtime dependency of the editor.
-Pillow>=10.0
+# 10.4.0 is the last Pillow release that supports Python 3.8, the interpreter
+# this branch freezes so the executable still runs on Windows 7.
+Pillow==10.4.0
 
 # Build-time only: produces dist\hex2pix.exe through packaging\build_exe.cmd and
-# the specs next to it.
-pyinstaller>=6.0
+# the specs next to it. 6.22.3 is the version verified on Python 3.8.20; a later
+# PyInstaller major release is free to drop 3.8 support.
+pyinstaller==6.22.3
