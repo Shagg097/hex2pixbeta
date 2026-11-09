@@ -2832,10 +2832,20 @@ class hex2pixApp(tk.Tk):
         return image
 
     # ---------------------------------------------------------------- geometry
-    def clamped(self, event):
+    def pixel_at(self, event):
+        """The pixel under the pointer, which may lie outside the canvas.
+
+        Shapes and selections use this so a drag can run past the edge and
+        still describe the geometry of the whole drag; tools that act on a
+        single pixel use `clamped` instead.
+        """
         cell_w, cell_h = self.cell_size()
         x = int(math.floor(self.view.canvasx(event.x) / cell_w))
         y = int(math.floor(self.view.canvasy(event.y) / cell_h))
+        return x, y
+
+    def clamped(self, event):
+        x, y = self.pixel_at(event)
         x = max(0, min(self.doc.width - 1, x))
         y = max(0, min(self.doc.height - 1, y))
         return x, y
@@ -2861,6 +2871,7 @@ class hex2pixApp(tk.Tk):
         self.view.focus_set()
         self._hex_incremental_ok = False
         x, y = self.clamped(event)
+        free_x, free_y = self.pixel_at(event)
         self.cursor = (x, y)
         self.sel_mode = "subtract" if secondary else self.mode_from_event(event)
         tool = self.tool
@@ -2898,18 +2909,19 @@ class hex2pixApp(tk.Tk):
         elif tool == "contour":
             self.contour_at()
         elif tool in SHAPE_TOOLS:
-            self.begin_shape(x, y)
+            self.begin_shape(free_x, free_y)
         elif tool == "gradient":
             self.begin_gradient(x, y)
         elif tool in ("rect", "ellipse", "lasso"):
             self.sel_backup = self.doc.selection.snapshot()
-            self.drag_anchor = (x, y)
-            self.lasso_points = [(x, y)]
+            self.drag_anchor = (free_x, free_y)
+            self.lasso_points = [(free_x, free_y)]
         elif tool == "polygon":
             if not self.poly_points:
                 self.sel_backup = self.doc.selection.snapshot()
-            if not self.poly_points or self.poly_points[-1] != (x, y):
-                self.poly_points.append((x, y))
+            if (not self.poly_points
+                    or self.poly_points[-1] != (free_x, free_y)):
+                self.poly_points.append((free_x, free_y))
         elif tool in ("wand", "similar"):
             self.sel_backup = self.doc.selection.snapshot()
             self.wand_at(x, y, tool == "wand")
@@ -2929,6 +2941,7 @@ class hex2pixApp(tk.Tk):
 
     def on_drag(self, event):
         x, y = self.clamped(event)
+        free_x, free_y = self.pixel_at(event)
         state = int(getattr(event, "state", 0) or 0)
         self.cursor = (x, y)
         self._hex_incremental_ok = False
@@ -2977,12 +2990,13 @@ class hex2pixApp(tk.Tk):
                              self.airbrush_size() // 2 + 1)
             self.last_paint = (x, y)
         elif tool in SHAPE_TOOLS and self.shape_anchor is not None:
-            self.apply_shape(x, y, bool(state & 0x0001))
+            self.apply_shape(free_x, free_y, bool(state & 0x0001))
         elif tool in ("rect", "ellipse") and self.drag_anchor:
-            self.apply_drag_selection(x, y)
+            self.apply_drag_selection(free_x, free_y)
         elif tool == "lasso":
-            if not self.lasso_points or self.lasso_points[-1] != (x, y):
-                self.lasso_points.append((x, y))
+            if (not self.lasso_points
+                    or self.lasso_points[-1] != (free_x, free_y)):
+                self.lasso_points.append((free_x, free_y))
         elif tool == "hand" and self._pan is not None:
             self.on_middle_drag(event)
         elif tool == "transform" and self.transform_piece is not None:
@@ -2999,7 +3013,9 @@ class hex2pixApp(tk.Tk):
 
     def on_release(self, event):
         self.cursor = self.clamped(event)
+        self.release_point = self.pixel_at(event)
         self.on_release_common()
+        self.release_point = None
         self.redraw()
 
     def on_release_common(self):
@@ -3016,7 +3032,9 @@ class hex2pixApp(tk.Tk):
             self.last_paint = None
             self.blur_source = None
         if self.tool in ("rect", "ellipse") and self.drag_anchor:
-            self.apply_drag_selection(*self.cursor)
+            # The pointer may have been released past the canvas edge, so the
+            # final marquee comes from the unclamped position.
+            self.apply_drag_selection(*self.release_point or self.cursor)
             self.drag_anchor = None
         if self.tool == "lasso" and len(self.lasso_points) >= 2:
             points = self.lasso_points

@@ -731,13 +731,19 @@ class Selection(object):
 
 
 def selection_rect_mask(width, height, x0, y0, x1, y1):
+    """The pixels of the rectangle between two points, clipped to the canvas.
+
+    The points may sit outside the canvas, which is how a marquee dragged past
+    the edge still selects everything between itself and the border. A box
+    that misses the canvas entirely selects nothing.
+    """
     mask = bytearray(width * height)
     xa, xb = sorted((int(x0), int(x1)))
     ya, yb = sorted((int(y0), int(y1)))
-    xa = clamp(xa, 0, width - 1)
-    xb = clamp(xb, 0, width - 1)
-    ya = clamp(ya, 0, height - 1)
-    yb = clamp(yb, 0, height - 1)
+    xa, xb = max(xa, 0), min(xb, width - 1)
+    ya, yb = max(ya, 0), min(yb, height - 1)
+    if xb < xa or yb < ya:
+        return mask
     for y in range(ya, yb + 1):
         start = y * width + xa
         mask[start:start + (xb - xa + 1)] = b"\xff" * (xb - xa + 1)
@@ -745,21 +751,35 @@ def selection_rect_mask(width, height, x0, y0, x1, y1):
 
 
 def selection_ellipse_mask(width, height, x0, y0, x1, y1):
+    """The pixels of the ellipse in the box between two points.
+
+    The box is measured before it is clipped, so a drag that runs past the
+    canvas edge keeps the ellipse it describes instead of being squashed into
+    the corner. Only the rows and columns inside the canvas are written.
+    """
     mask = bytearray(width * height)
     xa, xb = sorted((int(x0), int(x1)))
     ya, yb = sorted((int(y0), int(y1)))
-    xa = clamp(xa, 0, width - 1)
-    xb = clamp(xb, 0, width - 1)
-    ya = clamp(ya, 0, height - 1)
-    yb = clamp(yb, 0, height - 1)
     cx = (xa + xb + 1) / 2.0
     cy = (ya + yb + 1) / 2.0
     rx = max(0.5, (xb - xa + 1) / 2.0)
     ry = max(0.5, (yb - ya + 1) / 2.0)
-    for y in range(ya, yb + 1):
+    first_row = max(ya, 0)
+    last_row = min(yb, height - 1)
+    x_lo, x_hi = max(xa, 0), min(xb, width - 1)
+    if x_hi < x_lo or last_row < first_row:
+        return mask
+    for y in range(first_row, last_row + 1):
         dy = (y + 0.5 - cy) / ry
+        if abs(dy) > 1.0:
+            continue
+        span = rx * (1.0 - dy * dy) ** 0.5
+        first = max(x_lo, int(round(cx - span - 0.5)))
+        last = min(x_hi, int(round(cx + span - 0.5)))
+        if last < first:
+            continue
         base = y * width
-        for x in range(xa, xb + 1):
+        for x in range(first, last + 1):
             dx = (x + 0.5 - cx) / rx
             if dx * dx + dy * dy <= 1.0:
                 mask[base + x] = 255

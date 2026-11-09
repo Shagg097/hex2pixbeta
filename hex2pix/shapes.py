@@ -92,8 +92,23 @@ def _ellipse_rows(x0, y0, x1, y1):
     return rows
 
 
-def shape_points(kind, x0, y0, x1, y1, fill=False):
-    """The pixels a line, rectangle or ellipse covers between two points."""
+def _clip_range(low, high, limit):
+    """Shrink an inclusive pixel range to 0..limit-1, or None when it misses."""
+    low = max(int(low), 0)
+    high = min(int(high), limit - 1)
+    if high < low:
+        return None
+    return low, high
+
+
+def shape_points(kind, x0, y0, x1, y1, fill=False, bounds=None):
+    """The pixels a line, rectangle or ellipse covers between two points.
+
+    The endpoints may sit outside the canvas, so a drag can run past the edge
+    and keep the shape it describes. `bounds` is the canvas (width, height);
+    it only limits how much of the shape is walked, not its geometry, so an
+    ellipse whose box starts off-canvas keeps its curvature.
+    """
     kind = kind if kind in SHAPE_KINDS else "rect"
     if kind == "line":
         return _bresenham(x0, y0, x1, y1)
@@ -101,6 +116,13 @@ def shape_points(kind, x0, y0, x1, y1, fill=False):
     if kind == "rect":
         xa, xb = sorted((int(x0), int(x1)))
         ya, yb = sorted((int(y0), int(y1)))
+        if bounds is not None:
+            columns = _clip_range(xa, xb, bounds[0])
+            rows = _clip_range(ya, yb, bounds[1])
+            if columns is None or rows is None:
+                return points
+            xa, xb = columns
+            ya, yb = rows
         if fill:
             for y in range(ya, yb + 1):
                 for x in range(xa, xb + 1):
@@ -120,6 +142,13 @@ def shape_points(kind, x0, y0, x1, y1, fill=False):
         return points
     if fill:
         for y, first, last in rows:
+            if bounds is not None:
+                if not 0 <= y < bounds[1]:
+                    continue
+                columns = _clip_range(first, last, bounds[0])
+                if columns is None:
+                    continue
+                first, last = columns
             for x in range(first, last + 1):
                 points.append((x, y))
         return points
@@ -128,7 +157,10 @@ def shape_points(kind, x0, y0, x1, y1, fill=False):
     # pixels floating apart from the rest of the ring.
     for index, (y, first, last) in enumerate(rows):
         if index == 0 or index == len(rows) - 1:
-            for x in range(first, last + 1):
+            cap = (first, last)
+            if bounds is not None:
+                cap = _clip_range(first, last, bounds[0]) or (0, -1)
+            for x in range(cap[0], cap[1] + 1):
                 points.append((x, y))
         else:
             points.append((first, y))
@@ -139,6 +171,9 @@ def shape_points(kind, x0, y0, x1, y1, fill=False):
             points.extend(_bresenham(previous_first, previous_y, first, y))
             if last != first:
                 points.extend(_bresenham(previous_last, previous_y, last, y))
+    if bounds is not None:
+        points = [(x, y) for x, y in points
+                  if 0 <= x < bounds[0] and 0 <= y < bounds[1]]
     return points
 
 
@@ -334,7 +369,8 @@ def paint_shape(bitmap, mask, kind, x0, y0, x1, y1, size, color,
     centers = set()
     seen = set()
     for ax0, ay0, ax1, ay1 in pairs:
-        for x, y in shape_points(kind, ax0, ay0, ax1, ay1, fill):
+        for x, y in shape_points(kind, ax0, ay0, ax1, ay1, fill,
+                                 bounds=(width, height)):
             if (x, y) in centers:
                 continue
             centers.add((x, y))

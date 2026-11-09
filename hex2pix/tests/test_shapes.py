@@ -265,5 +265,33 @@ class CurveTest(unittest.TestCase):
         self.assertEqual(bitmap.rgba(6, 4), RED)
 
 
+class OffCanvasTest(unittest.TestCase):
+    """Shapes keep their geometry when a drag runs past the canvas edge."""
+
+    def test_rect_is_clipped_to_the_canvas(self):
+        points = shape_points("rect", -5, -5, 2, 2, True, bounds=(4, 4))
+        self.assertEqual(sorted(points),
+                         sorted((x, y) for y in range(3) for x in range(3)))
+
+    def test_ellipse_points_stay_inside_the_bounds(self):
+        points = shape_points("ellipse", -6, -6, 6, 6, False, bounds=(8, 8))
+        self.assertTrue(points)
+        self.assertTrue(all(0 <= x < 8 and 0 <= y < 8 for x, y in points))
+
+    def test_ellipse_past_the_edge_keeps_its_curvature(self):
+        bitmap = Bitmap(8, 8)
+        paint_shape(bitmap, None, "ellipse", -100, -100, 100, 100, 1, RED,
+                    True)
+        filled = sum(1 for y in range(8) for x in range(8)
+                     if bitmap.rgba(x, y) == RED)
+        self.assertEqual(filled, 64)
+
+    def test_line_past_the_edge_crosses_the_canvas(self):
+        bitmap = Bitmap(8, 8)
+        paint_shape(bitmap, None, "line", -8, -8, 8, 8, 1, RED)
+        self.assertEqual(bitmap.rgba(4, 4), RED)
+        self.assertEqual(bitmap.rgba(0, 0), RED)
+
+
 if __name__ == "__main__":
     unittest.main()

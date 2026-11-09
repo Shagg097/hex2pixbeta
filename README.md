@@ -222,6 +222,12 @@ Brush size, tip shape and mirroring are shared across the painting tools.
 Mirroring can work across the X axis, Y axis, or both. Shapes and brush strokes
 preview live while dragging.
 
+Shapes and the rectangle, ellipse, polygon and lasso selections are not
+stopped by the canvas edge. Drag past it and the drag keeps its true geometry,
+so a line keeps its angle and an ellipse dragged from off-canvas keeps its
+curvature instead of being squashed against the border; only the pixels inside
+the canvas are painted or selected.
+
 ### Patterns and fills
 
 The **Pattern** tab is a micro pixel canvas. Click a cell to paint it in the
