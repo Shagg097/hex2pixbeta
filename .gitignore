@@ -18,3 +18,6 @@ hex2pix-selftest.txt
 .idea/
 Thumbs.db
 desktop.ini
+
+# Stand-alone CPython 3.8.20 used for the Windows 7 build.
+.py38/
