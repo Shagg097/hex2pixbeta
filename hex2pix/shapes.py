@@ -15,7 +15,17 @@ from .bitmapfont import text_points
 from .dither import apply_gradient_dither
 from .model import HexError, clamp
 
-SHAPE_KINDS = ("line", "rect", "ellipse")
+POLYGON_KINDS = ("triangle", "diamond", "star", "arrow")
+SHAPE_KINDS = ("line", "rect", "ellipse") + POLYGON_KINDS
+
+
+def shape_color(foreground, background, use_background=False):
+    """The colour a shape tool paints with.
+
+    The Background toggle swaps the foreground colour for the background one,
+    so a shape can carve into existing artwork instead of adding to it.
+    """
+    return background if use_background else foreground
 
 
 def mirror_points(x, y, width, height, axes=""):
@@ -195,8 +205,89 @@ def _clip_range(low, high, limit):
     return low, high
 
 
+def _polygon_vertices(kind, x0, y0, x1, y1):
+    """Corner points of a preset polygon inside the drag box."""
+    xa, xb = sorted((int(x0), int(x1)))
+    ya, yb = sorted((int(y0), int(y1)))
+    cx = (xa + xb) / 2.0
+    cy = (ya + yb) / 2.0
+    width = float(xb - xa)
+    height = float(yb - ya)
+    if kind == "triangle":
+        return [(cx, float(ya)), (float(xb), float(yb)),
+                (float(xa), float(yb))]
+    if kind == "diamond":
+        return [(cx, float(ya)), (float(xb), cy), (cx, float(yb)),
+                (float(xa), cy)]
+    if kind == "star":
+        points = []
+        for index in range(10):
+            angle = -math.pi / 2.0 + index * math.pi / 5.0
+            reach = 1.0 if index % 2 == 0 else 0.382
+            points.append((cx + math.cos(angle) * width / 2.0 * reach,
+                           cy + math.sin(angle) * height / 2.0 * reach))
+        return points
+    # Arrow: a right-pointing shaft with a triangular head.
+    head = xa + width * 0.55
+    shoulder = ya + height * 0.25
+    lower = yb - height * 0.25
+    return [(float(xa), shoulder), (head, shoulder), (head, float(ya)),
+            (float(xb), cy), (head, float(yb)), (head, lower),
+            (float(xa), lower)]
+
+
+def _polygon_rows(vertices):
+    """Row extents (y, first_x, last_x) of a filled polygon (even-odd)."""
+    tops = [point[1] for point in vertices]
+    rows = []
+    for y in range(int(math.floor(min(tops))), int(math.ceil(max(tops))) + 1):
+        crossings = []
+        count = len(vertices)
+        for index in range(count):
+            ax, ay = vertices[index]
+            bx, by = vertices[(index + 1) % count]
+            if ay == by:
+                continue
+            low, high = sorted((ay, by))
+            if low <= y < high:
+                crossings.append(ax + (y - ay) * (bx - ax) / (by - ay))
+        crossings.sort()
+        for index in range(0, len(crossings) - 1, 2):
+            first = int(math.ceil(crossings[index] - 0.5))
+            last = int(math.floor(crossings[index + 1] - 0.5))
+            if last >= first:
+                rows.append((y, first, last))
+    return rows
+
+
+def _polygon_points(kind, x0, y0, x1, y1, fill, bounds):
+    vertices = _polygon_vertices(kind, x0, y0, x1, y1)
+    points = []
+    if fill:
+        for y, first, last in _polygon_rows(vertices):
+            if bounds is not None:
+                if not 0 <= y < bounds[1]:
+                    continue
+                columns = _clip_range(first, last, bounds[0])
+                if columns is None:
+                    continue
+                first, last = columns
+            for x in range(first, last + 1):
+                points.append((x, y))
+        return points
+    corners = [(int(round(x)), int(round(y))) for x, y in vertices]
+    for index, corner in enumerate(corners):
+        following = corners[(index + 1) % len(corners)]
+        points.extend(_bresenham(corner[0], corner[1],
+                                 following[0], following[1]))
+    if bounds is not None:
+        points = [(x, y) for x, y in points
+                  if 0 <= x < bounds[0] and 0 <= y < bounds[1]]
+    return points
+
+
 def shape_points(kind, x0, y0, x1, y1, fill=False, bounds=None):
-    """The pixels a line, rectangle or ellipse covers between two points.
+    """The pixels a line, rectangle, ellipse or preset polygon covers.
 
     The endpoints may sit outside the canvas, so a drag can run past the edge
     and keep the shape it describes. `bounds` is the canvas (width, height);
@@ -206,6 +297,8 @@ def shape_points(kind, x0, y0, x1, y1, fill=False, bounds=None):
     kind = kind if kind in SHAPE_KINDS else "rect"
     if kind == "line":
         return _bresenham(x0, y0, x1, y1)
+    if kind in POLYGON_KINDS:
+        return _polygon_points(kind, x0, y0, x1, y1, fill, bounds)
     points = []
     if kind == "rect":
         xa, xb = sorted((int(x0), int(x1)))

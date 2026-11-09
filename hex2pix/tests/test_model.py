@@ -10,8 +10,8 @@ from hex2pix.model import (
     flip_horizontal,
     flip_vertical, flood_fill, format_dump, hex_str, hue_shift, invert_colors,
     paint_brush, paint_line, parse_block, parse_hex, parse_hex_map, pick_related,
-    extract_selection, piece_mask, place_block, rotate90, rotate_piece,
-    rotate_ramp,
+    RotationDrag, extract_selection, piece_mask, place_block, rotate90,
+    rotate_piece, rotate_ramp, scale_box,
     selected_bytes, selection_ellipse_mask, selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block, unique_colors,
     fill_holes,
@@ -723,6 +723,77 @@ class RotationTests(unittest.TestCase):
                      if turned.rgba(x, y)[3])
         self.assertGreater(opaque, 0)
         self.assertLessEqual(opaque, turned.width * turned.height)
+
+
+class ScaleBoxTests(unittest.TestCase):
+    def test_first_movement_keeps_the_piece_as_it_was(self):
+        box = (0, 0, 10, 5)
+        self.assertEqual(scale_box(box, (0, 0), (6, 3), (6, 3), (64, 64)),
+                         (0, 0, 10, 5))
+
+    def test_scale_keeps_the_proportions(self):
+        scaled = scale_box((0, 0, 10, 5), (0, 0), (6, 3), (12, 6), (64, 64))
+        self.assertEqual(scaled, (0, 0, 20, 10))
+
+    def test_grab_close_to_the_corner_does_not_collapse_the_piece(self):
+        box = (0, 0, 20, 10)
+        self.assertEqual(scale_box(box, (0, 0), (1, 0), (1, 0), (64, 64)),
+                         box)
+        self.assertEqual(scale_box(box, (0, 0), (1, 0), (3, 0), (64, 64)),
+                         box)
+
+    def test_scale_stays_anchored_on_the_fixed_corner(self):
+        nx, ny, new_w, new_h = scale_box((5, 5, 10, 5), (14, 9), (9, 7),
+                                        (9, 7), (64, 64))
+        self.assertEqual((nx + new_w - 1, ny + new_h - 1), (14, 9))
+
+    def test_scale_caps_growth_at_the_canvas(self):
+        self.assertEqual(
+            scale_box((0, 0, 10, 5), (0, 0), (10, 5), (100, 50), (40, 20)),
+            (0, 0, 40, 20))
+
+    def test_scale_near_an_edge_stays_on_the_canvas(self):
+        nx, ny, new_w, new_h = scale_box((4, 4, 8, 6), (11, 9), (7, 6),
+                                        (100, 100), (32, 32))
+        self.assertGreaterEqual(nx, 0)
+        self.assertGreaterEqual(ny, 0)
+        self.assertLessEqual(nx + new_w, 32)
+        self.assertLessEqual(ny + new_h, 32)
+        self.assertEqual((nx + new_w - 1, ny + new_h - 1), (11, 9))
+
+    def test_scale_never_reaches_zero(self):
+        _, _, width, height = scale_box((0, 0, 10, 5), (4, 2), (9, 4),
+                                        (-100, -100), (64, 64))
+        self.assertGreaterEqual(width, 1)
+        self.assertGreaterEqual(height, 1)
+
+
+class RotationDragTests(unittest.TestCase):
+    def test_centre_wiggles_do_not_spin_the_piece(self):
+        handle = RotationDrag((10.0, 10.0), (10, 10))
+        self.assertEqual(handle.update((10, 10)), 0)
+        self.assertEqual(handle.update((11, 10)), 0)
+        self.assertEqual(handle.update((10, 11)), 0)
+
+    def test_rotation_tracks_once_the_pointer_leaves_the_middle(self):
+        handle = RotationDrag((10.0, 10.0), (10, 20))
+        self.assertEqual(handle.update((10, 20)), 0)
+        self.assertEqual(handle.update((0, 10)), 90)
+
+    def test_angle_holds_still_inside_the_dead_zone(self):
+        handle = RotationDrag((10.0, 10.0), (0, 10))
+        turned = handle.update((10, 20))
+        self.assertGreater(turned, 0)
+        self.assertEqual(handle.update((11, 10)), turned)
+        self.assertEqual(handle.update((10, 20)), turned)
+
+    def test_angles_are_snapped_and_wrapped(self):
+        handle = RotationDrag((10.0, 10.0), (10, 20))
+        for pointer in ((19, 10), (10, 0), (0, 10), (10, 20)):
+            angle = handle.update(pointer, 5)
+            self.assertGreaterEqual(angle, 0)
+            self.assertLess(angle, 360)
+            self.assertEqual(angle % 5, 0)
 
 
 if __name__ == "__main__":

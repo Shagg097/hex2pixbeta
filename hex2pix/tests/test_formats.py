@@ -23,6 +23,74 @@ def sample():
     return bitmap
 
 
+class ExportOptionTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def path(self, name):
+        return os.path.join(self.dir, name)
+
+    def test_trim_crops_transparent_edges(self):
+        bitmap = Bitmap(5, 4)
+        bitmap.set_rgba(1, 1, (255, 0, 0, 255))
+        bitmap.set_rgba(2, 2, (255, 0, 0, 255))
+        cropped = formats.trim_alpha(bitmap)
+        self.assertEqual((cropped.width, cropped.height), (2, 2))
+        self.assertEqual(cropped.rgba(0, 0), (255, 0, 0, 255))
+
+    def test_trim_keeps_an_empty_canvas(self):
+        cropped = formats.trim_alpha(Bitmap(3, 3))
+        self.assertEqual((cropped.width, cropped.height), (3, 3))
+
+    def test_scale_nearest_doubles_pixels(self):
+        bitmap = Bitmap(2, 1)
+        bitmap.set_rgba(0, 0, (255, 0, 0, 255))
+        bitmap.set_rgba(1, 0, (0, 0, 255, 255))
+        big = formats.scale_bitmap(bitmap, 2)
+        self.assertEqual((big.width, big.height), (4, 2))
+        self.assertEqual(big.rgba(0, 0), (255, 0, 0, 255))
+        self.assertEqual(big.rgba(3, 1), (0, 0, 255, 255))
+
+    def test_scale_guards_absurd_dimensions(self):
+        with self.assertRaises(HexError):
+            formats.scale_bitmap(sample(), 5000)
+
+    def test_prepare_export_flattens_when_alpha_is_dropped(self):
+        prepared = formats.prepare_export(sample(), keep_alpha=False,
+                                          matte=(255, 255, 255))
+        self.assertEqual(prepared.rgba(1, 1), (132, 137, 142, 255))
+        self.assertEqual(prepared.rgba(2, 1), (255, 255, 255, 255))
+
+    def test_prepare_export_trims_then_scales(self):
+        bitmap = Bitmap(4, 4)
+        bitmap.set_rgba(1, 1, (255, 0, 0, 255))
+        prepared = formats.prepare_export(bitmap, trim=True, scale=2)
+        self.assertEqual((prepared.width, prepared.height), (2, 2))
+
+    def test_png_without_alpha_writes_rgb(self):
+        target = self.path("flat.png")
+        formats.save(sample(), target, "png", keep_alpha=False)
+        with Image.open(target) as image:
+            self.assertEqual(image.mode, "RGB")
+
+    def test_gif_palette_size_is_capped(self):
+        target = self.path("small.gif")
+        formats.save(sample(), target, "gif", gif_colors=2)
+        with Image.open(target) as image:
+            self.assertLessEqual(len(image.getcolors(256) or []), 2)
+
+    def test_png_compression_accepts_zero(self):
+        target = self.path("store.png")
+        self.assertGreater(formats.save(sample(), target, "png",
+                                       png_compress=0), 0)
+
+    def test_save_dialog_offers_projects_and_every_format(self):
+        patterns = [pattern for _label, pattern in formats.SAVE_FILETYPES]
+        self.assertIn("*.h2p", patterns)
+        for item in formats.FORMATS:
+            self.assertIn("*" + item["ext"], patterns)
+
+
 class FormatTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

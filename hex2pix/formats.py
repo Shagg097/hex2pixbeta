@@ -8,6 +8,7 @@ BI_RGB BMPs as 24-bit + padding.
 """
 
 import json
+import math
 import os
 import struct
 import zipfile
@@ -46,6 +47,12 @@ PROJECT_EXT = ".h2p"
 PROJECT_FORMAT = "hex2pix-project"
 PROJECT_VERSION = 1
 PROJECT_FILETYPES = [("hex2pix project", "*.h2p"), ("All files", "*.*")]
+SAVE_FILETYPES = ([("hex2pix project", "*.h2p")]
+                  + [(item["label"], "*" + item["ext"]) for item in FORMATS]
+                  + [("All files", "*.*")])
+
+# A scaled export larger than this would take a very long time to build.
+MAX_EXPORT_PIXELS = 64 * 1024 * 1024
 
 
 def flatten(data, width, height, matte=MATTE_WHITE):
@@ -69,6 +76,77 @@ def flatten(data, width, height, matte=MATTE_WHITE):
             out[target] = (data[base] * alpha + mr * inv) // 255
             out[target + 1] = (data[base + 1] * alpha + mg * inv) // 255
             out[target + 2] = (data[base + 2] * alpha + mb * inv) // 255
+    return out
+
+
+def trim_alpha(bitmap):
+    """Crop fully transparent rows and columns away from a bitmap.
+
+    A bitmap with no opaque pixel at all is returned unchanged, so exporting an
+    empty canvas still writes a full-size image instead of a 1x1 one.
+    """
+    width, height = bitmap.width, bitmap.height
+    data = bitmap.data
+    left, top = width, height
+    right = bottom = -1
+    for y in range(height):
+        row = y * width
+        for x in range(width):
+            if data[(row + x) * 4 + 3]:
+                if x < left:
+                    left = x
+                if x > right:
+                    right = x
+                if y < top:
+                    top = y
+                if y > bottom:
+                    bottom = y
+    if right < left or bottom < top:
+        return bitmap.copy()
+    return bitmap.rect_rgba(left, top, right - left + 1, bottom - top + 1)
+
+
+def flatten_bitmap(bitmap, matte=MATTE_WHITE):
+    """Copy with transparency blended onto `matte` and every alpha byte 255."""
+    rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
+    out = Bitmap(bitmap.width, bitmap.height)
+    data = out.data
+    for index in range(bitmap.width * bitmap.height):
+        data[index * 4] = rgb[index * 3]
+        data[index * 4 + 1] = rgb[index * 3 + 1]
+        data[index * 4 + 2] = rgb[index * 3 + 2]
+        data[index * 4 + 3] = 255
+    return out
+
+
+def scale_bitmap(bitmap, factor, resample="nearest"):
+    """Resample a bitmap by `factor` (nearest or bilinear)."""
+    try:
+        factor = float(factor)
+    except (TypeError, ValueError):
+        raise HexError("scale must be a number")
+    if factor <= 0:
+        raise HexError("scale must be greater than zero")
+    width = max(1, int(math.floor(bitmap.width * factor + 0.5)))
+    height = max(1, int(math.floor(bitmap.height * factor + 0.5)))
+    if width * height > MAX_EXPORT_PIXELS:
+        raise HexError("a %dx%d export is too large; use a smaller scale"
+                       % (width, height))
+    if (width, height) == (bitmap.width, bitmap.height):
+        return bitmap.copy()
+    from .canvas import scale_image
+    return scale_image(bitmap, width, height,
+                       "bilinear" if str(resample).lower() == "bilinear"
+                       else "nearest")
+
+
+def prepare_export(bitmap, scale=1, resample="nearest", trim=False,
+                   keep_alpha=True, matte=MATTE_WHITE):
+    """Build the bitmap an export writes: trimmed, scaled and flattened."""
+    out = trim_alpha(bitmap) if trim else bitmap
+    out = scale_bitmap(out, scale, resample)
+    if not keep_alpha:
+        out = flatten_bitmap(out, matte)
     return out
 
 
@@ -287,13 +365,21 @@ def _save_pillow(image, path, image_format, dpi=None, **kwargs):
     image.save(path, image_format, **kwargs)
 
 
-def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0):
-    """Write `bitmap` to `path` in the given format. Returns bytes written."""
+def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
+         keep_alpha=True, gif_colors=256, png_compress=6):
+    """Write `bitmap` to `path` in the given format. Returns bytes written.
+
+    `keep_alpha` flattens transparency onto `matte` when false, `gif_colors`
+    caps the adaptive GIF palette and `png_compress` is Pillow's 0-9 deflate
+    level. Formats that cannot store alpha always flatten.
+    """
     path = str(path)
     key = (key or "png").lower()
     if key not in FORMAT_BY_KEY:
         raise HexError("unknown format: %s" % key)
     _ensure_dir(path)
+    if not keep_alpha and key not in ("bmp24", "ppm", "hex", "jpg", "gif"):
+        bitmap = flatten_bitmap(bitmap, matte)
     if key == "bmp24":
         save_bmp24(bitmap, path, matte, ppi)
     elif key == "bmp32":
@@ -306,8 +392,10 @@ def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0):
         _save_pillow(to_pil(bitmap, matte, flatten_alpha=True), path, "JPEG",
                      dpi=ppi, quality=int(quality), subsampling=0)
     elif key == "gif":
+        colors = max(2, min(256, int(gif_colors or 256)))
         image = to_pil(bitmap, matte, flatten_alpha=True)
-        image.convert("P", palette=Image.ADAPTIVE, colors=256).save(path, "GIF")
+        image.convert("P", palette=Image.ADAPTIVE, colors=colors).save(
+            path, "GIF")
     elif key == "webp":
         _save_pillow(to_pil(bitmap), path, "WEBP", dpi=ppi, lossless=True,
                      quality=100)
@@ -329,7 +417,11 @@ def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0):
     elif key == "tif":
         _save_pillow(to_pil(bitmap), path, "TIFF", dpi=ppi)
     else:  # png
-        _save_pillow(to_pil(bitmap), path, "PNG", dpi=ppi, optimize=False)
+        level = max(0, min(9, int(png_compress)))
+        image = (to_pil(bitmap) if keep_alpha
+                 else to_pil(bitmap, matte, flatten_alpha=True))
+        _save_pillow(image, path, "PNG", dpi=ppi, optimize=False,
+                     compress_level=level)
     return os.path.getsize(path)
 
 

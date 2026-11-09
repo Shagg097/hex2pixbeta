@@ -172,10 +172,23 @@ class FolderBuildTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(
+            tempfile.mkdtemp(prefix="hex2pix-settings-test-"),
+            "settings.json")
+        self.store = integrations.SettingsStore(self.path)
+
     def test_round_trip(self):
-        path = os.path.join(tempfile.mkdtemp(prefix="hex2pix-settings-test-"),
-                            "settings.json")
-        store = integrations.SettingsStore(path)
-        store.set("check_updates", False)
-        loaded = integrations.SettingsStore(path)
+        self.store.set("check_updates", False)
+        loaded = integrations.SettingsStore(self.path)
         self.assertFalse(loaded.get("check_updates"))
+
+    def test_no_version_is_skipped_by_default(self):
+        self.assertEqual(self.store.get("skipped_version"), "")
+
+    def test_a_skipped_version_round_trips(self):
+        # Skipping applies to that release only; newer releases ask again.
+        self.store.set("skipped_version", "1.3.0b4")
+        loaded = integrations.SettingsStore(self.path)
+        self.assertEqual(loaded.get("skipped_version"), "1.3.0b4")
+        self.assertNotEqual(loaded.get("skipped_version"), "1.3.0b5")

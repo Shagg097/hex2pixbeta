@@ -551,6 +551,90 @@ def rotate_piece(bitmap, degrees):
     return out
 
 
+def scale_box(box, fixed, grab, pointer, bounds, min_radius=4.0):
+    """Size a box scaled from the `fixed` corner without distorting it.
+
+    The drag started at `grab` and is now at `pointer`. Their distances from
+    the fixed corner give one scale factor for both axes, so the piece keeps
+    its proportions, and the box stays anchored on the corner's side of the
+    original box instead of flipping when the pointer crosses it. Both
+    distances are floored by `min_radius` so a grab close to the corner
+    cannot collapse the piece on the first movement.
+
+    Returns (x, y, width, height); growth stops when the piece would leave
+    `bounds`, measured from the fixed corner.
+    """
+    left, top, width, height = box
+    fixed_x, fixed_y = fixed
+
+    def reach(point):
+        return max(float(min_radius),
+                   math.hypot(point[0] - fixed_x, point[1] - fixed_y))
+
+    factor = reach(pointer) / reach(grab)
+    right = fixed_x >= left + width - 1
+    bottom = fixed_y >= top + height - 1
+    # Only grow into the space the fixed corner has on the canvas, so a
+    # piece scaled near an edge is not silently cropped.
+    room_x = fixed_x + 1 if right else bounds[0] - fixed_x
+    room_y = fixed_y + 1 if bottom else bounds[1] - fixed_y
+    limit = max(1.0, min(room_x / float(width), room_y / float(height),
+                         bounds[0] / float(width),
+                         bounds[1] / float(height)))
+    factor = max(1.0 / max(width, height), min(limit, factor))
+    new_w = max(1, int(math.floor(width * factor + 0.5)))
+    new_h = max(1, int(math.floor(height * factor + 0.5)))
+    nx = fixed_x - new_w + 1 if right else fixed_x
+    ny = fixed_y - new_h + 1 if bottom else fixed_y
+    return nx, ny, new_w, new_h
+
+
+class RotationDrag(object):
+    """Turn pointer positions around a centre into a snapped rotation angle.
+
+    A grab close to the centre would otherwise sweep a huge angle for every
+    pixel of movement. Inside `min_radius` the current angle is held, and the
+    first direction measured outside it becomes the new reference, so the
+    piece continues from where it already points instead of jumping.
+    """
+
+    def __init__(self, centre, grab, min_radius=3.0):
+        self.centre = centre
+        self.min_radius = float(min_radius)
+        self.angle = 0.0
+        self.base = 0.0
+        self.grab_angle = None
+        if self._radius(grab) >= self.min_radius:
+            self.grab_angle = self._direction(grab)
+
+    def _radius(self, point):
+        return math.hypot(point[0] + 0.5 - self.centre[0],
+                          point[1] + 0.5 - self.centre[1])
+
+    def _direction(self, point):
+        return math.degrees(math.atan2(point[1] + 0.5 - self.centre[1],
+                                       point[0] + 0.5 - self.centre[0]))
+
+    def update(self, pointer, snap=15.0):
+        """Return the angle for the pointer, snapped to `snap` degrees."""
+        radius = self._radius(pointer)
+        if radius <= 0.0:
+            return self.angle
+        if radius < self.min_radius:
+            # Too close to the centre to measure an angle: hold still and
+            # wait for a fresh reference once the pointer is far enough out.
+            self.grab_angle = None
+            return self.angle
+        direction = self._direction(pointer)
+        if self.grab_angle is None:
+            self.grab_angle = direction
+            self.base = self.angle
+        snap = max(1.0, float(snap or 1.0))
+        turned = (direction - self.grab_angle) % 360.0
+        self.angle = (self.base + round(turned / snap) * snap) % 360.0
+        return self.angle
+
+
 # --------------------------------------------------------------------- layers
 class Layer(object):
     """One bitmap in a document's layer stack.
