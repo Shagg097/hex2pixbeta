@@ -1,10 +1,11 @@
-"""Tests for smear, the softened jumble, and the unsaved marker."""
+"""Tests for smear, the softened shuffle, and the unsaved marker."""
 
 import random
 import unittest
 
-from hex2pix.effects import (blur_stroke, jumble_area, jumble_stroke,
-                             smear_area)
+from hex2pix.app import MIN_ZOOM, min_zoom_for
+from hex2pix.effects import (blur_stroke, smear_area, shuffle_area,
+                             shuffle_stroke)
 from hex2pix.model import Bitmap, Document
 
 RED = (255, 0, 0, 255)
@@ -78,7 +79,7 @@ class SmearStrokeTest(unittest.TestCase):
         self.assertEqual(bitmap.rgba(5, 0), BLUE)
 
 
-class JumbleStrokeTest(unittest.TestCase):
+class ShuffleStrokeTest(unittest.TestCase):
     def _stripes(self):
         bitmap = Bitmap(9, 3)
         for x in range(9):
@@ -89,7 +90,7 @@ class JumbleStrokeTest(unittest.TestCase):
 
     def test_the_blur_slider_reaches_the_stroke(self):
         bitmap = self._stripes()
-        jumble_stroke(bitmap, None, 1, 1, 7, 1, 3, "shuffle", 50, "square",
+        shuffle_stroke(bitmap, None, 1, 1, 7, 1, 3, "shuffle", 50, "square",
                       "", random.Random(2), blur=100)
         blended = [bitmap.rgba(x, 1) for x in range(9)
                    if bitmap.rgba(x, 1) not in (RED, BLUE)]
@@ -97,18 +98,18 @@ class JumbleStrokeTest(unittest.TestCase):
 
     def test_a_zero_blur_stroke_only_reorders_the_colours(self):
         bitmap = self._stripes()
-        jumble_stroke(bitmap, None, 1, 1, 7, 1, 3, "shuffle", 50, "square",
+        shuffle_stroke(bitmap, None, 1, 1, 7, 1, 3, "shuffle", 50, "square",
                       "", random.Random(2))
         for x in range(9):
             self.assertIn(bitmap.rgba(x, 1), (RED, BLUE))
 
 
-class JumbleBlurTest(unittest.TestCase):
+class ShuffleBlurTest(unittest.TestCase):
     def test_zero_blur_keeps_the_shuffled_colours(self):
         bitmap = Bitmap(5, 5)
         bitmap.fill(RED)
         bitmap.set_rgba(2, 2, BLUE)
-        jumble_area(bitmap, None, 2, 2, 3, "shuffle", 50, "square", "",
+        shuffle_area(bitmap, None, 2, 2, 3, "shuffle", 50, "square", "",
                     random.Random(1))
         self.assertEqual(bitmap.rgba(1, 1), RED)
 
@@ -116,7 +117,7 @@ class JumbleBlurTest(unittest.TestCase):
         bitmap = Bitmap(5, 5)
         bitmap.fill(RED)
         bitmap.set_rgba(2, 2, BLUE)
-        jumble_area(bitmap, None, 2, 2, 3, "shuffle", 50, "square", "",
+        shuffle_area(bitmap, None, 2, 2, 3, "shuffle", 50, "square", "",
                     random.Random(1), blur=100)
         for y in range(1, 4):
             for x in range(1, 4):
@@ -126,7 +127,7 @@ class JumbleBlurTest(unittest.TestCase):
     def test_blur_leaves_untouched_pixels_alone(self):
         bitmap = Bitmap(5, 5)
         bitmap.fill(RED)
-        jumble_area(bitmap, None, 2, 2, 3, "shuffle", 50, "square", "",
+        shuffle_area(bitmap, None, 2, 2, 3, "shuffle", 50, "square", "",
                     random.Random(1), blur=100)
         self.assertEqual(bitmap.rgba(0, 0), RED)
 
@@ -150,6 +151,22 @@ class DocumentDirtyTest(unittest.TestCase):
         document.dirty = False
         self.assertTrue(document.undo_last())
         self.assertTrue(document.dirty)
+
+
+class ZoomOutLimitTest(unittest.TestCase):
+    def test_the_floor_shrinks_with_the_longer_side(self):
+        self.assertAlmostEqual(min_zoom_for(16, 16), 1.0 / (16 * 50000))
+        self.assertAlmostEqual(min_zoom_for(4096, 100), 1.0 / (4096 * 50000))
+
+    def test_a_bigger_artwork_may_zoom_out_further(self):
+        self.assertLess(min_zoom_for(4000, 4000), min_zoom_for(400, 400))
+
+    def test_either_side_can_set_the_limit(self):
+        self.assertEqual(min_zoom_for(8, 64), min_zoom_for(64, 8))
+
+    def test_the_floor_stays_positive(self):
+        self.assertGreaterEqual(min_zoom_for(1, 1), MIN_ZOOM)
+        self.assertGreaterEqual(min_zoom_for(12000000, 1), MIN_ZOOM)
 
 
 if __name__ == "__main__":

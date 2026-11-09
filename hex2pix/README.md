@@ -170,7 +170,7 @@ Scale repeats each pattern pixel N times. Enter at the keyboard cursor runs
 whichever fill tool is active, so patterns and flood fills can be placed
 without touching the mouse.
 
-## Blur, jumble and text
+## Blur, shuffle and text
 
 Three pixel-level tools share the brush footprint, the mirror setting and the
 selection mask, so each one can be confined to a region:
@@ -179,8 +179,8 @@ selection mask, so each one can be confined to a region:
   its 3x3 neighbourhood, mixed back towards the original by **Strength**. A
   drag reads from the snapshot taken when the stroke started, so overlapping
   dabs soften once instead of compounding into mush.
-- **Jumble** (Shift+J) reorders the colour bytes under the brush. **Shuffle**
-  permutes them, **Scatter** gives each pixel a random neighbour's colour (so
+- **Shuffle** (Shift+J) reorders the colour bytes under the brush: its default
+  mode permutes them, **Scatter** gives each pixel a random neighbour's colour (so
   colours repeat) and **Noise** jitters each channel by **Amount** percent
   while keeping the pixel's alpha.
 - **Text** (Shift+X) stamps the **Text** option in the foreground colour with
@@ -189,14 +189,14 @@ selection mask, so each one can be confined to a region:
   characters fall back to `?`, and the result is ordinary pixels that the hex
   panels and byte tools can edit afterwards.
 
-## Airbrush, curves and contours
+## Spray can, curves and contours
 
-- **Airbrush** (Shift+A) sprays foreground dots inside the brush footprint:
+- **Spray can** (Shift+A) sprays foreground dots inside the brush footprint:
   every pixel of the tip is painted with **Flow**% probability, and holding the
   button keeps spraying at the cursor, so passes build up like a real
-  airbrush. Dragging sprays along the stroke; the whole press is one undo step.
+  spray can. Dragging sprays along the stroke; the whole press is one undo step.
   **Blur** is a 0-100 slider that softens the spray itself: at `0` every dot is
-  flat colour, and higher values fade the outer pixels of the tip into whatever
+  flat colour, and higher values fade the pixels at the tip's edge into whatever
   is already underneath, so the spray gets a soft feathered rim. **Multicolor**
   draws each sprayed pixel from the current palette instead of the foreground
   colour, and works together with Blur.
@@ -267,7 +267,7 @@ Aseprite-style drawing aids on top of the brush:
   X axis, Y axis or both, like Aseprite's symmetry.
 - **Tip** switches the brush between a square, a circle and a **Custom**
   footprint you draw on a 9×9 grid (**Edit…**), shared by every brush-like tool
-  including Blur and Jumble. The Pencil also has **Pattern tip**, which stamps
+  including Blur and Shuffle. The Pencil also has **Pattern tip**, which stamps
   the Pattern tab's grid as the brush in its own colours.
 - **Palette** keeps a scrolling swatch grid: PICO-8, DB16, Grayscale and the
   256-colour **256 Cube** preset. Left-click a swatch to use its colour,
@@ -398,9 +398,9 @@ state the tool uses:
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
 | Blur | Size, Tip, Strength, Smear, Mirror |
-| Jumble | Size, Tip, Mode (Shuffle, Scatter, Noise), Amount, Blur |
+| Shuffle | Size, Tip, Mode (Shuffle, Scatter, Noise), Amount, Blur |
 | Text | the text, Scale, Spacing |
-| Airbrush | Size, Flow %, Tip, Blur, Multicolor |
+| Spray can | Size, Tip, Flow %, Blur, Multicolor |
 | Curve | Width, Tip, Bend %, Vectors (1-8), Side (left, right, alternate) |
 | Contour | Width, Side (outside or inside), Connect (4 or 8 edges) |
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
@@ -416,7 +416,8 @@ Brush size, tip, mirror and tolerance also stay in the left column.
 **Hand** (`Shift+H`) or the middle mouse button pans the canvas anywhere,
 including past its edges — the view keeps a margin of empty space on every
 side so the artwork can sit wherever you like. The wheel zooms smoothly in
-1.25× steps around the pointer, from 12.5% to 6400%, and **Zoom to fit** picks
+1.25× steps around the pointer, from a floor of 1 : (longer side × 50,000) up to
+6400%, and **Zoom to fit** picks
 the exact ratio for the window (it can go below 100% for big sprites). `[`
 and `]` zoom out and in. Double-click the middle button (or double-click with
 **Hand**) to fit the artwork, **Shift**+wheel scrolls sideways, and
@@ -454,7 +455,7 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
 | `+` / `-` | brush size |
 | `[` / `]` | zoom out / in |
 | Space | swap foreground and background |
-| Shift + letter | pick a tool (Pencil, Eraser, Airbrush, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Jumble, Text, Line pattern, Structure fill, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
+| Shift + letter | pick a tool (Pencil, Eraser, Spray can, Picker, Fill, Line, Curve, Rectangle, Ellipse, Gradient, Contour, Blur, Shuffle, Text, Line pattern, Structure fill, Rect select, Ellipse select, Polygon, Lasso, Wand, Similar, Move / Scale, Hand) |
 | Shift+T | move the selection by dragging, scale it with Shift+drag, rotate it with Ctrl+drag, or move its corner to the cursor with `Enter` |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+A / Ctrl+D | select all / deselect (the sidebar buttons do the same) |

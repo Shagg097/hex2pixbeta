@@ -32,7 +32,7 @@ from .palette import (MAX_PALETTE_COLORS, PALETTE_FILETYPES, PALETTES,
 from .pattern import PatternSpec, apply_pattern, block_from_grid
 from .bitmapfont import text_size
 from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
-                      jumble_area, jumble_stroke, smear_area, spray_area,
+                      smear_area, spray_area, shuffle_area, shuffle_stroke,
                       spray_stroke)
 from .shapes import (brush_offsets, custom_brush, custom_brush_from_text,
                      custom_brush_text, gradient_fill, line_points,
@@ -57,7 +57,7 @@ from .model import (
 TOOLS = (
     ("pencil", "Pencil", "p", "Paint with the foreground color"),
     ("eraser", "Eraser", "e", "Erase to transparency"),
-    ("airbrush", "Airbrush", "a", "Spray the foreground color; hold to build up"),
+    ("spray", "Spray can", "a", "Spray the foreground color; hold to build up"),
     ("picker", "Picker", "i", "Pick the color under the cursor"),
     ("fill", "Fill", "f", "Flood fill related pixel data"),
     ("line", "Line", "n", "Drag a straight line, or Enter twice"),
@@ -69,7 +69,7 @@ TOOLS = (
     ("structure", "Structure fill", "k", "Fill with a mirrored structural pattern"),
     ("contour", "Contour", "g", "Outline the selection, or the artwork"),
     ("blur", "Blur", "b", "Soften the pixels under the brush"),
-    ("jumble", "Jumble", "j", "Shuffle, scatter or noise the pixels"),
+    ("shuffle", "Shuffle", "j", "Mix, scatter or noise the pixels"),
     ("text", "Text", "x", "Click to stamp the Text option in the fg color"),
     ("rect", "Rect select", "m", "Select a rectangle"),
     ("ellipse", "Ellipse select", "o", "Select an ellipse"),
@@ -94,7 +94,8 @@ SHAPE_TOOLS = ("line", "curve", "shape_rect", "shape_ellipse")
 DEFAULT_HIDDEN_DOCKERS = ("block", "bytes", "dump", "export")
 
 MAX_PIXELS = 12000000
-MIN_ZOOM = 0.125
+MIN_ZOOM = 1e-9           # keeps Tk's coordinate maths finite on huge canvases
+ZOOM_OUT_FACTOR = 50000.0  # furthest zoom out: 1 : (longer side x this)
 MAX_ZOOM = 64.0
 ROTATE_SNAP = 15.0
 SYMMETRY_LABELS = {"": "Off", "x": "X", "y": "Y", "xy": "XY"}
@@ -103,6 +104,12 @@ SEL_MODE_LABELS = {"replace": "Replace", "add": "Add",
                    "subtract": "Subtract", "intersect": "Intersect"}
 SEL_MODE_VALUES = {"Replace": "replace", "Add": "add",
                    "Subtract": "subtract", "Intersect": "intersect"}
+
+
+def min_zoom_for(width, height):
+    """The furthest zoom out: the longer side shrinks to 1/50,000 of a pixel."""
+    span = max(1, int(width), int(height))
+    return max(MIN_ZOOM, 1.0 / (span * ZOOM_OUT_FACTOR))
 
 
 def _bounded(value, low, high, default):
@@ -1732,7 +1739,7 @@ class hex2pixApp(tk.Tk):
         ttk.Button(zrow, text="\u2212", width=2,
                    command=lambda: self.zoom_step(-1)).pack(side="right",
                                                            padx=2)
-        self.zoom_var = tk.StringVar(value="%d%%" % int(round(self.zoom * 100)))
+        self.zoom_var = tk.StringVar(value=self.zoom_label())
         ttk.Label(zrow, textvariable=self.zoom_var).pack(side="right")
         ttk.Button(left, text="Zoom to fit", command=self.zoom_fit).pack(
             fill="x", pady=(2, 0))
@@ -2404,25 +2411,25 @@ class hex2pixApp(tk.Tk):
         self.blur_size_var = tk.IntVar(value=4)
         self.blur_strength_var = tk.IntVar(value=60)
         self.blur_smear_var = tk.IntVar(value=0)
-        self.jumble_size_var = tk.IntVar(value=4)
-        self.jumble_mode_var = tk.StringVar(value="Shuffle")
-        self.jumble_amount_var = tk.IntVar(value=40)
-        self.jumble_blur_var = tk.IntVar(value=0)
+        self.shuffle_size_var = tk.IntVar(value=4)
+        self.shuffle_mode_var = tk.StringVar(value="Shuffle")
+        self.shuffle_amount_var = tk.IntVar(value=40)
+        self.shuffle_blur_var = tk.IntVar(value=0)
         self.text_value = tk.StringVar(value="HEX")
         self.text_scale_var = tk.IntVar(value=2)
         self.text_spacing_var = tk.IntVar(value=1)
-        self.air_size_var = tk.IntVar(value=8)
-        self.air_flow_var = tk.IntVar(value=25)
+        self.spray_size_var = tk.IntVar(value=8)
+        self.spray_flow_var = tk.IntVar(value=25)
         self.curve_bend_var = tk.IntVar(value=30)
         self.curve_vectors_var = tk.IntVar(value=1)
         self.curve_direction_var = tk.StringVar(value="Left")
         self.contour_width_var = tk.IntVar(value=1)
         self.contour_side_var = tk.StringVar(value="Outside")
         self.contour_connect_var = tk.StringVar(value="4")
-        self.air_blur_var = tk.DoubleVar(value=0.0)
-        self.air_blur_text = tk.StringVar(value="0%")
-        self.air_multi_var = tk.BooleanVar(value=False)
-        self._airbrush_job = None
+        self.spray_blur_var = tk.DoubleVar(value=0.0)
+        self.spray_blur_text = tk.StringVar(value="0%")
+        self.spray_multi_var = tk.BooleanVar(value=False)
+        self._spray_job = None
         self.blur_source = None
         self.tool_option_widgets = {}
         self._refresh_tool_options()
@@ -2649,20 +2656,20 @@ class hex2pixApp(tk.Tk):
                            ("Off", "X", "Y", "XY"), 5,
                            command=self.apply_symmetry_option)
 
-    def _options_jumble(self):
+    def _options_shuffle(self):
         self._option_label("Size")
-        self._option_spin(self.jumble_size_var, 1, 64)
+        self._option_spin(self.shuffle_size_var, 1, 64)
         self._option_label("Tip")
         self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
                            command=self.tip_chosen)
         self._option_label("Mode")
-        self._option_combo(self.jumble_mode_var,
+        self._option_combo(self.shuffle_mode_var,
                            ("Shuffle", "Scatter", "Noise"), 8)
         self._option_label("Amount")
-        self._option_spin(self.jumble_amount_var, 0, 100)
+        self._option_spin(self.shuffle_amount_var, 0, 100)
         self._option_label("%", (2, 2))
         self._option_label("Blur")
-        self._option_spin(self.jumble_blur_var, 0, 100)
+        self._option_spin(self.shuffle_blur_var, 0, 100)
         self._option_label("%", (2, 2))
 
     def _options_text(self):
@@ -2674,22 +2681,22 @@ class hex2pixApp(tk.Tk):
         self._option_spin(self.text_spacing_var, 0, 8, width=3)
         self._option_label("Click to stamp in the foreground color", (16, 2))
 
-    def _options_airbrush(self):
+    def _options_spray(self):
         self._option_label("Size")
-        self._option_spin(self.air_size_var, 1, 64)
+        self._option_spin(self.spray_size_var, 1, 64)
         self._option_label("Flow")
-        self._option_spin(self.air_flow_var, 1, 100)
+        self._option_spin(self.spray_flow_var, 1, 100)
         self._option_label("%", (2, 2))
         self._option_label("Tip")
         self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
                            command=self.tip_chosen)
         self._option_label("Blur")
         ttk.Scale(self.tool_options, from_=0, to=100, length=90,
-                  variable=self.air_blur_var,
-                  command=self.airbrush_blur_changed).pack(side="left")
-        ttk.Label(self.tool_options, textvariable=self.air_blur_text,
+                  variable=self.spray_blur_var,
+                  command=self.spray_blur_changed).pack(side="left")
+        ttk.Label(self.tool_options, textvariable=self.spray_blur_text,
                   width=4).pack(side="left", padx=(2, 0))
-        self._option_check("Multicolor", self.air_multi_var)
+        self._option_check("Multicolor", self.spray_multi_var)
 
     def _options_curve(self):
         self._option_label("Width")
@@ -2806,7 +2813,7 @@ class hex2pixApp(tk.Tk):
         """
         self.view.delete("hex")
         width, height = self.doc.width, self.doc.height
-        zoom = max(MIN_ZOOM, float(self.zoom))
+        zoom = max(self.min_zoom(), float(self.zoom))
         full_w = max(1, int(round(width * zoom)))
         full_h = max(1, int(round(height * zoom)))
         self._fit_scrollregion(full_w, full_h)
@@ -2868,6 +2875,11 @@ class hex2pixApp(tk.Tk):
 
     def checker_plate(self, x, y, width, height):
         """A checkerboard patch for the visible region only."""
+        if 8 * self.zoom < 1:
+            # Checks smaller than a screen pixel are noise, and a zoomed-out
+            # canvas covers the whole sprite: one flat plate beats a paste
+            # every 8 pixels of it.
+            return Image.new("RGBA", (width, height), (58, 58, 64, 255))
         if self._checker_tile is None:
             tile = Image.new("RGBA", (8, 8), (58, 58, 64, 255))
             draw = ImageDraw.Draw(tile)
@@ -3226,11 +3238,11 @@ class hex2pixApp(tk.Tk):
             self.begin_stroke()
             self.paint_at(x, y, "eraser" if secondary else tool)
             self.last_paint = (x, y)
-        elif tool == "airbrush":
+        elif tool == "spray":
             self.begin_stroke()
             self.spray_at(x, y)
             self.last_paint = (x, y)
-            self.start_airbrush()
+            self.start_spray()
         elif tool == "picker":
             self.pick_at(x, y)
         elif tool == "fill":
@@ -3244,9 +3256,9 @@ class hex2pixApp(tk.Tk):
             self.blur_source = self.doc.bitmap.copy()
             self.blur_at(x, y)
             self.last_paint = (x, y)
-        elif tool == "jumble":
+        elif tool == "shuffle":
             self.begin_stroke()
-            self.jumble_at(x, y)
+            self.shuffle_at(x, y)
             self.last_paint = (x, y)
         elif tool == "text":
             before = self.doc.begin()
@@ -3309,7 +3321,7 @@ class hex2pixApp(tk.Tk):
             if previous:
                 self._mark_dirty(previous[0], previous[1], x, y)
             self.last_paint = (x, y)
-        elif tool in ("blur", "jumble") and self.stroke_before is not None:
+        elif tool in ("blur", "shuffle") and self.stroke_before is not None:
             previous = self.last_paint or (x, y)
             if tool == "blur":
                 if self.blur_source is None:
@@ -3321,23 +3333,23 @@ class hex2pixApp(tk.Tk):
                             self.blur_source, self.blur_smear())
                 half = self.blur_radius() // 2 + 1
             else:
-                jumble_stroke(self.doc.bitmap, self.doc.mask(),
-                              previous[0], previous[1], x, y,
-                              self.jumble_radius(), self.jumble_mode(),
-                              self.jumble_amount(), self.brush_shape(),
-                              self.symmetry, blur=self.jumble_blur())
-                half = self.jumble_radius() // 2 + 1
+                shuffle_stroke(self.doc.bitmap, self.doc.mask(),
+                               previous[0], previous[1], x, y,
+                               self.shuffle_radius(), self.shuffle_mode(),
+                               self.shuffle_amount(), self.brush_shape(),
+                               self.symmetry, blur=self.shuffle_blur())
+                half = self.shuffle_radius() // 2 + 1
             self._mark_dirty(previous[0], previous[1], x, y, half)
             self.last_paint = (x, y)
-        elif tool == "airbrush" and self.stroke_before is not None:
+        elif tool == "spray" and self.stroke_before is not None:
             previous = self.last_paint or (x, y)
             spray_stroke(self.doc.bitmap, self.doc.mask(),
                          previous[0], previous[1], x, y,
-                         self.airbrush_size(), self.airbrush_flow(),
+                         self.spray_size(), self.spray_flow(),
                          self.fg, self.brush_shape(), self.symmetry,
                          **self.spray_options())
             self._mark_dirty(previous[0], previous[1], x, y,
-                             self.airbrush_size() // 2 + 1)
+                             self.spray_size() // 2 + 1)
             self.last_paint = (x, y)
         elif tool in SHAPE_TOOLS and self.shape_anchor is not None:
             self.apply_shape(free_x, free_y, bool(state & 0x0001))
@@ -3369,7 +3381,7 @@ class hex2pixApp(tk.Tk):
         self.redraw()
 
     def on_release_common(self):
-        self.stop_airbrush()
+        self.stop_spray()
         if self.shape_anchor is not None:
             self.finish_shape()
         if self.gradient_anchor is not None:
@@ -3506,7 +3518,11 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------- tools
     def set_tool(self, name):
-        self.stop_airbrush()
+        if name == "jumble":       # the tool's name before it became Shuffle
+            name = "shuffle"
+        elif name == "airbrush":   # ... and before it became Spray can
+            name = "spray"
+        self.stop_spray()
         self.tool = name
         self.tool_var.set(name)
         if name == "transform" and not self.doc.selection.bounds():
@@ -3576,12 +3592,12 @@ class hex2pixApp(tk.Tk):
         self._mark_dirty(x, y, x, y, self.blur_radius() // 2 + 1)
         return painted
 
-    def jumble_at(self, x, y):
-        painted = jumble_area(self.doc.bitmap, self.doc.mask(), x, y,
-                              self.jumble_radius(), self.jumble_mode(),
-                              self.jumble_amount(), self.brush_shape(),
-                              self.symmetry, blur=self.jumble_blur())
-        self._mark_dirty(x, y, x, y, self.jumble_radius() // 2 + 1)
+    def shuffle_at(self, x, y):
+        painted = shuffle_area(self.doc.bitmap, self.doc.mask(), x, y,
+                               self.shuffle_radius(), self.shuffle_mode(),
+                               self.shuffle_amount(), self.brush_shape(),
+                               self.symmetry, blur=self.shuffle_blur())
+        self._mark_dirty(x, y, x, y, self.shuffle_radius() // 2 + 1)
         return painted
 
     def pattern_dab(self, x, y):
@@ -3610,34 +3626,34 @@ class hex2pixApp(tk.Tk):
         return painted
 
     def spray_at(self, x, y):
-        """One airbrush pass over the brush footprint."""
+        """One spray pass over the brush footprint."""
         painted = spray_area(self.doc.bitmap, self.doc.mask(), x, y,
-                             self.airbrush_size(), self.airbrush_flow(),
+                             self.spray_size(), self.spray_flow(),
                              self.fg, self.brush_shape(), self.symmetry,
                              **self.spray_options())
-        self._mark_dirty(x, y, x, y, self.airbrush_size() // 2 + 1)
+        self._mark_dirty(x, y, x, y, self.spray_size() // 2 + 1)
         self.request_redraw()
         return painted
 
-    def start_airbrush(self):
-        if self._airbrush_job is None:
-            self._airbrush_job = self.after(60, self._airbrush_tick)
+    def start_spray(self):
+        if self._spray_job is None:
+            self._spray_job = self.after(60, self._spray_tick)
 
-    def _airbrush_tick(self):
-        self._airbrush_job = None
-        if self.stroke_before is None or self.tool != "airbrush":
+    def _spray_tick(self):
+        self._spray_job = None
+        if self.stroke_before is None or self.tool != "spray":
             return
         self.spray_at(self.cursor[0], self.cursor[1])
-        self._airbrush_job = self.after(60, self._airbrush_tick)
+        self._spray_job = self.after(60, self._spray_tick)
 
-    def stop_airbrush(self):
-        if getattr(self, "_airbrush_job", None) is None:
+    def stop_spray(self):
+        if getattr(self, "_spray_job", None) is None:
             return
         try:
-            self.after_cancel(self._airbrush_job)
+            self.after_cancel(self._spray_job)
         except tk.TclError:
             pass
-        self._airbrush_job = None
+        self._spray_job = None
 
     def contour_at(self):
         """Outline the selection, or the artwork when nothing is selected.
@@ -3952,15 +3968,15 @@ class hex2pixApp(tk.Tk):
             if self.blur_at(x, y):
                 self.doc.commit(before)
             self.blur_source = None
-        elif tool == "jumble":
+        elif tool == "shuffle":
             before = self.doc.begin()
-            if self.jumble_at(x, y):
+            if self.shuffle_at(x, y):
                 self.doc.commit(before)
         elif tool == "text":
             before = self.doc.begin()
             if self.stamp_text_at(x, y):
                 self.doc.commit(before)
-        elif tool == "airbrush":
+        elif tool == "spray":
             before = self.doc.begin()
             if self.spray_at(x, y):
                 self.doc.commit(before)
@@ -4664,6 +4680,10 @@ class hex2pixApp(tk.Tk):
         self.refresh_status()
         self.request_redraw()
 
+    def min_zoom(self):
+        """How far this artwork may zoom out: size x 50,000 on its longer side."""
+        return min_zoom_for(self.doc.width, self.doc.height)
+
     def set_zoom(self, zoom, anchor=None):
         """Zoom to any ratio, keeping the pixel under the pointer still."""
         old_zoom = self.zoom
@@ -4673,7 +4693,7 @@ class hex2pixApp(tk.Tk):
                      self.view.canvasy(anchor[1]) / float(old_zoom))
         max_zoom = min(MAX_ZOOM, 100000.0 / max(1, self.doc.width),
                        100000.0 / max(1, self.doc.height))
-        zoom = max(MIN_ZOOM, min(max_zoom, float(zoom)))
+        zoom = max(self.min_zoom(), min(max_zoom, float(zoom)))
         self.zoom = zoom
         self.zoom_var.set(self.zoom_label())
         self.redraw()
@@ -4684,7 +4704,12 @@ class hex2pixApp(tk.Tk):
         self.refresh_status()
 
     def zoom_label(self):
-        return "%d%%" % int(round(self.zoom * 100))
+        percent = self.zoom * 100.0
+        if percent >= 1:
+            return "%d%%" % int(round(percent))
+        if percent >= 0.01:
+            return "%.2f%%" % percent
+        return "1:%.0f" % (1.0 / self.zoom)
 
     def _scroll_box(self):
         """The scrollregion as four floats, with a usable fallback."""
@@ -4862,22 +4887,22 @@ class hex2pixApp(tk.Tk):
     def blur_strength(self):
         return _bounded(self.blur_strength_var.get(), 0, 100, 60)
 
-    def jumble_radius(self):
-        return _bounded(self.jumble_size_var.get(), 1, 64, 4)
+    def shuffle_radius(self):
+        return _bounded(self.shuffle_size_var.get(), 1, 64, 4)
 
-    def jumble_mode(self):
-        value = str(self.jumble_mode_var.get()).lower()
+    def shuffle_mode(self):
+        value = str(self.shuffle_mode_var.get()).lower()
         return value if value in ("shuffle", "scatter", "noise") \
             else "shuffle"
 
-    def jumble_amount(self):
-        return _bounded(self.jumble_amount_var.get(), 0, 100, 40)
+    def shuffle_amount(self):
+        return _bounded(self.shuffle_amount_var.get(), 0, 100, 40)
 
     def blur_smear(self):
         return _bounded(self.blur_smear_var.get(), 0, 100, 0)
 
-    def jumble_blur(self):
-        return _bounded(self.jumble_blur_var.get(), 0, 100, 0)
+    def shuffle_blur(self):
+        return _bounded(self.shuffle_blur_var.get(), 0, 100, 0)
 
     def text_scale(self):
         return _bounded(self.text_scale_var.get(), 1, 8, 2)
@@ -4885,35 +4910,35 @@ class hex2pixApp(tk.Tk):
     def text_spacing(self):
         return _bounded(self.text_spacing_var.get(), 0, 8, 1)
 
-    def airbrush_size(self):
-        return _bounded(self.air_size_var.get(), 1, 64, 8)
+    def spray_size(self):
+        return _bounded(self.spray_size_var.get(), 1, 64, 8)
 
-    def airbrush_flow(self):
-        return _bounded(self.air_flow_var.get(), 1, 100, 25)
+    def spray_flow(self):
+        return _bounded(self.spray_flow_var.get(), 1, 100, 25)
 
     def spray_options(self):
         """The Blur slider and Multicolor switch as spray_area keywords."""
         options = {}
-        blur = self.airbrush_blur()
+        blur = self.spray_blur()
         if blur:
             options["blur"] = blur
-        if self.air_multi_var.get():
+        if self.spray_multi_var.get():
             colors = [tuple(color) for color in getattr(self, "palette", [])
                       if len(color) == 4]
             options["colors"] = colors or [self.fg]
         return options
 
-    def airbrush_blur(self):
+    def spray_blur(self):
         try:
-            value = float(self.air_blur_var.get())
+            value = float(self.spray_blur_var.get())
         except (tk.TclError, TypeError, ValueError):
             return 0
         return max(0, min(100, int(round(value))))
 
-    def airbrush_blur_changed(self, value=None):
-        text = getattr(self, "air_blur_text", None)
+    def spray_blur_changed(self, value=None):
+        text = getattr(self, "spray_blur_text", None)
         if text is not None:
-            text.set("%d%%" % self.airbrush_blur())
+            text.set("%d%%" % self.spray_blur())
 
     def curve_bend(self):
         return _bounded(self.curve_bend_var.get(), -100, 100, 30)
@@ -5373,7 +5398,9 @@ class hex2pixApp(tk.Tk):
         self.cursor = (max(0, min(tab.cursor[0], self.doc.width - 1)),
                        max(0, min(tab.cursor[1], self.doc.height - 1)))
         if tab.zoom:
-            self.zoom = tab.zoom
+            self.zoom = max(self.min_zoom(), float(tab.zoom))
+            if hasattr(self, "zoom_var"):
+                self.zoom_var.set(self.zoom_label())
         self._set_default_export_path()
         self.refresh_layers()
         self.refresh_tabs()
@@ -6286,9 +6313,9 @@ class hex2pixApp(tk.Tk):
             "Shift+N/R/U/V   line, rectangle, ellipse, gradient\n"
             "Shift+H         hand: drag to pan the canvas anywhere\n"
             "Shift+B         blur: soften the pixels under the brush\n"
-            "Shift+J         jumble: shuffle, scatter or noise the pixels\n"
+            "Shift+J         shuffle: mix, scatter or noise the pixels\n"
             "Shift+X         text: click to stamp the Text option\n"
-            "Shift+A         airbrush: hold to spray the brush footprint;\n"
+            "Shift+A         spray can: hold to spray the brush footprint;\n"
             "                Blur softens the spray edge, Multicolor uses\n"
             "                the palette\n"
             "Shift+C         curve: Bend, Vectors (1-8) and Dir make an arc\n"
@@ -6304,7 +6331,7 @@ class hex2pixApp(tk.Tk):
             "                selection, palette, pattern and view; Open\n"
             "                loads them back, and Ctrl+S saves that format\n"
             "                once the document path is a .h2p file\n"
-            "Wheel           smooth zoom around the pointer (12.5%-6400%)\n"
+            "Wheel           smooth zoom (1:(side x 50,000) to 6400%)\n"
             "Colour wheel    click sets FG, right-click sets BG\n"
             "Palette         New/Set/Del build one; Map quantizes to it\n"
             "Dark mode       View > Dark mode; on by default\n"
@@ -7219,13 +7246,13 @@ def run_selftest(out_path=None):
             [drop_path], choose=lambda paths: "canvas") == ["canvas"]
         tabs_ok = tabs_ok and app.doc.path == drop_path
 
-        smear_ok = app.blur_smear() == 0 and app.jumble_blur() == 0
+        smear_ok = app.blur_smear() == 0 and app.shuffle_blur() == 0
         app.blur_smear_var.set(50)
-        app.jumble_blur_var.set(25)
+        app.shuffle_blur_var.set(25)
         smear_ok = (smear_ok and app.blur_smear() == 50
-                    and app.jumble_blur() == 25)
+                    and app.shuffle_blur() == 25)
         app.blur_smear_var.set(0)
-        app.jumble_blur_var.set(0)
+        app.shuffle_blur_var.set(0)
 
         tips_ok = app.brush_shape() == "square"
         app.brush_shape_var.set("Circle")

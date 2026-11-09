@@ -31,7 +31,7 @@ keyboard is the primary instrument.
   rotate, recolor or dump their RGBA bytes.
 - **Pixel and hex views** — the canvas can be a rendered image or a grid of
   `RRGGBB` / `RRGGBBAA` codes, both fully editable.
-- **A real tool set** — shapes, curves, patterns, airbrush, blur, jumble,
+- **A real tool set** — shapes, curves, patterns, spray can, blur, shuffle,
   contour, text, gradients, symmetry and a color wheel.
 - **Palettes and dithering** — PICO-8, DB16, Grayscale, a 256-color cube and
   user palettes, plus ordered and error-diffusion dithering.
@@ -100,7 +100,7 @@ Verified on this branch with CPython 3.8.20 (64-bit, Tcl/Tk 8.6, MSC v.1929):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 391 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 399 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
 | `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
@@ -270,7 +270,7 @@ self-crossing outline cannot leave holes in the mask.
 | Tool | What it does |
 | --- | --- |
 | Pencil / Eraser | Paint or erase with a square, circular or custom tip, 1–64 px; Pencil can stamp the pattern as its tip |
-| Airbrush | Spray foreground pixels inside the brush footprint; **Flow**, feathered **Blur** and **Multicolor** |
+| Spray can | Spray foreground pixels inside the brush footprint; **Flow**, feathered **Blur** and **Multicolor** |
 | Fill | Flood fill with adjustable tolerance |
 | Picker | Pick a color into the foreground or background |
 | Line | Drag a straight line; `Shift` snaps to 0°, 45° or 90° |
@@ -279,13 +279,13 @@ self-crossing outline cannot leave holes in the mask.
 | Gradient | Interpolate foreground to background (linear or radial), or step through the whole palette; Spread clamps, repeats or reflects; optional dithering |
 | Contour | Draw an inside or outside ring around a selection or opaque artwork |
 | Blur | Soften with a 3×3 neighborhood; strength controls the mix, smear drags colour along the stroke, and the tip picks the footprint |
-| Jumble | Shuffle, scatter or add channel noise under the brush; blur softens the mixed result, and the tip picks the footprint |
+| Shuffle | Mix, scatter or add channel noise under the brush; blur softens the mixed result, and the tip picks the footprint |
 | Text | Stamp text in a built-in 5×7 font with scale and spacing |
 | Line pattern | Fill selected lines with consecutive pattern rows; `Shift` staggers them |
 | Structure fill | Build mirrored super-tiles from the pattern and repeat them over a selection |
 
 Brush size, tip shape and mirroring are shared across the painting tools,
-Blur and Jumble included. The tip is **Square**, **Circle** or **Custom**:
+Blur and Shuffle included. The tip is **Square**, **Circle** or **Custom**:
 **Edit…** opens a 9×9 grid where clicking cells shapes your own footprint,
 which then scales to the tool's Size, and it is remembered between sessions.
 **Pattern tip** on the Pencil stamps the Pattern tab's grid as the brush, in
@@ -617,7 +617,7 @@ hex2pixmain/
 │  ├─ model.py             bitmaps, documents, selections and edits
 │  ├─ canvas.py            canvas specs, resize and resampling
 │  ├─ formats.py           image/project readers and writers
-│  ├─ effects.py           airbrush, blur, jumble and text
+│  ├─ effects.py           spray can, blur, shuffle and text
 │  ├─ shapes.py            lines, rectangles, ellipses and curves
 │  ├─ dither.py            ordered and error-diffusion dithering
 │  ├─ filters.py           image filters
