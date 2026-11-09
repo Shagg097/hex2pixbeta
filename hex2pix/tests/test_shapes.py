@@ -143,6 +143,35 @@ class GradientTest(unittest.TestCase):
         gradient_fill(bitmap, None, 0, 0, 3, 0, RED, BLUE, "pattern", block)
         self.assertEqual([bitmap.rgba(x, 0) for x in range(4)], [RED] * 4)
 
+    def test_radial_gradient_follows_the_distance(self):
+        bitmap = Bitmap(9, 9)
+        gradient_fill(bitmap, None, 4, 4, 8, 4, RED, BLUE, radial=True)
+        self.assertEqual(bitmap.rgba(4, 4), RED)
+        self.assertEqual(bitmap.rgba(8, 4), BLUE)
+        self.assertEqual(bitmap.rgba(4, 8), BLUE)
+        self.assertEqual(bitmap.rgba(0, 4), BLUE)
+
+    def test_palette_gradient_walks_every_colour(self):
+        bitmap = Bitmap(5, 1)
+        stops = [RED, (0, 255, 0, 255), BLUE]
+        gradient_fill(bitmap, None, 0, 0, 4, 0, RED, BLUE, colors=stops)
+        self.assertEqual(bitmap.rgba(0, 0), RED)
+        self.assertEqual(bitmap.rgba(2, 0), (0, 255, 0, 255))
+        self.assertEqual(bitmap.rgba(4, 0), BLUE)
+
+    def test_spread_repeats_and_reflects_the_ramp(self):
+        repeat = Bitmap(9, 1)
+        gradient_fill(repeat, None, 0, 0, 3, 0, RED, BLUE, spread="repeat")
+        self.assertEqual(repeat.rgba(3, 0), RED)
+        self.assertEqual(repeat.rgba(6, 0), RED)
+        reflect = Bitmap(9, 1)
+        gradient_fill(reflect, None, 0, 0, 3, 0, RED, BLUE, spread="reflect")
+        self.assertEqual(reflect.rgba(3, 0), BLUE)
+        self.assertEqual(reflect.rgba(6, 0), RED)
+        clamp = Bitmap(9, 1)
+        gradient_fill(clamp, None, 0, 0, 3, 0, RED, BLUE)
+        self.assertEqual(clamp.rgba(6, 0), BLUE)
+
     def test_zero_length_direction_is_an_error(self):
         bitmap = Bitmap(4, 4)
         with self.assertRaises(HexError):

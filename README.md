@@ -210,7 +210,7 @@ self-crossing outline cannot leave holes in the mask.
 | Line | Drag a straight line; `Shift` snaps to 0°, 45° or 90° |
 | Curve | Bend a line by a percentage, split it into 1–8 arcs and choose left, right or alternating sides |
 | Rectangle / Ellipse | Outline or filled shapes; `Shift` constrains to a square or circle |
-| Gradient | Interpolate foreground to background, with optional dithering |
+| Gradient | Interpolate foreground to background (linear or radial), or step through the whole palette; Spread clamps, repeats or reflects; optional dithering |
 | Contour | Draw an inside or outside ring around a selection or opaque artwork |
 | Blur | Soften with a 3×3 neighborhood; strength controls the mix |
 | Jumble | Shuffle, scatter or add channel noise under the brush |
@@ -252,7 +252,8 @@ background colors:
 
 Bias moves the light/dark cutoff, Strength blends the result toward the
 original pixels, and Scale spaces out Pattern and Lines. The Gradient tool can
-use the same settings.
+use the same settings. Dithering is defined over one axis, so it applies to
+two-colour linear gradients; radial and palette ramps stay smooth.
 
 The filters are **Grayscale**, **Posterize**, **Threshold**, **Brightness**,
 **Contrast**, **Saturation**, **Hue shift**, **Noise**, **Sepia** and **Find
@@ -508,7 +509,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **354 unit tests** covering the model, canvas geometry,
+The first command runs **357 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -544,7 +545,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              354 unit tests
+│  └─ tests/              357 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 

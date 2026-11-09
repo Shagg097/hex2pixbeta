@@ -60,7 +60,7 @@ TOOLS = (
     ("curve", "Curve", "c", "Drag a curved line; Bend sets the arc"),
     ("shape_rect", "Rectangle", "r", "Drag a rectangle, outline or filled"),
     ("shape_ellipse", "Ellipse", "u", "Drag an ellipse, outline or filled"),
-    ("gradient", "Gradient", "v", "Drag a foreground to background gradient"),
+    ("gradient", "Gradient", "v", "Drag a linear, radial or palette gradient"),
     ("pattern", "Line pattern", "l", "Fill lines with the pattern, row by row"),
     ("structure", "Structure fill", "k", "Fill with a mirrored structural pattern"),
     ("contour", "Contour", "g", "Outline the selection, or the artwork"),
@@ -2070,6 +2070,9 @@ class hex2pixApp(tk.Tk):
         self.lasso_smooth_var = tk.BooleanVar(value=True)
         self.gradient_reverse_var = tk.BooleanVar(value=False)
         self.gradient_dither_var = tk.StringVar(value="Off")
+        self.gradient_radial_var = tk.BooleanVar(value=False)
+        self.gradient_palette_var = tk.BooleanVar(value=False)
+        self.gradient_spread_var = tk.StringVar(value="Clamp")
         self.symmetry_option_var = tk.StringVar(
             value=SYMMETRY_LABELS.get(self.symmetry, "Off"))
         self.rotate_snap = int(ROTATE_SNAP)
@@ -2256,12 +2259,31 @@ class hex2pixApp(tk.Tk):
         self._options_shape()
 
     def _options_gradient(self):
+        self._option_check("Radial", self.gradient_radial_var,
+                           command=self._sync_gradient_options)
+        self._option_check("Whole palette", self.gradient_palette_var,
+                           command=self._sync_gradient_options)
         self._option_check("Reverse (BG to FG)", self.gradient_reverse_var)
+        self._option_label("Spread")
+        self._option_combo(self.gradient_spread_var,
+                           ("Clamp", "Repeat", "Reflect"), 8,
+                           command=self._sync_gradient_options)
         self._option_label("Dither")
-        self._option_combo(self.gradient_dither_var,
-                           tuple(dither.DITHER_LABELS), 15)
+        self.gradient_dither_combo = self._option_combo(
+            self.gradient_dither_var, tuple(dither.DITHER_LABELS), 15)
         self._option_label("Dither Bias / Strength / Scale: Dither tab",
                            (10, 2))
+        self._sync_gradient_options()
+
+    def _sync_gradient_options(self):
+        """Dithering is defined over one axis, so smooth ramps disable it."""
+        combo = getattr(self, "gradient_dither_combo", None)
+        if combo is None:
+            return
+        smooth = (self.gradient_palette_var.get()
+                  or self.gradient_radial_var.get()
+                  or self.gradient_spread_var.get() != "Clamp")
+        combo.configure(state="disabled" if smooth else "readonly")
 
     def _options_pattern(self):
         self._option_label("Grid")
@@ -3674,11 +3696,13 @@ class hex2pixApp(tk.Tk):
         x1, y1 = self.cursor
         self.gradient_anchor = None
         try:
-            start_color, end_color = self.gradient_colors()
+            start_color, end_color, stops = self.gradient_stops()
             mode = self.gradient_dither_mode()
             gradient_fill(self.doc.bitmap, self.doc.mask(), x0, y0, x1, y1,
                           start_color, end_color, mode,
-                          self.gradient_pattern(mode),
+                          self.gradient_pattern(mode), colors=stops,
+                          radial=self.gradient_radial(),
+                          spread=self.gradient_spread(),
                           **self.dither_options())
         except HexError as exc:
             self.report_error(str(exc))
@@ -3700,6 +3724,28 @@ class hex2pixApp(tk.Tk):
             return self.bg, self.fg
         return self.fg, self.bg
 
+    def gradient_stops(self):
+        """The two end colours plus the full palette ramp when asked for."""
+        if (getattr(self, "gradient_palette_var", None) is not None
+                and self.gradient_palette_var.get()):
+            colors = [tuple(color) for color in self.palette]
+            if len(colors) < 2:
+                raise HexError("a palette gradient needs at least two colours")
+            if (getattr(self, "gradient_reverse_var", None) is not None
+                    and self.gradient_reverse_var.get()):
+                colors.reverse()
+            return colors[0], colors[-1], colors
+        start_color, end_color = self.gradient_colors()
+        return start_color, end_color, None
+
+    def gradient_radial(self):
+        var = getattr(self, "gradient_radial_var", None)
+        return bool(var is not None and var.get())
+
+    def gradient_spread(self):
+        var = getattr(self, "gradient_spread_var", None)
+        return str(var.get()).lower() if var is not None else "clamp"
+
     def keyboard_gradient(self):
         bounds = self.doc.selection.bounds()
         if bounds:
@@ -3711,11 +3757,13 @@ class hex2pixApp(tk.Tk):
             end = (self.doc.width - 1, self.doc.height - 1)
         before = self.doc.begin()
         try:
-            start_color, end_color = self.gradient_colors()
+            start_color, end_color, stops = self.gradient_stops()
             mode = self.gradient_dither_mode()
             gradient_fill(self.doc.bitmap, self.doc.mask(), start[0], start[1],
                           end[0], end[1], start_color, end_color, mode,
-                          self.gradient_pattern(mode),
+                          self.gradient_pattern(mode), colors=stops,
+                          radial=self.gradient_radial(),
+                          spread=self.gradient_spread(),
                           **self.dither_options())
         except HexError as exc:
             self.report_error(str(exc))

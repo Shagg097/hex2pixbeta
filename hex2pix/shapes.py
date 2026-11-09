@@ -343,37 +343,81 @@ def paint_shape(bitmap, mask, kind, x0, y0, x1, y1, size, color,
     return painted
 
 
+GRADIENT_SPREADS = ("clamp", "repeat", "reflect")
+
+
+def _spread_position(value, spread):
+    """Fold a raw gradient position into 0..1 for the chosen spread."""
+    if spread == "repeat":
+        return float(value) - math.floor(float(value))
+    if spread == "reflect":
+        cycle = float(value) % 2.0
+        return cycle if cycle <= 1.0 else 2.0 - cycle
+    return clamp(value, 0.0, 1.0)
+
+
+def _gradient_color(stops, position):
+    """The colour at `position` (0..1) along a list of RGBA stops."""
+    if len(stops) == 1:
+        return tuple(stops[0])
+    span = position * (len(stops) - 1)
+    index = int(span)
+    if index >= len(stops) - 1:
+        return tuple(stops[-1])
+    fraction = span - index
+    first = stops[index]
+    second = stops[index + 1]
+    return tuple(int(first[channel]
+                     + (second[channel] - first[channel]) * fraction + 0.5)
+                 for channel in range(4))
+
+
 def gradient_fill(bitmap, mask, x0, y0, x1, y1, start, end, dither="off",
                   pattern=None, scale=1, bias=0.0, strength=100,
-                  serpentine=False):
-    """Linear gradient from `start` to `end` along the stroke direction.
+                  serpentine=False, colors=None, radial=False,
+                  spread="clamp"):
+    """Gradient from `start` to `end`, or through a list of palette stops.
 
-    With a `dither` mode the gradient is reduced to those same two colours
-    with a Bayer matrix, Floyd-Steinberg error diffusion or a custom pattern
-    block instead of interpolating every pixel.
+    `colors` replaces the two-colour ramp with evenly spaced RGBA stops, so a
+    whole palette can drive one fill. With `radial` the position is the
+    distance from the drag start instead of the projection along the drag.
+    `spread` clamps the ramp outside the stroke, repeats it or reflects it.
+
+    With a `dither` mode a two-colour linear gradient is reduced to those two
+    colours with a Bayer matrix, Floyd-Steinberg error diffusion or a custom
+    pattern block instead of interpolating every pixel. Multi-stop, radial and
+    folded ramps stay smooth because dithering is defined over one axis.
     """
     dx = int(x1) - int(x0)
     dy = int(y1) - int(y0)
     denominator = dx * dx + dy * dy
     if denominator == 0:
         raise HexError("drag the gradient tool to set a direction")
-    if dither and dither != "off":
+    stops = [tuple(color) for color in (colors or (start, end))]
+    if not stops:
+        raise HexError("the gradient needs at least one colour")
+    spread = str(spread or "clamp").lower()
+    if spread not in GRADIENT_SPREADS:
+        spread = "clamp"
+    if (dither and dither != "off" and len(stops) == 2 and not radial
+            and spread == "clamp"):
         return apply_gradient_dither(bitmap, mask, x0, y0, x1, y1, start,
                                      end, dither, pattern, scale, bias,
                                      strength, serpentine)
+    radius = math.hypot(dx, dy)
     painted = 0
     for y in range(bitmap.height):
         row = y * bitmap.width
         for x in range(bitmap.width):
             if mask is not None and mask[row + x] == 0:
                 continue
-            t = ((x - x0) * dx + (y - y0) * dy) / float(denominator)
-            t = clamp(t, 0.0, 1.0)
+            if radial:
+                position = math.hypot(x - x0, y - y0) / radius
+            else:
+                position = ((x - x0) * dx + (y - y0) * dy) / float(denominator)
+            position = _spread_position(position, spread)
+            color = _gradient_color(stops, position)
             base = (row + x) * 4
-            for channel in range(4):
-                a = start[channel]
-                b = end[channel]
-                value = int(a + (b - a) * t + 0.5)
-                bitmap.data[base + channel] = clamp(value, 0, 255)
+            bitmap.data[base:base + 4] = bytes(color)
             painted += 1
     return painted

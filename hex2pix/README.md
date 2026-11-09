@@ -246,7 +246,9 @@ Each is one undo step.
 The Gradient tool's **Dither** option runs the same modes over a gradient
 fill, so an FG-to-BG ramp becomes a dithered band instead of a smooth blend.
 It reads Bias, Strength, Scale and Serpentine from the Dither tab, and Pattern
-reads the Pattern tab block.
+reads the Pattern tab block. Dithering is defined over one axis, so it applies
+to two-colour linear gradients; **Radial**, **Whole palette** and non-clamped
+spreads stay smooth.
 
 ## Shapes, symmetry and palettes
 
@@ -257,7 +259,9 @@ Aseprite-style drawing aids on top of the brush:
   outline or solid. From the keyboard, Enter sets one end and Enter again
   commits, with arrows stretching the preview.
 - **Gradient** (Shift+V) drags a direction and interpolates the foreground to
-  the background colour across the selection; Enter applies it corner to
+  the background colour across the selection; **Radial** uses the distance
+  from the drag start, **Whole palette** walks the palette instead, and
+  **Spread** clamps, repeats or reflects the ramp. Enter applies it corner to
   corner.
 - **Mirror** (left panel) mirrors brush strokes, shapes and erasing across the
   X axis, Y axis or both, like Aseprite's symmetry.
@@ -387,7 +391,7 @@ state the tool uses:
 | Fill | Tolerance |
 | Line | Width, Tip |
 | Rectangle, Ellipse | Fill, Width, Tip |
-| Gradient | reverse the direction (BG to FG), Dither mode (Bias/Strength/Scale from the Dither tab) |
+| Gradient | Radial, Whole palette, reverse the direction (BG to FG), Spread (Clamp, Repeat, Reflect), Dither mode (two-colour linear gradients; Bias/Strength/Scale from the Dither tab) |
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
 | Blur | Size, Strength, Mirror |
@@ -532,7 +536,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 354 tests over the model, the canvas, formats, colours,
+The first command runs 357 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand
