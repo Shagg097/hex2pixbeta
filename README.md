@@ -67,7 +67,7 @@ Download from the
 | --- | --- | --- |
 | `hex2pix.exe` | ~18 MB | the usual choice: one file, no console window |
 | `hex2pix-portable.zip` | ~18 MB | antivirus blocks the single file (see below) |
-| [`hex2pix-py38-win7`](https://github.com/Shagg097/hex2pixbeta/actions/workflows/win7-build.yml) | ~26 MB | 64-bit Windows 7 SP1 and newer: the CPython 3.8.20 build from this branch's CI (see [below](#windows-7-compatibility)); the artifact also holds the portable ZIP. Needs a free GitHub account, and GitHub keeps Actions artifacts about 90 days |
+| [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat) | ~13 MB | 64-bit Windows 7 SP1 and newer: the CPython 3.8.20 `hex2pix.exe` (see [below](#windows-7-compatibility)); the same release also carries `hex2pix-portable.zip` |
 
 Put the executable (or the unzipped folder) anywhere you can write — Desktop,
 `D:\Tools`, a USB stick — and double-click it. No administrator rights are
@@ -137,9 +137,11 @@ Then install the pinned requirements into it and call the specs directly, becaus
 - **Dependency ceiling.** Pillow 10.4.0 is the last release that supports 3.8, and
   `requirements.txt` pins the exact Pillow and PyInstaller versions verified here,
   so newer library features will not arrive on this branch.
-- **No releases from this branch.** Tags on `main` build the 3.10 executable through
+- **Distribution.** Version tags on `main` build the 3.10 executable through
   `.github/workflows/release.yml`; this branch is checked by
-  `.github/workflows/win7-build.yml` instead, which publishes the build as the `hex2pix-py38-win7` artifact.
+  `.github/workflows/win7-build.yml` instead, which publishes this build in the
+  [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat) and keeps each run's files as an `hex2pix-py38-win7`
+  artifact for 90 days.
 
 ## Quick start
 
