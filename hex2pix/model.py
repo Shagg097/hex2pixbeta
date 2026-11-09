@@ -1388,6 +1388,9 @@ class Document(object):
         self.undo = UndoStack()
         self.path = path
         self.display_format = "png"
+        # Set by every edit that pushes undo history and cleared by a save, so
+        # the window can warn before throwing unsaved work away.
+        self.dirty = False
         self.matte = MATTE_WHITE
         self.ppi = float(ppi)
         self.color_mode = color_mode
@@ -1513,13 +1516,20 @@ class Document(object):
         return self.state()
 
     def commit(self, before):
+        self.dirty = True
         return self.undo.push(before, self.state())
 
     def undo_last(self):
-        return self.undo.undo(self)
+        changed = self.undo.undo(self)
+        if changed:
+            self.dirty = True
+        return changed
 
     def redo_last(self):
-        return self.undo.redo(self)
+        changed = self.undo.redo(self)
+        if changed:
+            self.dirty = True
+        return changed
 
     def replace_bitmap(self, bitmap, keep_selection=False):
         self.layers = [Layer(bitmap.width, bitmap.height, data=bitmap.data)]

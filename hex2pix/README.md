@@ -265,7 +265,10 @@ Aseprite-style drawing aids on top of the brush:
   corner.
 - **Mirror** (left panel) mirrors brush strokes, shapes and erasing across the
   X axis, Y axis or both, like Aseprite's symmetry.
-- **Tip** switches the brush between a square and a circle.
+- **Tip** switches the brush between a square, a circle and a **Custom**
+  footprint you draw on a 9×9 grid (**Edit…**), shared by every brush-like tool
+  including Blur and Jumble. The Pencil also has **Pattern tip**, which stamps
+  the Pattern tab's grid as the brush in its own colours.
 - **Palette** keeps a scrolling swatch grid: PICO-8, DB16, Grayscale and the
   256-colour **256 Cube** preset. Left-click a swatch to use its colour,
   right-click to edit it, and **New...** builds a palette from scratch (name,
@@ -386,7 +389,7 @@ state the tool uses:
 
 | Tool | Options |
 | --- | --- |
-| Pencil, Eraser | Size, Tip (square or circle), Mirror |
+| Pencil, Eraser | Size, Tip (square, circle or custom), Mirror, Pattern tip (Pencil) |
 | Picker | pick the colour into FG or BG |
 | Fill | Tolerance |
 | Line | Width, Tip |
@@ -394,8 +397,8 @@ state the tool uses:
 | Gradient | Radial, Whole palette, reverse the direction (BG to FG), Spread (Clamp, Repeat, Reflect), Dither mode (two-colour linear gradients; Bias/Strength/Scale from the Dither tab) |
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
-| Blur | Size, Strength, Mirror |
-| Jumble | Size, Mode (Shuffle, Scatter, Noise), Amount |
+| Blur | Size, Tip, Strength, Smear, Mirror |
+| Jumble | Size, Tip, Mode (Shuffle, Scatter, Noise), Amount, Blur |
 | Text | the text, Scale, Spacing |
 | Airbrush | Size, Flow %, Tip, Blur, Multicolor |
 | Curve | Width, Tip, Bend %, Vectors (1-8), Side (left, right, alternate) |
