@@ -34,9 +34,95 @@ def mirror_points(x, y, width, height, axes=""):
     return seen
 
 
+DEFAULT_CUSTOM_BRUSH = (
+    "000010000",
+    "000010000",
+    "000010000",
+    "000010000",
+    "111111111",
+    "000010000",
+    "000010000",
+    "000010000",
+    "000010000",
+)
+
+_custom_brush = None
+
+
+def set_custom_brush(rows):
+    """Store the custom tip as rows of 0/1 cells; `None` forgets it."""
+    global _custom_brush
+    if not rows:
+        _custom_brush = None
+        return None
+    clean = []
+    for row in rows:
+        if not row:
+            continue
+        if isinstance(row, str):
+            clean.append([1 if char == "1" else 0 for char in row])
+        else:
+            clean.append([1 if cell else 0 for cell in row])
+    if not clean:
+        _custom_brush = None
+        return None
+    width = max(len(row) for row in clean)
+    _custom_brush = tuple(tuple(row + [0] * (width - len(row)))
+                          for row in clean)
+    return _custom_brush
+
+
+def custom_brush():
+    """The custom tip, falling back to a plus so Custom always paints."""
+    if _custom_brush:
+        return _custom_brush
+    return tuple(tuple(1 if cell == "1" else 0 for cell in row)
+                 for row in DEFAULT_CUSTOM_BRUSH)
+
+
+def custom_brush_text():
+    """The custom tip as `"0110|1001"`, for the settings file."""
+    return "|".join("".join(str(cell) for cell in row)
+                    for row in custom_brush())
+
+
+def custom_brush_from_text(text):
+    """Restore a tip saved by `custom_brush_text`; None when unreadable."""
+    rows = []
+    for chunk in str(text or "").split("|"):
+        chunk = chunk.strip()
+        if chunk:
+            rows.append([1 if char == "1" else 0 for char in chunk])
+    return set_custom_brush(rows)
+
+
+def _custom_offsets(size):
+    """Scale the custom tip onto a `size` x `size` brush box."""
+    mask = custom_brush()
+    rows = len(mask)
+    columns = max(len(row) for row in mask) if rows else 0
+    if not rows or not columns:
+        return []
+    half = size // 2
+    offsets = []
+    for dy in range(-half, size - half):
+        source_y = min(rows - 1, int((dy + half + 0.5) * rows / size))
+        for dx in range(-half, size - half):
+            source_x = min(columns - 1,
+                           int((dx + half + 0.5) * columns / size))
+            if mask[source_y][source_x]:
+                offsets.append((dx, dy))
+    return offsets
+
+
 def brush_offsets(size, shape="square"):
     """Pixel offsets relative to the brush centre."""
     size = max(1, int(size))
+    if shape == "custom":
+        offsets = _custom_offsets(size)
+        if offsets:
+            return offsets
+        shape = "square"
     half = size // 2
     offsets = []
     for dy in range(-half, size - half):
@@ -231,6 +317,29 @@ def paint_stroke(bitmap, mask, x0, y0, x1, y1, size, color, shape="square",
 def line_points(x0, y0, x1, y1):
     """The pixels of a straight stroke, for effects that follow a drag."""
     return _bresenham(int(x0), int(y0), int(x1), int(y1))
+
+
+def stamp_pattern(bitmap, mask, x, y, cells, axes=""):
+    """Stamp a pattern grid centred on (x, y) in the pattern's own colours.
+
+    `None` cells leave the artwork alone, so a pattern can be a sparse tip.
+    """
+    height = len(cells)
+    width = max([len(row) for row in cells] or [0])
+    if not height or not width:
+        return 0
+    half_x, half_y = width // 2, height // 2
+    painted = 0
+    for mx, my in mirror_points(x, y, bitmap.width, bitmap.height, axes):
+        for py in range(height):
+            row = cells[py]
+            for px in range(min(width, len(row))):
+                color = row[px]
+                if color is None:
+                    continue
+                painted += _plot(bitmap, mask, mx + px - half_x,
+                                 my + py - half_y, color)
+    return painted
 
 
 def paint_points(bitmap, mask, points, color, axes=""):

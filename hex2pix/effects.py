@@ -101,19 +101,78 @@ def blur_area(bitmap, mask, x, y, size=3, strength=100, shape="square",
 
 
 def blur_stroke(bitmap, mask, x0, y0, x1, y1, size=3, strength=100,
-                shape="square", axes="", source=None):
-    """Blur along a stroke between two points, mirrored."""
+                shape="square", axes="", source=None, smear=0):
+    """Blur along a stroke between two points, mirrored.
+
+    `smear` drags the pixels the brush just left along with the stroke; it
+    reads the layer as it now looks, so the colour travels instead of being
+    pulled again and again from where the stroke started.
+    """
     if source is None:
         source = bitmap.copy()
+    smear = _count(smear, 0, 100, 0)
     written = 0
+    previous = (x0, y0)
     for x, y in line_points(x0, y0, x1, y1):
         written += blur_area(bitmap, mask, x, y, size, strength, shape, axes,
                              source)
+        if smear and (x, y) != previous:
+            written += smear_area(bitmap, mask, x, y, size, smear, shape,
+                                  axes, x - previous[0], y - previous[1])
+        previous = (x, y)
+    return written
+
+
+def _neighbour_average(source, px, py):
+    """The mean colour of the 3x3 block around one pixel."""
+    total = [0, 0, 0, 0]
+    count = 0
+    for ny in range(max(0, py - 1), min(source.height, py + 2)):
+        for nx in range(max(0, px - 1), min(source.width, px + 2)):
+            color = source.rgba(nx, ny)
+            for channel in range(4):
+                total[channel] += color[channel]
+            count += 1
+    if not count:
+        return (0, 0, 0, 0)
+    return tuple(int(value / float(count) + 0.5) for value in total)
+
+
+def smear_area(bitmap, mask, x, y, size=3, amount=50, shape="square",
+               axes="", dx=0, dy=0, source=None):
+    """Drag colour along the stroke, like a finger through wet paint.
+
+    Each cell mixes toward the pixel `dx`, `dy` back along the stroke, which
+    is the pixel the brush has just left. A stationary brush moves nothing, so
+    a click without a drag leaves the layer alone.
+    """
+    if not dx and not dy:
+        return 0
+    amount = _count(amount, 0, 100, 50)
+    if amount == 0:
+        return 0
+    cells = _cells(bitmap, mask, x, y, size, shape, axes)
+    if not cells:
+        return 0
+    source = source if source is not None else bitmap
+    mix = amount / 100.0
+    written = 0
+    for px, py in cells:
+        sx, sy = px - dx, py - dy
+        if sx < 0 or sy < 0 or sx >= source.width or sy >= source.height:
+            continue
+        color = source.rgba(sx, sy)
+        current = bitmap.rgba(px, py)
+        _put(bitmap, px, py,
+             tuple(int(current[channel]
+                       + (color[channel] - current[channel]) * mix + 0.5)
+                   for channel in range(4)))
+        written += 1
     return written
 
 
 def jumble_area(bitmap, mask, x, y, size=3, mode="shuffle", amount=50,
-                shape="square", axes="", rng=None):
+                shape="square", axes="", rng=None, blur=0, source=None):
     """Mix the pixels under the brush; returns the pixels written."""
     cells = _cells(bitmap, mask, x, y, size, shape, axes)
     if len(cells) < 2:
@@ -135,19 +194,38 @@ def jumble_area(bitmap, mask, x, y, size=3, mode="shuffle", amount=50,
     else:
         mixed = list(colors)
         rng.shuffle(mixed)
+    soften = _count(blur, 0, 100, 0) / 100.0
+    if soften and source is None:
+        # The averages must come from the pixels as they were before this dab,
+        # or the cells already written would feed back into the later ones.
+        source = bitmap.copy()
+    read_from = source if source is not None else bitmap
+    written = 0
     for (px, py), color in zip(cells, mixed):
+        if soften:
+            average = _neighbour_average(read_from, px, py)
+            color = tuple(int(color[channel]
+                              + (average[channel] - color[channel]) * soften
+                              + 0.5)
+                          for channel in range(4))
         _put(bitmap, px, py, color)
-    return len(cells)
+        written += 1
+    return written
 
 
 def jumble_stroke(bitmap, mask, x0, y0, x1, y1, size=3, mode="shuffle",
-                  amount=50, shape="square", axes="", rng=None):
+                  amount=50, shape="square", axes="", rng=None, blur=0,
+                  source=None):
     """Jumble along a stroke between two points, mirrored."""
     rng = rng if rng is not None else random.Random()
+    if blur and source is None:
+        # One snapshot for the whole stroke, so the soften averages stay put
+        # instead of drifting as the stroke writes into the layer.
+        source = bitmap.copy()
     written = 0
     for x, y in line_points(x0, y0, x1, y1):
         written += jumble_area(bitmap, mask, x, y, size, mode, amount, shape,
-                               axes, rng)
+                               axes, rng, blur, source)
     return written
 
 

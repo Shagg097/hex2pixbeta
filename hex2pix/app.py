@@ -32,9 +32,13 @@ from .palette import (MAX_PALETTE_COLORS, PALETTE_FILETYPES, PALETTES,
 from .pattern import PatternSpec, apply_pattern, block_from_grid
 from .bitmapfont import text_size
 from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
-                      jumble_area, jumble_stroke, spray_area, spray_stroke)
-from .shapes import (gradient_fill, mirror_points, paint_curve, paint_dab,
-                     paint_mask, paint_shape, paint_stroke, stamp_text)
+                      jumble_area, jumble_stroke, smear_area, spray_area,
+                      spray_stroke)
+from .shapes import (brush_offsets, custom_brush, custom_brush_from_text,
+                     custom_brush_text, gradient_fill, line_points,
+                     mirror_points, paint_curve, paint_dab, paint_mask,
+                     paint_shape, paint_stroke, set_custom_brush,
+                     stamp_pattern, stamp_text)
 from .canvas import (ANCHOR_CODES, ANCHOR_LABELS, MAX_SIDE, UNITS, CanvasSpec,
                      apply_spec_to_document, physical_size, px_per_unit,
                      scale_image)
@@ -699,6 +703,307 @@ class PaletteDialog(tk.Toplevel):
         self.destroy()
 
 
+class DocumentTab(object):
+    """One canvas in the tab strip, with where its view was left."""
+
+    def __init__(self, document):
+        self.doc = document
+        self.cursor = (0, 0)
+        self.zoom = 8
+        self.xview = 0.0
+        self.yview = 0.0
+
+
+BRUSH_TIPS = ("Square", "Circle", "Custom")
+BRUSH_TIP_SIZE = 9
+
+
+class BrushShapeDialog(tk.Toplevel):
+    """Draw the footprint of a custom brush tip."""
+
+    def __init__(self, parent, rows=None):
+        tk.Toplevel.__init__(self, parent)
+        self.result = None
+        self.size = BRUSH_TIP_SIZE
+        rows = [list(row) for row in (rows or [])]
+        self.cells = [[1 if y < len(rows) and x < len(rows[y]) and rows[y][x]
+                       else 0 for x in range(self.size)]
+                      for y in range(self.size)]
+        self.title("Custom brush tip")
+        self.transient(parent)
+        self.resizable(False, False)
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Click cells to shape the brush tip; an "
+                             "empty tip is ignored.").pack(anchor="w",
+                                                           pady=(0, 8))
+        grid = ttk.Frame(body)
+        grid.pack()
+        self.buttons = []
+        for y in range(self.size):
+            row = []
+            for x in range(self.size):
+                button = tk.Button(grid, width=2, height=1, bd=0,
+                                   bg="#20242b", fg="#cfd6e4",
+                                   activebackground="#3daee9",
+                                   command=lambda x=x, y=y: self.toggle(x, y))
+                button.grid(row=y, column=x, padx=1, pady=1)
+                row.append(button)
+            self.buttons.append(row)
+        actions = ttk.Frame(body)
+        actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(actions, text="Clear", command=self.clear).pack(side="left")
+        ttk.Button(actions, text="Fill", command=self.fill).pack(side="left",
+                                                                  padx=6)
+        ttk.Button(actions, text="Cancel",
+                   command=self.cancel).pack(side="right")
+        ttk.Button(actions, text="OK",
+                   command=self.accept).pack(side="right", padx=6)
+        self.bind("<Escape>", lambda event: self.cancel())
+        self.paint()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+
+    def paint(self):
+        for y, row in enumerate(self.buttons):
+            for x, button in enumerate(row):
+                button.configure(bg="#d8dee9" if self.cells[y][x]
+                                 else "#20242b")
+
+    def toggle(self, x, y):
+        self.cells[y][x] = 0 if self.cells[y][x] else 1
+        self.paint()
+
+    def clear(self):
+        self.cells = [[0] * self.size for _ in range(self.size)]
+        self.paint()
+
+    def fill(self):
+        self.cells = [[1] * self.size for _ in range(self.size)]
+        self.paint()
+
+    def accept(self):
+        if not any(cell for row in self.cells for cell in row):
+            return
+        self.result = [list(row) for row in self.cells]
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class DropDialog(tk.Toplevel):
+    """Ask what to do with image files dropped onto the window."""
+
+    def __init__(self, parent, paths):
+        tk.Toplevel.__init__(self, parent)
+        self.result = None
+        self.title("Add dropped files")
+        self.transient(parent)
+        self.resizable(False, False)
+        names = [os.path.basename(str(path)) for path in paths]
+        shown = ", ".join(names[:3])
+        if len(names) > 3:
+            shown += " and %d more" % (len(names) - 3)
+        body = ttk.Frame(self, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=shown, wraplength=380).pack(anchor="w")
+        ttk.Label(body, text="Insert %s as a layer on this canvas, or open "
+                             "%s in %s tab%s?"
+                  % ("it" if len(names) == 1 else "them",
+                     "it" if len(names) == 1 else "each",
+                     "a" if len(names) == 1 else "new",
+                     "" if len(names) == 1 else "s")).pack(
+            anchor="w", pady=(6, 10))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Insert as layer",
+                   command=lambda: self.choose("layer")).pack(side="left")
+        ttk.Button(buttons, text="Open as canvas",
+                   command=lambda: self.choose("canvas")).pack(side="left",
+                                                              padx=6)
+        ttk.Button(buttons, text="Cancel",
+                   command=self.cancel).pack(side="right")
+        self.bind("<Escape>", lambda event: self.cancel())
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+
+    def choose(self, result):
+        self.result = result
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.destroy()
+
+
+WM_DROPFILES = 0x0233
+GWL_WNDPROC = -4
+
+
+def _dropped_file_paths(shell32, ctypes, hdrop):
+    """Read the file list out of a WM_DROPFILES handle."""
+    from ctypes import wintypes
+    handle = wintypes.HANDLE(hdrop)
+    count = int(shell32.DragQueryFileW(handle, 0xFFFFFFFF, None, 0))
+    paths = []
+    for index in range(count):
+        length = int(shell32.DragQueryFileW(handle, index, None, 0))
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        shell32.DragQueryFileW(handle, index, buffer, length + 1)
+        if buffer.value:
+            paths.append(buffer.value)
+    return paths
+
+
+def enable_file_drops(window, callback):
+    """Let Explorer drop files onto `window`; True when the hook is installed.
+
+    Tk 8.6 has no drag and drop of its own on Windows, so this registers the
+    window with the shell and reads WM_DROPFILES in a subclassed window
+    procedure. That procedure must not call into Tk: a drop arrives while
+    Explorer is still inside its own drag loop, and touching the interpreter
+    from there crashes the program. It only stores the paths, and a timer
+    hands them to `callback` once control is back in Tk's event loop. Every
+    failure path returns False, because the editor works without drops.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return False
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+        if hasattr(user32, "SetWindowLongPtrW"):
+            set_long = user32.SetWindowLongPtrW
+        else:
+            # 32-bit Windows has no ...PtrW; the plain call is the same size.
+            set_long = user32.SetWindowLongW
+        set_long.restype = ctypes.c_void_p
+        set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        user32.CallWindowProcW.restype = ctypes.c_ssize_t
+        user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND,
+                                           wintypes.UINT, wintypes.WPARAM,
+                                           wintypes.LPARAM]
+        shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+        shell32.DragQueryFileW.restype = wintypes.UINT
+        shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT,
+                                           wintypes.LPWSTR, wintypes.UINT]
+        shell32.DragFinish.argtypes = [wintypes.HANDLE]
+        prototype = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
+                                       wintypes.UINT, wintypes.WPARAM,
+                                       wintypes.LPARAM)
+        client = int(window.winfo_id())
+        parent = user32.GetParent(wintypes.HWND(client))
+        targets = [client]
+        if parent and int(parent) != client:
+            targets.append(int(parent))
+        queue = []
+        keep = []
+        hooks = []
+        stopped = []
+        job = [None]
+
+        def install(target):
+            # The previous procedure belongs to this window alone.
+            previous = {}
+
+            def handler(hwnd, message, wparam, lparam):
+                try:
+                    if message == WM_DROPFILES:
+                        try:
+                            paths = _dropped_file_paths(shell32, ctypes,
+                                                        wparam)
+                            if paths:
+                                # Only Python state here; see the docstring.
+                                queue.append(paths)
+                        finally:
+                            try:
+                                shell32.DragFinish(wintypes.HANDLE(wparam))
+                            except Exception:  # noqa: BLE001
+                                pass
+                        return 0
+                    old = previous.get("proc")
+                    if old is None:
+                        return 0
+                    return user32.CallWindowProcW(old, hwnd, message,
+                                                  wparam, lparam)
+                except Exception:  # noqa: BLE001 - never raise in a wndproc
+                    return 0
+
+            shell32.DragAcceptFiles(wintypes.HWND(target), True)
+            procedure = prototype(handler)
+            old = set_long(wintypes.HWND(target), GWL_WNDPROC,
+                           ctypes.cast(procedure, ctypes.c_void_p))
+            if not old:
+                return False
+            previous["proc"] = ctypes.c_void_p(old)
+            keep.append(procedure)
+            hooks.append((target, old))
+            return True
+
+        if not any(install(target) for target in targets):
+            return False
+        # A collected thunk would crash Tk, so keep the callbacks alive here.
+        window._drop_procedures = keep
+
+        def drain():
+            """Hand the queued drops to the editor, from Tk's event loop."""
+            job[0] = None
+            while queue:
+                paths = queue.pop(0)
+                try:
+                    callback(paths)
+                except Exception:  # noqa: BLE001 - a bad drop must not
+                    pass          # take the whole editor down
+            if stopped:
+                return
+            try:
+                if not window.winfo_exists():
+                    return
+                job[0] = window.after(60, drain)
+            except tk.TclError:
+                pass
+
+        def restore(event=None):
+            """Put Tk's own procedure back before the window goes away."""
+            if event is not None and event.widget is not window:
+                return
+            stopped.append(True)
+            if job[0] is not None:
+                try:
+                    window.after_cancel(job[0])
+                except tk.TclError:
+                    pass
+                job[0] = None
+            while hooks:
+                target, old = hooks.pop()
+                try:
+                    set_long(wintypes.HWND(target), GWL_WNDPROC,
+                             ctypes.c_void_p(old))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            window.bind("<Destroy>", restore, add="+")
+        except tk.TclError:
+            pass
+        drain()
+        return True
+    except Exception:  # noqa: BLE001 - drag and drop is a convenience
+        return False
+
+
 class hex2pixApp(tk.Tk):
     """The editor window."""
 
@@ -706,12 +1011,18 @@ class hex2pixApp(tk.Tk):
                  settings_path=None):
         super().__init__()
         self.settings = SettingsStore(settings_path)
+        self._load_custom_brush()
         self._update_results = queue.Queue()
         self._update_thread = None
         self._update_busy = False
         self._closing = False
         self._destroyed = False
         self.doc = document or Document(64, 64)
+        self.tabs = [DocumentTab(self.doc)]
+        self.tab_index = 0
+        self._tab_reused = False
+        self.drop_enabled = False
+        self.blur_last = None
         self.recent_files = RecentStore(recent_path)
         self.home_visible = False
         self.fg = (255, 255, 255, 255)
@@ -847,6 +1158,8 @@ class hex2pixApp(tk.Tk):
             self.show_home()
         else:
             self.show_editor()
+        self.protocol("WM_DELETE_WINDOW", self.request_close)
+        self.drop_enabled = enable_file_drops(self, self.handle_dropped_paths)
         self.after(500, self._start_integrations)
 
     # ------------------------------------------------------------------ layout
@@ -1142,10 +1455,15 @@ class hex2pixApp(tk.Tk):
         file_menu.add_command(label="Save project as...",
                               command=self.save_project_as)
         file_menu.add_separator()
+        file_menu.add_command(label="New tab", accelerator="Ctrl+T",
+                              command=self.new_document)
+        file_menu.add_command(label="Close tab", accelerator="Ctrl+W",
+                              command=self.close_tab)
+        file_menu.add_separator()
         file_menu.add_command(label="Export As...", accelerator="Ctrl+E",
                               command=self.focus_export)
         file_menu.add_separator()
-        file_menu.add_command(label="Quit", command=self.destroy)
+        file_menu.add_command(label="Quit", command=self.request_close)
         bar.add_cascade(label="File", menu=file_menu)
 
         edit_menu = tk.Menu(bar, tearoff=0)
@@ -1385,9 +1703,12 @@ class hex2pixApp(tk.Tk):
         tip_row.pack(fill="x", pady=(2, 0))
         ttk.Label(tip_row, text="Tip").pack(side="left")
         self.brush_shape_var = tk.StringVar(value="Square")
-        ttk.Combobox(tip_row, values=("Square", "Circle"), state="readonly",
-                     width=8, textvariable=self.brush_shape_var).pack(
-            side="right")
+        self.brush_pattern_var = tk.BooleanVar(value=False)
+        tip_combo = ttk.Combobox(tip_row, values=BRUSH_TIPS, state="readonly",
+                                 width=8, textvariable=self.brush_shape_var)
+        tip_combo.pack(side="right")
+        tip_combo.bind("<<ComboboxSelected>>",
+                       lambda event: self.tip_chosen())
 
         sym_row = ttk.Frame(left)
         sym_row.pack(fill="x", pady=(2, 0))
@@ -2042,10 +2363,13 @@ class hex2pixApp(tk.Tk):
     def _build_canvas(self, parent):
         frame = ttk.Frame(parent, padding=(8, 8))
         frame.pack(side="left", fill="both", expand=True)
-        frame.rowconfigure(2, weight=1)
+        frame.rowconfigure(3, weight=1)
         frame.columnconfigure(0, weight=1)
+        self.tab_bar = ttk.Frame(frame)
+        self.tab_bar.grid(row=0, column=0, columnspan=2, sticky="ew",
+                          pady=(0, 4))
         self.options_bar = ttk.Frame(frame)
-        self.options_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.options_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
         self.options_canvas = tk.Canvas(self.options_bar, height=48,
                                         bg=self.colors["bg"],
                                         highlightthickness=0, bd=0)
@@ -2062,7 +2386,7 @@ class hex2pixApp(tk.Tk):
         self.tool_options.bind("<Configure>",
                                lambda event: self._sync_options_scroll())
         self.options_rule = ttk.Separator(frame, orient="horizontal")
-        self.options_rule.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.options_rule.grid(row=2, column=0, columnspan=2, sticky="ew")
         self.sel_mode_var = tk.StringVar(
             value=SEL_MODE_LABELS.get(self.sel_mode, "Replace"))
         self.pick_target_var = tk.StringVar(value="FG")
@@ -2079,9 +2403,11 @@ class hex2pixApp(tk.Tk):
         self.rotate_snap_var = tk.IntVar(value=int(ROTATE_SNAP))
         self.blur_size_var = tk.IntVar(value=4)
         self.blur_strength_var = tk.IntVar(value=60)
+        self.blur_smear_var = tk.IntVar(value=0)
         self.jumble_size_var = tk.IntVar(value=4)
         self.jumble_mode_var = tk.StringVar(value="Shuffle")
         self.jumble_amount_var = tk.IntVar(value=40)
+        self.jumble_blur_var = tk.IntVar(value=0)
         self.text_value = tk.StringVar(value="HEX")
         self.text_scale_var = tk.IntVar(value=2)
         self.text_spacing_var = tk.IntVar(value=1)
@@ -2105,9 +2431,9 @@ class hex2pixApp(tk.Tk):
         vbar = ttk.Scrollbar(frame, orient="vertical", command=self.scroll_y)
         hbar = ttk.Scrollbar(frame, orient="horizontal", command=self.scroll_x)
         self.view.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
-        self.view.grid(row=2, column=0, sticky="nsew")
-        vbar.grid(row=2, column=1, sticky="ns")
-        hbar.grid(row=3, column=0, sticky="ew")
+        self.view.grid(row=3, column=0, sticky="nsew")
+        vbar.grid(row=3, column=1, sticky="ns")
+        hbar.grid(row=4, column=0, sticky="ew")
         self.view_image = self.view.create_image(0, 0, anchor="nw")
 
         self.view.bind("<Button-1>", lambda e: self.on_press(e, False))
@@ -2124,6 +2450,7 @@ class hex2pixApp(tk.Tk):
         self.view.bind("<ButtonRelease-2>", self.on_middle_release)
         self.view.bind("<Double-Button-2>", self.on_middle_double)
         self.view.bind("<Configure>", lambda event: self._on_view_configure())
+        self.refresh_tabs()
 
     # ------------------------------------------------------------ tool options
     def _option_label(self, text, padx=(10, 2)):
@@ -2217,7 +2544,9 @@ class hex2pixApp(tk.Tk):
         self._option_label("Size")
         self._option_spin(self.brush_var, 1, 64, command=self.apply_brush)
         self._option_label("Tip")
-        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
+        self._option_button("Edit…", self.edit_brush_shape, width=5)
         self._option_label("Mirror")
         self.symmetry_option_var.set(SYMMETRY_LABELS.get(self.symmetry,
                                                          "Off"))
@@ -2227,6 +2556,7 @@ class hex2pixApp(tk.Tk):
 
     def _options_pencil(self):
         self._options_brush()
+        self._option_check("Pattern tip", self.brush_pattern_var)
 
     def _options_eraser(self):
         self._options_brush()
@@ -2243,14 +2573,16 @@ class hex2pixApp(tk.Tk):
         self._option_label("Width")
         self._option_spin(self.brush_var, 1, 64, command=self.apply_brush)
         self._option_label("Tip")
-        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
 
     def _options_shape(self):
         self._option_check("Fill", self.shape_filled)
         self._option_label("Width")
         self._option_spin(self.brush_var, 1, 64, command=self.apply_brush)
         self._option_label("Tip")
-        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
 
     def _options_shape_rect(self):
         self._options_shape()
@@ -2303,8 +2635,14 @@ class hex2pixApp(tk.Tk):
     def _options_blur(self):
         self._option_label("Size")
         self._option_spin(self.blur_size_var, 1, 64)
+        self._option_label("Tip")
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
         self._option_label("Strength")
         self._option_spin(self.blur_strength_var, 0, 100)
+        self._option_label("%", (2, 2))
+        self._option_label("Smear")
+        self._option_spin(self.blur_smear_var, 0, 100)
         self._option_label("%", (2, 2))
         self._option_label("Mirror")
         self._option_combo(self.symmetry_option_var,
@@ -2314,11 +2652,17 @@ class hex2pixApp(tk.Tk):
     def _options_jumble(self):
         self._option_label("Size")
         self._option_spin(self.jumble_size_var, 1, 64)
+        self._option_label("Tip")
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
         self._option_label("Mode")
         self._option_combo(self.jumble_mode_var,
                            ("Shuffle", "Scatter", "Noise"), 8)
         self._option_label("Amount")
         self._option_spin(self.jumble_amount_var, 0, 100)
+        self._option_label("%", (2, 2))
+        self._option_label("Blur")
+        self._option_spin(self.jumble_blur_var, 0, 100)
         self._option_label("%", (2, 2))
 
     def _options_text(self):
@@ -2337,7 +2681,8 @@ class hex2pixApp(tk.Tk):
         self._option_spin(self.air_flow_var, 1, 100)
         self._option_label("%", (2, 2))
         self._option_label("Tip")
-        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
         self._option_label("Blur")
         ttk.Scale(self.tool_options, from_=0, to=100, length=90,
                   variable=self.air_blur_var,
@@ -2350,7 +2695,8 @@ class hex2pixApp(tk.Tk):
         self._option_label("Width")
         self._option_spin(self.brush_var, 1, 64, command=self.apply_brush)
         self._option_label("Tip")
-        self._option_combo(self.brush_shape_var, ("Square", "Circle"), 7)
+        self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
+                           command=self.tip_chosen)
         self._option_label("Bend")
         self._option_spin(self.curve_bend_var, -100, 100, width=4)
         self._option_label("Vectors")
@@ -2950,10 +3296,14 @@ class hex2pixApp(tk.Tk):
             action = "eraser" if self.erase_drag else tool
             previous = self.last_paint
             if previous:
-                paint_stroke(self.doc.bitmap, self.doc.mask(),
-                             previous[0], previous[1], x, y, self.brush,
-                             (0, 0, 0, 0) if action == "eraser" else self.fg,
-                             self.brush_shape(), self.symmetry)
+                if action == "pencil" and self.brush_pattern():
+                    self.pattern_stroke(previous[0], previous[1], x, y)
+                else:
+                    paint_stroke(self.doc.bitmap, self.doc.mask(),
+                                 previous[0], previous[1], x, y, self.brush,
+                                 (0, 0, 0, 0) if action == "eraser"
+                                 else self.fg, self.brush_shape(),
+                                 self.symmetry)
             else:
                 self.paint_at(x, y, action)
             if previous:
@@ -2968,14 +3318,14 @@ class hex2pixApp(tk.Tk):
                             previous[0], previous[1], x, y,
                             self.blur_radius(), self.blur_strength(),
                             self.brush_shape(), self.symmetry,
-                            self.blur_source)
+                            self.blur_source, self.blur_smear())
                 half = self.blur_radius() // 2 + 1
             else:
                 jumble_stroke(self.doc.bitmap, self.doc.mask(),
                               previous[0], previous[1], x, y,
                               self.jumble_radius(), self.jumble_mode(),
                               self.jumble_amount(), self.brush_shape(),
-                              self.symmetry)
+                              self.symmetry, blur=self.jumble_blur())
                 half = self.jumble_radius() // 2 + 1
             self._mark_dirty(previous[0], previous[1], x, y, half)
             self.last_paint = (x, y)
@@ -3031,6 +3381,7 @@ class hex2pixApp(tk.Tk):
             self.stroke_before = None
             self.last_paint = None
             self.blur_source = None
+            self.blur_last = None
         if self.tool in ("rect", "ellipse") and self.drag_anchor:
             # The pointer may have been released past the canvas edge, so the
             # final marquee comes from the unclamped position.
@@ -3167,6 +3518,7 @@ class hex2pixApp(tk.Tk):
         self.poly_points = []
         self.lasso_points = []
         self.blur_source = None
+        self.blur_last = None
         self._refresh_tool_options()
         if hasattr(self, "view"):
             cursors = {"hand": "fleur", "transform": "fleur",
@@ -3181,6 +3533,7 @@ class hex2pixApp(tk.Tk):
     def begin_stroke(self):
         self.stroke_before = self.doc.begin()
         self.last_paint = None
+        self.blur_last = None
 
     def end_stroke(self):
         if self.stroke_before is not None:
@@ -3189,6 +3542,10 @@ class hex2pixApp(tk.Tk):
             self.last_paint = None
 
     def paint_at(self, x, y, tool, color=None):
+        if tool == "pencil" and self.brush_pattern():
+            painted = self.pattern_dab(x, y)
+            self._mark_dirty(x, y, x, y, self.pattern_size // 2 + 1)
+            return painted
         color = color if color is not None else self.fg
         if tool == "eraser":
             color = (0, 0, 0, 0)
@@ -3204,6 +3561,18 @@ class hex2pixApp(tk.Tk):
                             self.blur_radius(), self.blur_strength(),
                             self.brush_shape(), self.symmetry,
                             self.blur_source)
+        smear = self.blur_smear()
+        if smear and self.blur_last is not None:
+            # Smear drags colour along the stroke, so it needs the pixel the
+            # brush has just left behind.
+            dx = x - self.blur_last[0]
+            dy = y - self.blur_last[1]
+            if dx or dy:
+                painted += smear_area(self.doc.bitmap, self.doc.mask(), x, y,
+                                      self.blur_radius(), smear,
+                                      self.brush_shape(), self.symmetry,
+                                      dx, dy)
+        self.blur_last = (x, y)
         self._mark_dirty(x, y, x, y, self.blur_radius() // 2 + 1)
         return painted
 
@@ -3211,8 +3580,20 @@ class hex2pixApp(tk.Tk):
         painted = jumble_area(self.doc.bitmap, self.doc.mask(), x, y,
                               self.jumble_radius(), self.jumble_mode(),
                               self.jumble_amount(), self.brush_shape(),
-                              self.symmetry)
+                              self.symmetry, blur=self.jumble_blur())
         self._mark_dirty(x, y, x, y, self.jumble_radius() // 2 + 1)
+        return painted
+
+    def pattern_dab(self, x, y):
+        """Stamp the Pattern grid as a tip, centred on (x, y)."""
+        return stamp_pattern(self.doc.bitmap, self.doc.mask(), x, y,
+                             self.pattern_cells, self.symmetry)
+
+    def pattern_stroke(self, x0, y0, x1, y1):
+        """Stamp the pattern tip along a pencil drag."""
+        painted = 0
+        for x, y in line_points(x0, y0, x1, y1):
+            painted += self.pattern_dab(x, y)
         return painted
 
     def stamp_text_at(self, x, y):
@@ -3627,7 +4008,51 @@ class hex2pixApp(tk.Tk):
             value = str(self.brush_shape_var.get()).lower()
         except AttributeError:
             return "square"
-        return "circle" if value.startswith("circle") else "square"
+        if value.startswith("circle"):
+            return "circle"
+        if value.startswith("custom"):
+            return "custom"
+        return "square"
+
+    def tip_chosen(self):
+        """Choosing Custom before any tip is saved opens the editor."""
+        if self.brush_shape() != "custom":
+            return
+        if str(self.settings.get("custom_brush", "") or "").strip():
+            return
+        if not self.edit_brush_shape():
+            self.brush_shape_var.set("Square")
+
+    def edit_brush_shape(self):
+        """Draw the custom tip; True when the dialog was accepted."""
+        dialog = BrushShapeDialog(self, custom_brush())
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return False
+        set_custom_brush(dialog.result)
+        try:
+            self.settings.set("custom_brush", custom_brush_text())
+        except (OSError, ValueError):
+            pass
+        self.brush_shape_var.set("Custom")
+        return True
+
+    def _load_custom_brush(self):
+        """Restore the custom tip saved with the settings."""
+        try:
+            custom_brush_from_text(self.settings.get("custom_brush", ""))
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+    def brush_pattern(self):
+        """True when the pencil should stamp the Pattern grid as its tip."""
+        try:
+            enabled = bool(self.brush_pattern_var.get())
+        except (AttributeError, tk.TclError):
+            return False
+        if not enabled:
+            return False
+        return any(cell for row in self.pattern_cells for cell in row)
 
     def apply_symmetry(self):
         self.symmetry = self.symmetry_var.get()
@@ -4448,6 +4873,12 @@ class hex2pixApp(tk.Tk):
     def jumble_amount(self):
         return _bounded(self.jumble_amount_var.get(), 0, 100, 40)
 
+    def blur_smear(self):
+        return _bounded(self.blur_smear_var.get(), 0, 100, 0)
+
+    def jumble_blur(self):
+        return _bounded(self.jumble_blur_var.get(), 0, 100, 0)
+
     def text_scale(self):
         return _bounded(self.text_scale_var.get(), 1, 8, 2)
 
@@ -4764,7 +5195,7 @@ class hex2pixApp(tk.Tk):
                 document.bitmap.fill(fill)
             else:
                 document.bitmap.fill((fill[0], fill[1], fill[2], 255))
-        self.doc = document
+        self.adopt_document(document)
         self.cursor = (0, 0)
         self.kb_anchor = None
         self.kb_before = None
@@ -4819,6 +5250,268 @@ class hex2pixApp(tk.Tk):
         self.view.focus_set()
         self.redraw()
 
+    # ------------------------------------------------------------------- tabs
+    def tab_title(self, index):
+        """The name on a tab: file name or Untitled N, plus a dirty star."""
+        tab = self.tabs[index]
+        if tab.doc.path:
+            name = os.path.basename(tab.doc.path)
+        else:
+            number = sum(1 for other in range(index + 1)
+                         if not self.tabs[other].doc.path)
+            name = "Untitled" if number == 1 else "Untitled %d" % number
+        return name + (" *" if tab.doc.dirty else "")
+
+    def refresh_tabs(self):
+        """Redraw the tab strip from the open documents."""
+        if not hasattr(self, "tab_bar"):
+            return
+        for child in self.tab_bar.winfo_children():
+            child.destroy()
+        for index in range(len(self.tabs)):
+            active = index == self.tab_index
+            background = (self.colors["button_active"] if active
+                          else self.colors["button"])
+            frame = tk.Frame(self.tab_bar, bg=background, highlightthickness=1,
+                             highlightbackground=self.colors["border"])
+            label = tk.Label(frame, text=self.tab_title(index), bg=background,
+                             fg=self.colors["fg"], padx=8, pady=3,
+                             font=("Segoe UI", 9))
+            label.pack(side="left")
+            label.bind("<Button-1>",
+                       lambda event, i=index: self.switch_tab(i))
+            close = tk.Label(frame, text="\u2715", bg=background,
+                             fg=self.colors["muted"], padx=6, pady=3,
+                             font=("Segoe UI", 8))
+            close.pack(side="left")
+            close.bind("<Button-1>",
+                       lambda event, i=index: self.close_tab(i))
+            frame.pack(side="left", padx=(0, 3))
+        add = tk.Label(self.tab_bar, text="+", bg=self.colors["button"],
+                       fg=self.colors["fg"], padx=8, pady=3,
+                       font=("Segoe UI", 10))
+        add.pack(side="left")
+        add.bind("<Button-1>", lambda event: self.new_document())
+
+    def capture_tab_view(self):
+        """Remember zoom, scroll and cursor for the tab being left."""
+        if not self.tabs:
+            return
+        tab = self.tabs[self.tab_index]
+        tab.cursor = self.cursor
+        tab.zoom = self.zoom
+        try:
+            tab.xview = self.view.xview()[0]
+            tab.yview = self.view.yview()[0]
+        except (tk.TclError, IndexError):
+            pass
+
+    def restore_tab_view(self):
+        if not self.tabs:
+            return
+        tab = self.tabs[self.tab_index]
+        try:
+            self.view.xview_moveto(tab.xview)
+            self.view.yview_moveto(tab.yview)
+        except (tk.TclError, IndexError):
+            pass
+
+    def reset_pointer_state(self):
+        """Drop half-finished drags when the document under the pointer changes."""
+        self.shape_anchor = None
+        self.shape_base = None
+        self.shape_before = None
+        self.gradient_anchor = None
+        self.gradient_before = None
+        self.transform_base = None
+        self.transform_piece = None
+        self.transform_before = None
+        self.stroke_before = None
+        self.drag_anchor = None
+        self.poly_points = []
+        self.lasso_points = []
+        self.blur_source = None
+        self.blur_last = None
+        self.last_paint = None
+        self.kb_anchor = None
+        self.kb_before = None
+        self.sel_backup = None
+
+    def tab_index_of(self, document):
+        for index, tab in enumerate(self.tabs):
+            if tab.doc is document:
+                return index
+        return 0
+
+    def adopt_document(self, document):
+        """Show a freshly opened document in a tab of its own."""
+        self.capture_tab_view()
+        reuse = (not self._tab_reused and len(self.tabs) == 1
+                 and not self.tabs[0].doc.path and not self.tabs[0].doc.dirty)
+        if reuse:
+            self.tabs[0].doc = document
+            self.tab_index = 0
+        else:
+            self.tabs.append(DocumentTab(document))
+            self.tab_index = len(self.tabs) - 1
+        self._tab_reused = True
+        self.doc = document
+        self.reset_pointer_state()
+        self.refresh_tabs()
+
+    def switch_tab(self, index, capture=True):
+        """Make another canvas current, keeping each tab's view where it was."""
+        if not self.tabs:
+            return False
+        index = max(0, min(len(self.tabs) - 1, int(index)))
+        if capture:
+            self.capture_tab_view()
+        self.tab_index = index
+        tab = self.tabs[index]
+        self.doc = tab.doc
+        self.reset_pointer_state()
+        self.cursor = (max(0, min(tab.cursor[0], self.doc.width - 1)),
+                       max(0, min(tab.cursor[1], self.doc.height - 1)))
+        if tab.zoom:
+            self.zoom = tab.zoom
+        self._set_default_export_path()
+        self.refresh_layers()
+        self.refresh_tabs()
+        self.refresh_bytes()
+        self.refresh_status()
+        self.redraw()
+        self.after_idle(self.restore_tab_view)
+        return True
+
+    def next_tab(self, step=1):
+        if len(self.tabs) < 2:
+            return False
+        return self.switch_tab((self.tab_index + int(step)) % len(self.tabs))
+
+    def confirm_tab_save(self, tab):
+        """Offer to save one modified tab; False cancels the close."""
+        if self.silent:
+            return True
+        index = self.tab_index_of(tab.doc)
+        if index != self.tab_index:
+            self.switch_tab(index)
+        name = os.path.basename(tab.doc.path) if tab.doc.path else "Untitled"
+        answer = messagebox.askyesnocancel(
+            "Unsaved changes",
+            "\u201c%s\u201d has unsaved changes.\n\nSave it before closing?"
+            % name, parent=self)
+        if answer is None:
+            return False
+        if not answer:
+            return True
+        return bool(self.save_document())
+
+    def close_tab(self, index=None):
+        """Close one tab, offering to save it first."""
+        if not self.tabs:
+            return False
+        index = self.tab_index if index is None else int(index)
+        if index < 0 or index >= len(self.tabs):
+            return False
+        tab = self.tabs[index]
+        if tab.doc.dirty:
+            self.switch_tab(index)
+            if not self.confirm_tab_save(tab):
+                return False
+        closing_current = index == self.tab_index
+        del self.tabs[index]
+        if not self.tabs:
+            self.doc = Document(64, 64)
+            self.tabs = [DocumentTab(self.doc)]
+            self.tab_index = 0
+            self._tab_reused = True
+            self.reset_pointer_state()
+            self.refresh_layers()
+            self.refresh_tabs()
+            self.refresh_bytes()
+            self.refresh_status()
+            self.show_home()
+            return True
+        self.tab_index = min(index, len(self.tabs) - 1)
+        # The closed document's view state must not be written onto its
+        # neighbour, so only capture when some other tab is being left.
+        return self.switch_tab(self.tab_index, capture=not closing_current)
+
+    def request_close(self):
+        """Close the window, asking about every tab holding unsaved work."""
+        if getattr(self, "_closing", False):
+            return True
+        if self.silent:
+            self.destroy()
+            return True
+        for index in range(len(self.tabs)):
+            tab = self.tabs[index]
+            if not tab.doc.dirty:
+                continue
+            self.switch_tab(index)
+            if not self.confirm_tab_save(tab):
+                return False
+        self.destroy()
+        return True
+
+    # ----------------------------------------------------------- dropped files
+    def ask_drop_action(self, paths):
+        dialog = DropDialog(self, paths)
+        self.wait_window(dialog)
+        return dialog.result
+
+    def handle_dropped_paths(self, paths, choose=None):
+        """Files dragged from Explorer: insert them or open them in tabs."""
+        paths = [str(path) for path in paths if os.path.isfile(str(path))]
+        if not paths:
+            return []
+        if choose is None:
+            if self.silent:
+                return []
+            choose = self.ask_drop_action
+        action = choose(paths)
+        if action == "layer":
+            if self.home_visible:
+                self.show_editor()
+            return ["layer" if self.insert_path_as_layer(path) else "failed"
+                    for path in paths]
+        if action == "canvas":
+            return ["canvas" if self.load_path(path) else "failed"
+                    for path in paths]
+        return []
+
+    def paste_bitmap(self, destination, source, x, y):
+        """Copy `source` onto `destination` with its top-left at (x, y)."""
+        left, top = max(0, x), max(0, y)
+        right = min(destination.width, x + source.width)
+        bottom = min(destination.height, y + source.height)
+        if right <= left or bottom <= top:
+            return 0
+        for row in range(top, bottom):
+            start = ((row - y) * source.width + (left - x)) * 4
+            target = (row * destination.width + left) * 4
+            length = (right - left) * 4
+            destination.data[target:target + length] = \
+                source.data[start:start + length]
+        return (right - left) * (bottom - top)
+
+    def insert_path_as_layer(self, path):
+        """Add an image file as a new layer on this canvas, centred."""
+        try:
+            bitmap, _ppi = formats.load_document(path)
+        except (OSError, HexError) as exc:
+            self.report_error(str(exc))
+            return False
+        before = self.doc.begin()
+        layer = self.doc.add_layer(os.path.basename(path))
+        self.paste_bitmap(layer.bitmap, bitmap,
+                          (self.doc.width - bitmap.width) // 2,
+                          (self.doc.height - bitmap.height) // 2)
+        self.doc.commit(before)
+        self.layers_changed()
+        self.refresh_tabs()
+        return True
+
     def note_recent(self, path):
         self.recent_files.add(path)
         if getattr(self, "home", None) is not None:
@@ -4855,8 +5548,8 @@ class hex2pixApp(tk.Tk):
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
             return False
-        self.doc = Document(bitmap.width, bitmap.height, bitmap.data,
-                            path=path, ppi=ppi)
+        self.adopt_document(Document(bitmap.width, bitmap.height, bitmap.data,
+                                     path=path, ppi=ppi))
         self.cursor = (0, 0)
         self._set_default_export_path()
         self.zoom_fit()
@@ -4943,7 +5636,7 @@ class hex2pixApp(tk.Tk):
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
             return False
-        self.doc = project.document
+        self.adopt_document(project.document)
         self.cursor = (0, 0)
         self.apply_project_extras(project.extras)
         self._set_default_export_path()
@@ -4956,6 +5649,13 @@ class hex2pixApp(tk.Tk):
         self.show_editor()
         return True
 
+    def mark_saved(self):
+        """A successful save clears the unsaved marker for this tab."""
+        self.doc.dirty = False
+        self.refresh_tabs()
+        self.refresh_status()
+        return True
+
     def save_project(self):
         if not formats.is_project_path(self.doc.path or ""):
             return self.save_project_as()
@@ -4964,9 +5664,9 @@ class hex2pixApp(tk.Tk):
                                  self.project_extras())
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
-            return
+            return False
         self.note_recent(self.doc.path)
-        self.refresh_status()
+        return self.mark_saved()
 
     def save_project_as(self):
         path = filedialog.asksaveasfilename(
@@ -4981,10 +5681,10 @@ class hex2pixApp(tk.Tk):
             formats.save_project(path, self.doc, self.project_extras())
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
-            return
+            return False
         self.doc.path = path
         self.note_recent(path)
-        self.refresh_status()
+        return self.mark_saved()
 
     def save_document(self):
         if formats.is_project_path(self.doc.path or ""):
@@ -4997,9 +5697,9 @@ class hex2pixApp(tk.Tk):
                          ppi=self.doc.ppi)
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
-            return
+            return False
         self.note_recent(self.doc.path)
-        self.refresh_status()
+        return self.mark_saved()
 
     def save_document_as(self):
         path = filedialog.asksaveasfilename(
@@ -5008,27 +5708,26 @@ class hex2pixApp(tk.Tk):
                        ("BMP 24-bit", "*.bmp"), ("TGA", "*.tga"),
                        ("Hex text", "*.txt"), ("All files", "*.*")])
         if not path:
-            return
+            return False
         if formats.is_project_path(path):
             try:
                 formats.save_project(path, self.doc, self.project_extras())
             except (OSError, HexError) as exc:
                 self.report_error(str(exc))
-                return
+                return False
             self.doc.path = path
             self.note_recent(path)
-            self.refresh_status()
-            return
+            return self.mark_saved()
         key = formats.format_for_path(path)
         try:
             formats.save(self.doc.flatten(), path, key, self.doc.matte,
                          ppi=self.doc.ppi)
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
-            return
+            return False
         self.doc.path = path
         self.note_recent(path)
-        self.refresh_status()
+        return self.mark_saved()
 
     # ------------------------------------------------------------------ edits
     def undo(self):
@@ -5370,7 +6069,11 @@ class hex2pixApp(tk.Tk):
     def refresh_status(self):
         x, y = self.cursor
         color = self.doc.bitmap.rgba(x, y)
-        name = os.path.basename(self.doc.path) if self.doc.path else "untitled"
+        if self.tabs and 0 <= self.tab_index < len(self.tabs):
+            name = self.tab_title(self.tab_index)
+        else:
+            name = (os.path.basename(self.doc.path) if self.doc.path
+                    else "untitled")
         self.title("hex2pix \u2014 %s" % name)
         selection = self.doc.selection
         selected = ("%d px / %d B" % (selection.count(), selection.bytes_count())
@@ -5576,6 +6279,8 @@ class hex2pixApp(tk.Tk):
             "Del             erase the pixel under the cursor\n"
             "+ / -           brush size\n"
             "[ / ]           zoom out / in\n"
+            "Ctrl+T / Ctrl+W open / close a canvas tab\n"
+            "Ctrl+Tab        next canvas tab\n"
             "Space           swap foreground and background\n"
             "Shift+A..Z      pick a tool (Shift+P pencil, Shift+W wand)\n"
             "Shift+N/R/U/V   line, rectangle, ellipse, gradient\n"
@@ -5706,6 +6411,9 @@ class hex2pixApp(tk.Tk):
             return "break"
 
         if control:
+            if key == "Tab":
+                self.next_tab(-1 if shift else 1)
+                return "break"
             if shift and char == "n":
                 self.new_layer()
                 return "break"
@@ -5714,7 +6422,8 @@ class hex2pixApp(tk.Tk):
                 "d": self.deselect, "c": self.copy_block,
                 "v": self.paste_block, "o": self.open_document,
                 "s": self.save_document, "e": self.focus_export,
-                "n": self.new_document,
+                "n": self.new_document, "t": self.new_document,
+                "w": self.close_tab,
             }
             action = actions.get(char if char.isalpha() else key.lower())
             if action:
@@ -6076,10 +6785,12 @@ def run_selftest(out_path=None):
     """Run the unit tests plus a headless GUI pass. Returns an exit status."""
     import unittest
 
-    from .tests import (test_bitmapfont, test_canvas, test_dither,
-                        test_effects, test_filters, test_formats, test_icons,
-                        test_integrations, test_macro, test_model,
-                        test_palette, test_pattern, test_project, test_shapes)
+    from .tests import (test_bitmapfont, test_brush_tips, test_canvas,
+                        test_dither, test_editor_features, test_effects,
+                        test_filters,
+                        test_formats, test_icons, test_integrations,
+                        test_macro, test_model, test_palette, test_pattern,
+                        test_project, test_shapes)
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([
@@ -6097,6 +6808,8 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_project),
         loader.loadTestsFromModule(test_icons),
         loader.loadTestsFromModule(test_integrations),
+        loader.loadTestsFromModule(test_editor_features),
+        loader.loadTestsFromModule(test_brush_tips),
     ])
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)
@@ -6474,6 +7187,66 @@ def run_selftest(out_path=None):
         recent_filter_ok = all(os.path.isfile(p)
                                for p in RecentStore(store.path).items)
         manual_ok = manual_path() is not None
+
+        # Tabs, the unsaved marker, dropped images and the new sliders
+        tabs_before = len(app.tabs)
+        app.new_canvas(CanvasSpec(10, 6))
+        tabs_ok = (len(app.tabs) == tabs_before + 1
+                   and (app.doc.width, app.doc.height) == (10, 6))
+        tabs_ok = tabs_ok and bool(app.switch_tab(0))
+        tabs_ok = tabs_ok and app.doc.width != 10
+        tabs_ok = tabs_ok and bool(app.switch_tab(len(app.tabs) - 1))
+        tabs_ok = tabs_ok and bool(app.next_tab(-1))
+
+        dirty_ok = not app.doc.dirty
+        before = app.doc.begin()
+        app.doc.commit(before)
+        dirty_ok = dirty_ok and app.doc.dirty
+        dirty_ok = (dirty_ok and bool(app.mark_saved())
+                    and not app.doc.dirty)
+
+        drop_path = os.path.join(temp_dir, "dropped.png")
+        Image.new("RGBA", (4, 3), (0, 255, 0, 255)).save(drop_path)
+        layers_before = app.doc.layer_count
+        handled = app.handle_dropped_paths(
+            [drop_path], choose=lambda paths: "layer")
+        drop_ok = (handled == ["layer"]
+                   and app.doc.layer_count == layers_before + 1)
+        centre = app.doc.active_layer.bitmap.rgba(app.doc.width // 2,
+                                                  app.doc.height // 2)
+        drop_ok = drop_ok and centre == (0, 255, 0, 255)
+        tabs_ok = tabs_ok and app.handle_dropped_paths(
+            [drop_path], choose=lambda paths: "canvas") == ["canvas"]
+        tabs_ok = tabs_ok and app.doc.path == drop_path
+
+        smear_ok = app.blur_smear() == 0 and app.jumble_blur() == 0
+        app.blur_smear_var.set(50)
+        app.jumble_blur_var.set(25)
+        smear_ok = (smear_ok and app.blur_smear() == 50
+                    and app.jumble_blur() == 25)
+        app.blur_smear_var.set(0)
+        app.jumble_blur_var.set(0)
+
+        tips_ok = app.brush_shape() == "square"
+        app.brush_shape_var.set("Circle")
+        tips_ok = tips_ok and app.brush_shape() == "circle"
+        app.brush_shape_var.set("Custom")
+        tips_ok = tips_ok and app.brush_shape() == "custom"
+        tips_ok = tips_ok and bool(brush_offsets(6, "custom"))
+        app.brush_shape_var.set("Square")
+        pattern_ok = app.pattern_size >= 1
+        app.set_pattern_size(3)
+        app.pattern_cells[0][0] = (7, 8, 9, 255)
+        app.brush_pattern_var.set(True)
+        painted = app.pattern_dab(2, 2)
+        pattern_ok = (pattern_ok and app.brush_pattern() and painted >= 1
+                      and app.doc.active_layer.bitmap.rgba(1, 1)
+                      == (7, 8, 9, 255))
+        app.brush_pattern_var.set(False)
+        app.pattern_cells[0][0] = None
+        lines.append("tabs=%s dirty=%s drop=%s sliders=%s tips=%s pattern=%s"
+                     % (tabs_ok, dirty_ok, drop_ok, smear_ok, tips_ok,
+                        pattern_ok))
         app.destroy()
         gui_ok = all((rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                       tool_palette_ok,
@@ -6487,6 +7260,8 @@ def run_selftest(out_path=None):
                       gradient_ok, palette_ok, wheel_ok, quantize_ok,
                       dark_ok, light_ok, dockers_ok, overlay_ok,
                       layer_keys_ok, mouse_ok))
+        gui_ok = gui_ok and all((tabs_ok, dirty_ok, drop_ok, smear_ok,
+                                 tips_ok, pattern_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
                      "drag=%s erase=%s export=%s dump=%s canvas=%s props=%s "
                      "canvas_undo=%s dialog=%s default_view=%s hex_view=%s "
