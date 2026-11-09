@@ -119,12 +119,14 @@ The packaged executable is built for Windows. Build instructions are
 
 ## Virus scan
 
-The `hex2pixbeta-main.zip` source archive was scanned by Jotti's malware
-scan: **0 of 13 engines reported malware**
-([full report](https://virusscan.jotti.org/en-US/filescanjob/jvfzv768vy)).
+VirusTotal's URL report for the project page at
+`https://github.com/Shagg097/hex2pixbeta` reports **no security vendors
+flagged it as malicious** ([full report](https://www.virustotal.com/gui/url/6455f0b48e41bf69bc1ee2070d13780ff75483edb85d802520ce373ec3efc4e2),
+scanned 9 November 2026). The check covers the repository page, not the
+contents of the executable.
 
 <p align="center">
-  <a href="https://virusscan.jotti.org/en-US/filescanjob/jvfzv768vy"><img src="docs/jotti-malware-scan.png" width="560" alt="Jotti malware scan report for hex2pixbeta-main.zip: scan finished, 0 of 13 scanners reported malware"></a>
+  <a href="https://www.virustotal.com/gui/url/6455f0b48e41bf69bc1ee2070d13780ff75483edb85d802520ce373ec3efc4e2"><img src="docs/virustotal-scan.png" width="560" alt="VirusTotal URL report for github.com/Shagg097/hex2pixbeta: no security vendors flagged this URL as malicious"></a>
 </p>
 
 ## The hex idea
