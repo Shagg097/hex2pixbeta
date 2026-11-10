@@ -5,9 +5,10 @@ across the canvas centre lines and only write pixels the selection allows, so
 they behave like the painting tools. They edit the `Bitmap` in place and return
 how many pixels they touched.
 
-* `blur` replaces each pixel with the average of its 3x3 neighbourhood, mixed
-  back towards the original by `strength` (0-100%). A stroke passes one
-  snapshot so overlapping dabs of the same drag do not compound.
+* `blur` replaces each pixel with the average of its neighbourhood, mixed
+  back towards the original by `strength` (0-100%). `amount` sets the
+  neighbourhood radius (0-8 pixels). A stroke passes one snapshot so
+  overlapping dabs of the same drag do not compound.
 * `shuffle` reorders the colour bytes inside the footprint:
   `shuffle` permutes them, `scatter` picks a random colour per pixel (so some
   are duplicated), and `noise` jitters the RGB channels by `amount` percent
@@ -59,12 +60,13 @@ def _count(value, low, high, default):
 
 
 def blur_area(bitmap, mask, x, y, size=3, strength=100, shape="square",
-              axes="", source=None):
+              axes="", source=None, amount=1):
     """Soften the pixels under the brush; returns the pixels written.
 
-    `source` is the bitmap to read from. A stroke passes the snapshot taken
-    when the drag started, which keeps a long drag from blurring the same
-    pixels over and over.
+    `amount` is the blur radius in pixels (0-8): the average is taken over
+    a (2 * amount + 1) square. `source` is the bitmap to read from. A
+    stroke passes the snapshot taken when the drag started, which keeps a
+    long drag from blurring the same pixels over and over.
     """
     cells = _cells(bitmap, mask, x, y, size, shape, axes)
     if not cells:
@@ -76,14 +78,17 @@ def blur_area(bitmap, mask, x, y, size=3, strength=100, shape="square",
         source = bitmap.copy()
     width, height = source.width, source.height
     data = source.data
-    amount = strength / 100.0
+    radius = _count(amount, 0, 8, 1)
+    mix = strength / 100.0
     written = 0
     for px, py in cells:
         total = [0, 0, 0, 0]
         count = 0
-        for ny in range(max(0, py - 1), min(height, py + 2)):
-            base = (ny * width + max(0, px - 1)) * 4
-            for _nx in range(max(0, px - 1), min(width, px + 2)):
+        for ny in range(max(0, py - radius),
+                        min(height, py + radius + 1)):
+            base = (ny * width + max(0, px - radius)) * 4
+            for _nx in range(max(0, px - radius),
+                             min(width, px + radius + 1)):
                 total[0] += data[base]
                 total[1] += data[base + 1]
                 total[2] += data[base + 2]
@@ -94,19 +99,21 @@ def blur_area(bitmap, mask, x, y, size=3, strength=100, shape="square",
         _put(bitmap, px, py,
              tuple(int(current[channel]
                        + (total[channel] / float(count) - current[channel])
-                       * amount + 0.5)
+                       * mix + 0.5)
                    for channel in range(4)))
         written += 1
     return written
 
 
 def blur_stroke(bitmap, mask, x0, y0, x1, y1, size=3, strength=100,
-                shape="square", axes="", source=None, smear=0):
+                shape="square", axes="", source=None, smear=0,
+                amount=1):
     """Blur along a stroke between two points, mirrored.
 
     `smear` drags the pixels the brush just left along with the stroke; it
     reads the layer as it now looks, so the colour travels instead of being
-    pulled again and again from where the stroke started.
+    pulled again and again from where the stroke started. `amount` widens
+    the blur neighbourhood, independently of the brush footprint.
     """
     if source is None:
         source = bitmap.copy()
@@ -115,7 +122,7 @@ def blur_stroke(bitmap, mask, x0, y0, x1, y1, size=3, strength=100,
     previous = (x0, y0)
     for x, y in line_points(x0, y0, x1, y1):
         written += blur_area(bitmap, mask, x, y, size, strength, shape, axes,
-                             source)
+                             source, amount)
         if smear and (x, y) != previous:
             written += smear_area(bitmap, mask, x, y, size, smear, shape,
                                   axes, x - previous[0], y - previous[1])

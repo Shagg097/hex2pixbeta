@@ -181,9 +181,10 @@ Three pixel-level tools share the brush footprint, the mirror setting and the
 selection mask, so each one can be confined to a region:
 
 - **Blur** (Shift+B) replaces every pixel under the brush with the average of
-  its 3x3 neighbourhood, mixed back towards the original by **Strength**. A
-  drag reads from the snapshot taken when the stroke started, so overlapping
-  dabs soften once instead of compounding into mush.
+  its neighbourhood, mixed back towards the original by **Strength**.
+  **Amount** widens the neighbourhood from 0 to 8 pixels, independently of
+  the brush footprint. A drag reads from the snapshot taken when the stroke
+  started, so overlapping dabs soften once instead of compounding into mush.
 - **Shuffle** (Shift+J) reorders the colour bytes under the brush: its default
   mode permutes them, **Scatter** gives each pixel a random neighbour's colour (so
   colours repeat) and **Noise** jitters each channel by **Amount** percent
@@ -589,7 +590,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 460 tests over the model, the canvas, formats, colours,
+The first command runs 462 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand
