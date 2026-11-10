@@ -267,8 +267,10 @@ pixel's four RGBA bytes participate in the next edit.
 | Similar | all matching pixels in the image |
 
 Hold `Shift` to add, `Ctrl` to subtract and `Alt` to intersect. A right-drag
-with a selection tool subtracts. Tolerance lives in the left panel; `0` means
-an exact byte match.
+that starts outside the selection subtracts; `Ctrl`+drag subtracts anywhere.
+Right-click inside a selection for Delete, Split to new layer, Copy to new
+layer, Copy to clipboard and Copy to pattern. Tolerance lives in the left
+panel; `0` means an exact byte match.
 
 **Move / Scale** turns a selection into a floating piece. Drag inside it to
 move, `Shift`+drag to scale from the opposite corner, or `Ctrl`+drag to rotate
