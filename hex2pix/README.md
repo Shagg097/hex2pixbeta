@@ -169,7 +169,9 @@ paint it in the foreground colour, right-click or Ctrl+click to skip it. The
 grid stays in sync with hex rows, so a pattern can be typed as
 `FF0000 0000FF` / `. 00FF00` and sent to the grid, or painted cell by cell and
 written back out. `.` cells skip the pixel instead of writing it, and the
-pattern can also be lifted straight from the selection.
+pattern can also be lifted straight from the selection: a lifted pattern keeps
+the selection's shape, so a 3×2 selection fills as a 3×2 tile, while the Grid
+control sets a square grid.
 
 Scale repeats each pattern pixel N times. Enter at the keyboard cursor runs
 whichever fill tool is active, so patterns and flood fills can be placed
@@ -360,30 +362,47 @@ clipboard; **Copy block** copies the selection as hex pixel rows.
 ## Layers
 
 The **Layers** tab stacks bitmaps that share one selection and canvas size.
-Each layer combines with the layers below it using its operation:
+Each layer has three separate option groups, applied in order, and an opacity:
 
 | Operation | Result |
 | --- | --- |
-| Normal | the layer covers what is below (the default) |
+| None | the layer's own values (the default) |
 | Add | `below + above`, clamped |
 | Subtract | `below - above`, clamped |
 | Multiply | `below * above / 255` |
 | Divide | `below * 255 / above` |
+
+| Nandgate | Result |
+| --- | --- |
+| None | the layer's own bits (the default) |
+| And | `below AND above`, per byte |
+| Or | `below OR above`, per byte |
 | Xor | `below XOR above`, per byte |
+| Not | `NOT above`, per byte |
 | Nand | `NOT (below AND above)`, per byte |
+| Nor | `NOT (below OR above)`, per byte |
+| Xnor | `NOT (below XOR above)`, per byte |
+
+| Blend | Result |
+| --- | --- |
+| None | the result covers what is below (the default) |
 | Screen | `255 - (255-below)(255-above)/255` |
 | Overlay | multiplies dark areas, screens light ones |
 | Darken | the darker of the two |
 | Lighten | the lighter of the two |
 | Difference | `abs(below - above)` |
 
-A pixel's alpha is the strength of the operation, so transparent pixels leave
-the stack below alone and a partly transparent layer mixes the result. Where
-the stack below is transparent the layer shows as it is. New layers start
-**Normal**, so drawing covers instead of combining.
+The operation runs first, then the gate works bit by bit on that result and
+the stack below, then the blend mode mixes the outcome into the stack, so a
+layer can use all three at once (Multiply, then Nand, then Screen, for
+example). A pixel's alpha is the strength of the result, so transparent pixels
+leave the stack below alone and a partly transparent layer mixes it. Where the
+stack below is transparent the layer shows as it is. New layers start with no
+operation, no gate and no blend, so drawing covers instead of combining.
 
 The **Opacity** slider under the layer list blends the active layer without
-touching its pixels: it scales the strength of that layer's operation, so
+touching its pixels: it scales the strength of the layer's operation, gate
+and blend, so
 `0%` hides the layer's contribution and `100%` uses the pixels as stored. The
 percentage also appears in the layer row and the status bar, and dragging the
 slider is one undo step.
@@ -402,8 +421,8 @@ it into an existing group (or out with *none*). A group appears as a header row
 above its members: double-click the header to hide or show the whole group,
 **Fold / unfold group** collapses it, and **Ungroup** releases the layers.
 **Rename** (or `F2`) edits layer and group names. **Merge down** combines the
-active layer into the one below using its operation and opacity, and **Merge
-group** flattens a group into one layer. Group names, visibility and opacity
+active layer into the one below using its operation, blend mode and opacity,
+and **Merge group** flattens a group into one layer. Group names, visibility and opacity
 are saved in the `.h2p` project.
 
 ## Tool palette
@@ -513,7 +532,8 @@ Tool letters are on `Shift` so that `A-F` can stay available for hex digits.
 **File > Save project as...** writes the whole working session to a `.h2p`
 file: a zip holding a `project.json` header, one raw RGBA entry per layer, and
 the selection mask. Layers stay separate on disk, with their names, order,
-visibility, opacity and blend operation, so reopening a project gives back the
+visibility, opacity, operation and blend mode, so reopening a project gives
+back the
 same stack instead of a flattened picture.
 
 The header also carries the canvas size, resolution, colour model and alpha
@@ -534,7 +554,8 @@ file per visible layer), trim, scale, sampling, PPI, transparency or matte,
 JPEG quality, GIF colours and PNG level, then **Export image** writes the file
 from the same panel. **Variable bits per pixel** switches the panel to custom
 depth output, with a header choice (Raw, BMP, BMP V4, BMP V5 or TGA), indexed or
-RGB(A) colour, per-channel widths, and packed or byte-aligned packing.
+RGB(A) colour, a **Bits/pixel** value with presets and per-channel widths, and
+packed or byte-aligned packing.
 
 ## File formats
 
@@ -572,12 +593,16 @@ own BMP parser too, so a file hex2pix wrote reopens with its alpha intact.
 The **Header** choice is **Raw (none)** for values only, **BMP**, **BMP V4** or
 **BMP V5** for a BMP file header, or **TGA** for a TGA 2.0 header; indexed
 output gets a colour table. Colour is **Indexed** (1–8 bpp, adaptive palette)
-or **RGB(A)** (per-channel widths). **Packed** runs pixels together MSB first,
+or **RGB(A)**, where **Bits/pixel** splits the depth over the channels and the
+R/G/B/A fields can override it. **Packed** runs pixels together MSB first,
 so 12-bit 4:4:4 is two pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`)
 and 6-bit 2:2:2 is four in three (`rrggbbrr ggbbrrgg bbrrggbb`); **Aligned**
 gives each pixel its own bytes with zero high bits (`0000rrrr ggggbbbb` and
-`00rrggbb`). Nonstandard RGB depths are written as declared for custom
-readers; the standard indexed depths produce normal BMP/TGA files.
+`00rrggbb`). **Raw (none)** keeps that exact stream, while BMP and TGA store
+RGB pixels in a container the format defines so the file reopens in an
+ordinary viewer: totals up to 16 bits become 16-bit 5:5:5 or 5:6:5 pixels,
+larger totals become 24 or 32 bits, and indexed depths move to the next
+colour-table depth.
 
 ## Build the executable
 

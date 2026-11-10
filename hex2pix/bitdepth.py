@@ -90,6 +90,37 @@ def preset_label(widths):
     return "Custom"
 
 
+def widths_for_total(total, widths=(8, 8, 8, 0)):
+    """(r, g, b, a) widths that add up to `total` bits per pixel.
+
+    Alpha stays in use when the current layout has it (or at 32 bpp) and the
+    rest is split as evenly as possible, with the spare bits going to green
+    first, then red, then blue. That reproduces the usual layouts: 8 bpp is
+    3:3:2, 16 bpp is 5:6:5 and 32 bpp is 8:8:8:8.
+    """
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        raise HexError("bits per pixel must be a whole number")
+    if total < 1 or total > MAX_BITS:
+        raise HexError("bits per pixel must be 1-%d" % MAX_BITS)
+    try:
+        current = [int(value) for value in widths]
+    except (TypeError, ValueError):
+        current = [8, 8, 8, 0]
+    while len(current) < 4:
+        current.append(0)
+    alpha = 0
+    rest = total
+    if total > 3 and (current[3] > 0 or total >= MAX_BITS):
+        alpha = max(1, min(MAX_CHANNEL_BITS, total // 4))
+        rest = total - alpha
+    channels = [rest // 3, rest // 3, rest // 3]
+    for index in (1, 0, 2)[:rest % 3]:
+        channels[index] += 1
+    return tuple(channels + [alpha])
+
+
 def channel_masks(widths):
     """R/G/B/A bit masks for a most-significant-bit-first sample layout."""
     masks = [0, 0, 0, 0]

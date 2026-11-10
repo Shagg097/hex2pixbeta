@@ -25,27 +25,45 @@ OP_LABELS = {
 }
 OP_BY_LABEL = {label: op for op, label in OP_LABELS.items()}
 
-# How a layer combines with the layers below it. "normal" is plain
-# source-over, the default: the layer covers what is underneath. The rest
-# combine per channel with the layers below, including the bitwise Xor and
-# Nand gates and the usual photographic blend modes.
-LAYER_OPS = ("normal", "add", "subtract", "multiply", "divide",
-             "xor", "nand", "screen", "overlay", "darken", "lighten",
-             "difference")
+# A layer reaches the stack below through three separate option groups, and
+# they apply in order. `op` is the arithmetic operation, `gate` is the
+# bitwise gate and `blend` is the blend mode; "none" switches a group off.
+LAYER_OPS = ("none", "add", "subtract", "multiply", "divide")
 LAYER_OP_LABELS = {
-    "normal": "Normal",
+    "none": "None",
     "add": "Add",
     "subtract": "Subtract",
     "multiply": "Multiply",
     "divide": "Divide",
+}
+LAYER_OP_BY_LABEL = {label: op for op, label in LAYER_OP_LABELS.items()}
+
+LAYER_GATES = ("none", "and", "or", "xor", "not", "nand", "nor", "xnor")
+LAYER_GATE_LABELS = {
+    "none": "None",
+    "and": "And",
+    "or": "Or",
     "xor": "Xor",
+    "not": "Not",
     "nand": "Nand",
+    "nor": "Nor",
+    "xnor": "Xnor",
+}
+LAYER_GATE_BY_LABEL = {label: gate for gate, label
+                       in LAYER_GATE_LABELS.items()}
+
+LAYER_BLENDS = ("none", "screen", "overlay", "darken", "lighten",
+                "difference")
+LAYER_BLEND_LABELS = {
+    "none": "None",
     "screen": "Screen",
     "overlay": "Overlay",
     "darken": "Darken",
     "lighten": "Lighten",
     "difference": "Difference",
 }
+LAYER_BLEND_BY_LABEL = {label: blend for blend, label
+                        in LAYER_BLEND_LABELS.items()}
 
 HEX_DIGITS = set("0123456789abcdefABCDEF")
 
@@ -122,6 +140,44 @@ def combine(a, b, op, strength=255, wrap=False):
         raise HexError("unknown operation: %s" % op)
     raw = raw % 256 if wrap else clamp(raw, 0, 255)
     return clamp(round_half_up(a + (raw - a) * (strength / 255.0)), 0, 255)
+
+
+def gate_value(below, above, gate):
+    """Bitwise gate of two 0..255 channel values."""
+    if gate == "and":
+        return band8(below, above)
+    if gate == "or":
+        return (below | above) & 255
+    if gate == "xor":
+        return bxor8(below, above)
+    if gate == "not":
+        return bnot8(above)
+    if gate == "nand":
+        return bnot8(band8(below, above))
+    if gate == "nor":
+        return bnot8((below | above) & 255)
+    if gate == "xnor":
+        return bnot8(bxor8(below, above))
+    raise HexError("unknown gate: %s" % gate)
+
+
+def combine_layer(below, above, op="none", gate="none", blend="none",
+                  strength=255, wrap=False):
+    """Combine one channel through a layer's three option groups.
+
+    The groups apply in order: the arithmetic operation, then the bitwise
+    gate, then the blend mode, each working on the result so far and the
+    stack below. "none" leaves a group out, and the layer's alpha is the
+    strength of the final mix.
+    """
+    value = above
+    if op not in ("none", "", None):
+        value = combine(below, value, op, 255, wrap)
+    if gate not in ("none", "", None):
+        value = gate_value(below, value, gate)
+    if blend not in ("none", "", None):
+        value = combine(below, value, blend, 255, wrap)
+    return combine(below, value, "normal", strength, wrap)
 
 
 # ------------------------------------------------------------------ hex colors
@@ -691,42 +747,67 @@ class LayerGroup(object):
 class Layer(object):
     """One bitmap in a document's layer stack.
 
-    `op` is how the layer combines with the layers below it, and its alpha is
-    the strength of that operation. `alpha` is the layer's own opacity, which
-    scales that strength for every pixel. `group` names the layer's group, or
-    is empty when it is ungrouped. `Document.layers[0]` is the bottom layer.
+    `op`, `gate` and `blend` are the layer's three separate option groups:
+    the arithmetic operation, the bitwise gate and the blend mode. Each is
+    "none" unless chosen, and they apply in that order to the stack below.
+    `alpha` is the layer's own opacity, which scales the strength of the
+    result for every pixel. `group` names the layer's group, or is empty when
+    it is ungrouped. `Document.layers[0]` is the bottom layer.
     """
 
-    __slots__ = ("bitmap", "name", "op", "visible", "alpha", "group")
+    __slots__ = ("bitmap", "name", "op", "gate", "blend", "visible",
+                 "alpha", "group")
 
-    def __init__(self, width, height, name="Layer 1", op="normal",
-                 visible=True, data=None, alpha=255, group=""):
+    def __init__(self, width, height, name="Layer 1", op="none",
+                 visible=True, data=None, alpha=255, group="", blend="none",
+                 gate="none"):
         self.bitmap = Bitmap(width, height, data)
         self.name = str(name)
-        self.op = op if op in LAYER_OPS else "normal"
+        self.op = op if op in LAYER_OPS else "none"
+        self.gate = gate if gate in LAYER_GATES else "none"
+        self.blend = blend if blend in LAYER_BLENDS else "none"
         self.visible = bool(visible)
         self.alpha = clamp(int(alpha), 0, 255)
         self.group = str(group or "")
 
     def __repr__(self):
-        return "Layer(%r, %s)" % (self.name, self.op)
+        return "Layer(%r, %s, %s, %s)" % (self.name, self.op, self.gate,
+                                          self.blend)
 
     def copy(self):
         return Layer(self.bitmap.width, self.bitmap.height, self.name, self.op,
                      self.visible, bytes(self.bitmap.data), self.alpha,
-                     self.group)
+                     self.group, self.blend, self.gate)
 
     def to_state(self):
-        return {"name": self.name, "op": self.op, "visible": self.visible,
+        return {"name": self.name, "op": self.op, "gate": self.gate,
+                "blend": self.blend, "visible": self.visible,
                 "alpha": self.alpha, "group": self.group,
                 "data": bytes(self.bitmap.data)}
 
     @classmethod
     def from_state(cls, state, width, height):
-        return cls(width, height, state.get("name", "Layer"),
-                   state.get("op", "normal"), state.get("visible", True),
-                   state.get("data"), state.get("alpha", 255),
-                   state.get("group", ""))
+        op = state.get("op", "none")
+        gate = state.get("gate", "none")
+        blend = state.get("blend", "none")
+        if "gate" not in state:
+            # Projects from before the three groups held a bitwise gate, or
+            # one of the old blend names, in "op".
+            gate = op if op in LAYER_GATES else "none"
+            if "blend" in state:
+                # Two-group projects: "op" was the gate, "blend" the mode.
+                op = "none"
+            elif op in ("screen", "overlay", "darken", "lighten",
+                        "difference", "normal"):
+                op, blend = "none", op
+            elif op not in LAYER_OPS:
+                op = "none"
+        if blend == "normal":
+            blend = "none"
+        return cls(width, height, state.get("name", "Layer"), op,
+                   state.get("visible", True), state.get("data"),
+                   state.get("alpha", 255), state.get("group", ""), blend,
+                   gate)
 
 
 def composite_layers(layers, rect=None, frame=None, groups=None):
@@ -752,6 +833,8 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
             continue
         src = layer.bitmap.data
         op = layer.op
+        gate = layer.gate
+        blend = layer.blend
         opacity = clamp(int(layer.alpha), 0, 255)
         group = groups.get(layer.group) if groups and layer.group else None
         if group is not None:
@@ -778,9 +861,12 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
                     dst[d:d + 3] = src[s:s + 3]
                     dst[d + 3] = above
                     continue
-                dst[d] = combine(dst[d], src[s], op, above)
-                dst[d + 1] = combine(dst[d + 1], src[s + 1], op, above)
-                dst[d + 2] = combine(dst[d + 2], src[s + 2], op, above)
+                dst[d] = combine_layer(dst[d], src[s], op, gate, blend,
+                                       above)
+                dst[d + 1] = combine_layer(dst[d + 1], src[s + 1], op, gate,
+                                           blend, above)
+                dst[d + 2] = combine_layer(dst[d + 2], src[s + 2], op, gate,
+                                           blend, above)
                 dst[d + 3] = below + (255 - below) * above // 255
     return out
 
@@ -1581,10 +1667,11 @@ class Document(object):
         return composite_layers(self.layers, rect, (self.width, self.height),
                                 self.group_map())
 
-    def add_layer(self, name=None, op="normal"):
+    def add_layer(self, name=None, op="none", blend="none", gate="none"):
         """Insert an empty layer above the active one and select it."""
         name = name or "Layer %d" % (self.layer_count + 1)
-        layer = Layer(self.width, self.height, name, op)
+        layer = Layer(self.width, self.height, name, op, blend=blend,
+                      gate=gate)
         self.layer_index += 1
         self.layers.insert(self.layer_index, layer)
         return layer
@@ -1715,7 +1802,8 @@ class Document(object):
         merged = composite_layers(layers, None, (self.width, self.height),
                                   {name: group})
         result = Layer(self.width, self.height, group.name,
-                       layers[0].op, True, bytes(merged.data))
+                       layers[0].op, True, bytes(merged.data),
+                       blend=layers[0].blend, gate=layers[0].gate)
         for index in reversed(members):
             del self.layers[index]
         self.layers.insert(members[0], result)
@@ -1733,18 +1821,38 @@ class Document(object):
         self.layer_index = target
         return True
 
-    def reorder_layer(self, target, index=None):
-        """Move a layer to another slot in the stack."""
+    def move_layer_to(self, target, index=None, group=None):
+        """Move a layer to another slot and, when given, into another group.
+
+        `group` of "" takes the layer out of its group and None leaves the
+        membership alone. The active layer stays active even when the move
+        crosses over it.
+        """
         index = self.layer_index if index is None else int(index)
         target = int(target)
-        if (index == target or index < 0 or index >= self.layer_count
+        if (index < 0 or index >= self.layer_count
                 or target < 0 or target >= self.layer_count):
             return False
-        layer = self.layers.pop(index)
-        self.layers.insert(target, layer)
-        if index == self.layer_index:
-            self.layer_index = target
+        layer = self.layers[index]
+        regroup = group is not None and str(group) != layer.group
+        if target == index and not regroup:
+            return False
+        active = self.active_layer
+        if target != index:
+            self.layers.pop(index)
+            self.layers.insert(target, layer)
+            self.layer_index = self.layers.index(active)
+        if regroup:
+            name = str(group or "")
+            if name:
+                self.ensure_group(name)
+            layer.group = name
+            self.prune_groups()
         return True
+
+    def reorder_layer(self, target, index=None):
+        """Move a layer to another slot in the stack."""
+        return self.move_layer_to(target, index)
 
     def transform_all(self, func):
         """Apply a bitmap transform (flip, rotate, resize) to every layer."""

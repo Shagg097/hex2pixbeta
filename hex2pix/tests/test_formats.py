@@ -349,10 +349,15 @@ class RawBitDepthTests(unittest.TestCase):
         self.assertEqual(size, len(data))
         self.assertEqual(data[:2], b"BM")
         self.assertEqual(struct.unpack_from("<I", data, 14)[0], 40)
-        self.assertEqual(struct.unpack_from("<H", data, 28)[0], 12)
+        # 4:4:4 has no BMP layout of its own, so it is stored as 5:6:5.
+        self.assertEqual(struct.unpack_from("<H", data, 28)[0], 16)
+        self.assertEqual(struct.unpack_from("<I", data, 30)[0], 3)
+        self.assertEqual(struct.unpack_from("<III", data, 54),
+                         (0xF800, 0x07E0, 0x001F))
         self.assertEqual(struct.unpack_from("<ii", data, 18), (2, 1))
         offset = struct.unpack_from("<I", data, 10)[0]
-        self.assertEqual(data[offset:], b"\x13\x5a\xce\x00")
+        self.assertEqual(offset, 66)
+        self.assertEqual(data[offset:], b"\xaa\x11\x7d\xae")
 
     def test_bmp_v4_and_v5_headers_are_selectable(self):
         bitmap = self.bitmap((0x12, 0x34, 0x56, 255))
@@ -365,7 +370,7 @@ class RawBitDepthTests(unittest.TestCase):
                 data = handle.read()
             self.assertEqual(struct.unpack_from("<I", data, 14)[0],
                              header_size, header)
-            self.assertEqual(struct.unpack_from("<H", data, 28)[0], 12,
+            self.assertEqual(struct.unpack_from("<H", data, 28)[0], 16,
                              header)
 
     def test_tga_header_wraps_custom_bits(self):
@@ -379,8 +384,8 @@ class RawBitDepthTests(unittest.TestCase):
             data = handle.read()
         self.assertEqual(data[:3], b"\x00\x00\x02")
         self.assertEqual(struct.unpack_from("<HH", data, 12), (2, 1))
-        self.assertEqual(data[16], 12)
-        self.assertEqual(data[18:], b"\x13\x5a\xce")
+        self.assertEqual(data[16], 24)
+        self.assertEqual(data[18:], b"\x56\x34\x12\xef\xcd\xab")
 
     def test_indexed_bmp_has_a_colour_table(self):
         bitmap = self.bitmap(*([(255, 255, 255, 255)] * 4
@@ -409,13 +414,50 @@ class RawBitDepthTests(unittest.TestCase):
         self.assertEqual(data[1:3], b"\x01\x01")
         self.assertEqual(struct.unpack_from("<H", data, 5)[0], 2)
         self.assertEqual(data[7], 24)
-        self.assertEqual(data[16], 1)
-        self.assertEqual(len(data), 18 + 6 + 1)
+        # TGA colour-mapped images index one byte per pixel.
+        self.assertEqual(data[16], 8)
+        self.assertEqual(len(data), 18 + 6 + 8)
+
+    def test_header_exports_open_in_a_reader(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255), (0xAB, 0xCD, 0xEF, 255),
+                             (0x10, 0x20, 0x30, 255), (0x40, 0x50, 0x60, 255))
+        layouts = [(1, 1, 1, 0), (2, 2, 2, 0), (3, 3, 2, 0), (4, 4, 4, 0),
+                   (5, 5, 5, 0), (5, 6, 5, 0), (6, 6, 6, 0), (8, 8, 8, 0),
+                   (10, 10, 10, 0), (8, 8, 8, 8)]
+        # A unique file per case: Pillow keeps a Windows handle on palette
+        # BMPs past close, so rewriting the same path would fail.
+        for header in ("bmp", "bmpv4", "bmpv5", "tga"):
+            for channels in layouts:
+                name = "readable_%s_%s%s" % (
+                    header, "".join(str(value) for value in channels),
+                    bitdepth.header_ext(header))
+                target = self.path(name)
+                formats.save(bitmap, target, "raw", raw_mode="rgb",
+                             raw_channels=channels, raw_header=header)
+                with Image.open(target) as image:
+                    image.load()
+                    self.assertEqual(image.size, (4, 1), (header, channels))
+        for depth in (1, 2, 4, 8):
+            for header in ("bmp", "bmpv4", "bmpv5", "tga"):
+                target = self.path("indexed_%s_%d%s"
+                                   % (header, depth,
+                                      bitdepth.header_ext(header)))
+                formats.save(bitmap, target, "raw", raw_mode="indexed",
+                             raw_depth=depth, raw_header=header)
+                with Image.open(target) as image:
+                    image.load()
+                    self.assertEqual(image.size, (4, 1), (header, depth))
 
     def test_raw_size_accounts_for_headers(self):
         self.assertEqual(formats.raw_size(2, 1, 12, "packed", "raw"), 3)
-        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "bmp"), 58)
-        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "tga"), 21)
+        # BMP stores 12 bpp as 16 bpp 5:6:5 with its masks, TGA as 24 bpp.
+        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "bmp"), 70)
+        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "tga"), 24)
+        self.assertEqual(formats.raw_size(2, 1, 24, "packed", "bmp",
+                                          channels=(8, 8, 8, 0)), 62)
+        self.assertEqual(formats.raw_size(2, 1, 8, "packed", "bmp",
+                                          mode="indexed", depth=8),
+                         14 + 40 + 1024 + 4)
 
     def test_header_names_and_extensions(self):
         self.assertEqual(bitdepth.header_key("BMP V4"), "bmpv4")
@@ -441,6 +483,36 @@ class RawBitDepthTests(unittest.TestCase):
         patterns = [pattern for _label, pattern in formats.SAVE_FILETYPES]
         self.assertIn("*.raw", patterns)
         self.assertEqual(formats.format_for_path("x.RAW"), "raw")
+
+
+class BitsPerPixelTests(unittest.TestCase):
+    def test_common_totals_use_the_usual_layouts(self):
+        self.assertEqual(bitdepth.widths_for_total(3), (1, 1, 1, 0))
+        self.assertEqual(bitdepth.widths_for_total(6), (2, 2, 2, 0))
+        self.assertEqual(bitdepth.widths_for_total(8), (3, 3, 2, 0))
+        self.assertEqual(bitdepth.widths_for_total(12), (4, 4, 4, 0))
+        self.assertEqual(bitdepth.widths_for_total(15), (5, 5, 5, 0))
+        self.assertEqual(bitdepth.widths_for_total(16), (5, 6, 5, 0))
+        self.assertEqual(bitdepth.widths_for_total(24), (8, 8, 8, 0))
+        self.assertEqual(bitdepth.widths_for_total(32), (8, 8, 8, 8))
+
+    def test_alpha_stays_in_use_when_the_layout_had_it(self):
+        self.assertEqual(bitdepth.widths_for_total(16, (8, 8, 8, 8)),
+                         (4, 4, 4, 4))
+        self.assertEqual(bitdepth.widths_for_total(10, (8, 8, 8, 8)),
+                         (3, 3, 2, 2))
+
+    def test_every_total_from_one_to_thirty_two_adds_up(self):
+        for total in range(1, bitdepth.MAX_BITS + 1):
+            widths = bitdepth.widths_for_total(total)
+            self.assertEqual(sum(widths), total, total)
+            self.assertTrue(any(widths[:3]), total)
+            self.assertLessEqual(max(widths), bitdepth.MAX_CHANNEL_BITS)
+
+    def test_totals_outside_the_range_are_rejected(self):
+        for bad in (0, -1, bitdepth.MAX_BITS + 1):
+            with self.assertRaises(HexError):
+                bitdepth.widths_for_total(bad)
 
 
 if __name__ == "__main__":

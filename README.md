@@ -425,27 +425,38 @@ Mouse and camera controls:
 ## Layers
 
 The **Layers** tab stacks bitmaps that share a canvas and selection. Each layer
-has an operation and an opacity:
+has three separate option groups, applied in order, and an opacity:
 
 | Operation | Result |
 | --- | --- |
-| Normal | Covers the layers below |
+| None | the layer's own values (the default) |
 | Add | `below + above`, clamped |
 | Subtract | `below - above`, clamped |
 | Multiply | `below * above / 255` |
 | Divide | `below * 255 / above` |
-| Xor | `below XOR above`, per byte |
-| Nand | `NOT (below AND above)`, per byte |
+
+| Nandgate | Result |
+| --- | --- |
+| None | the layer's own bits (the default) |
+| And / Or / Xor | `below AND / OR / XOR above`, per byte |
+| Not | `NOT above`, per byte |
+| Nand / Nor / Xnor | the inverted And / Or / Xor, per byte |
+
+| Blend | Result |
+| --- | --- |
+| None | Covers the layers below (the default) |
 | Screen | `255 - (255-below)(255-above)/255` |
 | Overlay | Multiplies dark areas, screens light ones |
 | Darken | Darker of the two |
 | Lighten | Lighter of the two |
 | Difference | `abs(below - above)` |
 
-A pixel's alpha is the strength of the operation, so transparent pixels leave
-the stack alone. The **Opacity** slider blends the active layer without changing
-its stored pixels. New layers start as **Normal**, so drawing covers instead of
-combining.
+The groups apply one after another - the operation, then the gate, then the
+blend mode - so a layer can use all three at once (Multiply, then Nand, then
+Screen, for example). A pixel's alpha is the strength of the result, so
+transparent pixels leave the stack alone. The **Opacity** slider blends the
+active layer without changing its stored pixels. New layers start with no
+operation, no gate and no blend, so drawing covers instead of combining.
 
 Both views show the flattened result. The Dump tab, byte tools and Copy block
 work on the active layer. **New**, **Copy**, **Delete**, **Raise** and **Lower**
@@ -459,8 +470,8 @@ shows as a header row above its members: double-click the header to hide or show
 the whole group, **Fold / unfold group** collapses it, and **Ungroup** releases
 the layers. Group names and layer names are both editable with **Rename** (or
 `F2`). **Merge down** combines the active layer into the one below using its
-operation and opacity, and **Merge group** flattens a whole group into one
-layer. A group's name, visibility and opacity are saved in the `.h2p` project.
+operation, blend mode and opacity, and **Merge group** flattens a whole group
+into one layer. A group's name, visibility and opacity are saved in the `.h2p` project.
 
 ## Canvas and documents
 
@@ -504,9 +515,10 @@ sampling, set the PPI stored in the file, keep or drop transparency against a
 matte, and tune JPEG quality, GIF palette size and PNG compression. The docker
 shows the active project file and the resulting pixel size before you write.
 **Variable bits per pixel** switches the panel to custom-depth output: choose
-Raw (none), BMP, BMP V4, BMP V5 or TGA; Indexed or RGB(A); a channel preset or
-per-channel widths; and packed or byte-aligned packing. BMP and TGA headers wrap
-the stream, and indexed modes carry a colour table.
+Raw (none), BMP, BMP V4, BMP V5 or TGA; Indexed or RGB(A); a **Bits/pixel**
+value, refined with a channel preset or the per-channel widths; and packed or
+byte-aligned packing. BMP and TGA headers wrap the stream, and indexed modes
+carry a colour table.
 
 **File > Open…** recognizes `.h2p` automatically. Once a document is a `.h2p`,
 `Ctrl+S` saves the project instead of flattening it to an image.
@@ -538,9 +550,11 @@ alpha intact.
 **Variable bits per pixel** in the Export docker turns on the custom encoder.
 Its **Header** value can be **Raw (none)** for the values only, **BMP**, **BMP
 V4** or **BMP V5** for a BMP file header, or **TGA** for a TGA 2.0 header. BMP
-and TGA add a colour table for indexed output and wrap the packed payload;
-nonstandard RGB depths are written as declared for tools that understand the
-custom layout. Choose **Indexed** (1–8 bits per pixel on an adaptive palette) or
+and TGA add a colour table for indexed output and store RGB pixels in a
+container the format defines, so every wrapped file reopens in an ordinary
+viewer: totals up to 16 bits become 16-bit 5:5:5 or 5:6:5 pixels, larger
+totals become 24 or 32 bits, and indexed depths move to the next colour-table
+depth. **Raw (none)** keeps the exact custom stream. Choose **Indexed** (1–8 bits per pixel on an adaptive palette) or
 **RGB(A)** (0–16 bits per channel, adding up to 32). Channels are written most
 significant bit first in R, G, B, A order and keep the top bits of each 8-bit
 value.
@@ -553,9 +567,11 @@ a byte boundary and zero-fills the high bits instead: 12 bits becomes
 last byte of a packed stream is zero-padded, rows run top to bottom and pixels
 left to right, and the export hint shows the exact byte count.
 
-Presets cover 1:1:1 (3 bpp), 2:2:2 (6), 3:3:2 (8), 4:4:4 (12), 5:5:5 (15),
-5:6:5 (16), 6:6:6 (18), 8:8:8 (24), 10:10:10 (30) and 8:8:8:8 (32); any other
-split can be typed into the R/G/B/A fields. Indexed output uses the same kind
+**Bits/pixel** takes any total from 1 to 32 and spreads it over the channels,
+giving a spare bit to green first, so 8 bpp comes out as 3:3:2 and 16 bpp as
+5:6:5. The common totals also have presets: 1:1:1 (3 bpp), 2:2:2 (6), 3:3:2 (8),
+4:4:4 (12), 5:5:5 (15), 5:6:5 (16), 6:6:6 (18), 8:8:8 (24), 10:10:10 (30) and
+8:8:8:8 (32); any other split can be typed into the R/G/B/A fields. Indexed output uses the same kind
 of adaptive palette as GIF, so a 1 bpp export is a two-colour mask.
 
 ## Start page and recent documents

@@ -44,7 +44,9 @@ from .canvas import (ANCHOR_CODES, ANCHOR_LABELS, MAX_SIDE, UNITS, CanvasSpec,
                      apply_spec_to_document, physical_size, px_per_unit,
                      scale_image)
 from .model import (
-    LAYER_OPS, LAYER_OP_LABELS, OPS, OP_LABELS, Bitmap, Document, HexError,
+    LAYER_BLENDS, LAYER_BLEND_BY_LABEL, LAYER_BLEND_LABELS, LAYER_GATES,
+    LAYER_GATE_BY_LABEL, LAYER_GATE_LABELS, LAYER_OP_BY_LABEL,
+    LAYER_OP_LABELS, LAYER_OPS, OPS, OP_LABELS, Bitmap, Document, HexError,
     apply_hue, apply_map, apply_op,
     apply_ramp, block_from_bitmap, clear_region, extract_selection,
     flip_horizontal, flip_vertical, flood_fill, format_dump, hex_str,
@@ -164,6 +166,14 @@ def _bounded(value, low, high, default):
     except (tk.TclError, TypeError, ValueError):
         return default
     return max(low, min(high, value))
+
+
+def _int_value(var, default=0):
+    """Read a widget variable that may be empty while it is being typed in."""
+    try:
+        return int(var.get())
+    except (tk.TclError, TypeError, ValueError):
+        return default
 
 
 class _KeyEvent(object):
@@ -1325,8 +1335,10 @@ class hex2pixApp(tk.Tk):
         self._play_job = None
         self._play_interval = 45
         self.pattern_size = 8
-        self.pattern_cells = [[None] * self.pattern_size
-                              for _ in range(self.pattern_size)]
+        self.pattern_width = self.pattern_size
+        self.pattern_height = self.pattern_size
+        self.pattern_cells = [[None] * self.pattern_width
+                              for _ in range(self.pattern_height)]
         self.pattern_cell_px = 15
         self.symmetry = ""
         self.shape_anchor = None
@@ -1785,10 +1797,24 @@ class hex2pixApp(tk.Tk):
                                command=self.merge_down)
         layer_menu.add_command(label="Merge group", command=self.merge_group)
         layer_menu.add_separator()
+        op_menu = tk.Menu(layer_menu, tearoff=0)
         for op in LAYER_OPS:
-            layer_menu.add_command(
-                label="Operation: %s" % LAYER_OP_LABELS[op],
+            op_menu.add_command(
+                label=LAYER_OP_LABELS[op],
                 command=lambda name=op: self.set_layer_op(name))
+        layer_menu.add_cascade(label="Operation", menu=op_menu)
+        gate_menu = tk.Menu(layer_menu, tearoff=0)
+        for gate in LAYER_GATES:
+            gate_menu.add_command(
+                label=LAYER_GATE_LABELS[gate],
+                command=lambda name=gate: self.set_layer_gate(name))
+        layer_menu.add_cascade(label="Nandgate", menu=gate_menu)
+        blend_menu = tk.Menu(layer_menu, tearoff=0)
+        for blend in LAYER_BLENDS:
+            blend_menu.add_command(
+                label=LAYER_BLEND_LABELS[blend],
+                command=lambda name=blend: self.set_layer_blend(name))
+        layer_menu.add_cascade(label="Blend mode", menu=blend_menu)
         bar.add_cascade(label="Layer", menu=layer_menu)
 
         view_menu = tk.Menu(bar, tearoff=0)
@@ -2296,12 +2322,37 @@ class hex2pixApp(tk.Tk):
         op_row = ttk.Frame(layers)
         op_row.pack(fill="x", pady=(2, 0))
         ttk.Label(op_row, text="Operation").pack(side="left")
-        self.layer_op_var = tk.StringVar(value=LAYER_OP_LABELS["normal"])
-        op_box = ttk.Combobox(op_row, textvariable=self.layer_op_var,
-                              values=[LAYER_OP_LABELS[o] for o in LAYER_OPS],
-                              state="readonly", width=10)
-        op_box.pack(side="right")
-        op_box.bind("<<ComboboxSelected>>", self.on_layer_op)
+        self.layer_op_var = tk.StringVar(value=LAYER_OP_LABELS["none"])
+        self.layer_op_box = ttk.Combobox(
+            op_row, textvariable=self.layer_op_var,
+            values=[LAYER_OP_LABELS[o] for o in LAYER_OPS],
+            state="readonly", width=10)
+        self.layer_op_box.pack(side="right")
+        self.layer_op_box.bind("<<ComboboxSelected>>", self.on_layer_op)
+
+        gate_row = ttk.Frame(layers)
+        gate_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(gate_row, text="Nandgate").pack(side="left")
+        self.layer_gate_var = tk.StringVar(value=LAYER_GATE_LABELS["none"])
+        self.layer_gate_box = ttk.Combobox(
+            gate_row, textvariable=self.layer_gate_var,
+            values=[LAYER_GATE_LABELS[o] for o in LAYER_GATES],
+            state="readonly", width=10)
+        self.layer_gate_box.pack(side="right")
+        self.layer_gate_box.bind("<<ComboboxSelected>>", self.on_layer_gate)
+
+        blend_row = ttk.Frame(layers)
+        blend_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(blend_row, text="Blend").pack(side="left")
+        self.layer_blend_var = tk.StringVar(
+            value=LAYER_BLEND_LABELS["none"])
+        self.layer_blend_box = ttk.Combobox(
+            blend_row, textvariable=self.layer_blend_var,
+            values=[LAYER_BLEND_LABELS[o] for o in LAYER_BLENDS],
+            state="readonly", width=10)
+        self.layer_blend_box.pack(side="right")
+        self.layer_blend_box.bind("<<ComboboxSelected>>",
+                                  self.on_layer_blend)
 
         group_row = ttk.Frame(layers)
         group_row.pack(fill="x", pady=(2, 0))
@@ -2374,9 +2425,11 @@ class hex2pixApp(tk.Tk):
                   wraplength=280).pack(anchor="w", pady=(6, 0))
         ttk.Label(layers,
                   text="A layer combines with the layers below it using its "
-                       "operation and opacity. Groups collect layers under a "
+                       "operation, gate and blend mode plus opacity. "
+                       "Groups collect layers under a "
                        "named header; a hidden group hides its members. "
-                       "Drag a row to restack it, double-click to show or "
+                       "Drag a row to restack it or drop it on a group "
+                       "header to join that group, double-click to show or "
                        "hide, F2 renames, Alt+G groups. Both views show the "
                        "result; the dump shows the active layer.",
                   foreground="#777", wraplength=280,
@@ -2504,7 +2557,12 @@ class hex2pixApp(tk.Tk):
             value=bitdepth.preset_label(widths))
         self.raw_channel_vars = [tk.IntVar(value=int(widths[index]))
                                  for index in range(4)]
+        self.raw_last_widths = tuple(int(value) for value in widths)
         self.raw_depth_var = tk.IntVar(value=int(settings["raw_depth"]))
+        self.raw_bits_var = tk.IntVar(
+            value=int(settings["raw_depth"])
+            if settings["raw_mode"] == "indexed"
+            else sum(int(value) for value in widths))
         self.raw_summary = tk.StringVar(value="")
 
         self.raw_options = ttk.Frame(export)
@@ -2529,7 +2587,17 @@ class hex2pixApp(tk.Tk):
             colour_row, values=bitdepth.RAW_MODES, width=8, state="readonly",
             textvariable=self.raw_mode_var)
         self.raw_mode_box.pack(side="left", padx=(2, 6))
-        self.raw_preset_frame = ttk.Frame(colour_row)
+        ttk.Label(colour_row, text="Bits/pixel").pack(side="left")
+        self.raw_bits_spin = ttk.Spinbox(
+            colour_row, from_=1, to=bitdepth.MAX_BITS, width=4,
+            textvariable=self.raw_bits_var, command=self._raw_bits_changed)
+        self.raw_bits_spin.pack(side="left", padx=(2, 0))
+        self.raw_bits_spin.bind("<Return>",
+                                lambda event: self._raw_bits_changed())
+        self.raw_bits_spin.bind("<KeyRelease>", self._raw_bits_changed)
+        self.raw_bits_spin.bind("<FocusOut>", self._raw_bits_done)
+
+        self.raw_preset_frame = ttk.Frame(self.raw_options)
         ttk.Label(self.raw_preset_frame, text="Preset").pack(side="left")
         self.raw_preset_box = ttk.Combobox(
             self.raw_preset_frame,
@@ -2537,25 +2605,20 @@ class hex2pixApp(tk.Tk):
                                  bitdepth.CHANNEL_PRESETS],
             width=16, state="readonly", textvariable=self.raw_preset_var)
         self.raw_preset_box.pack(side="left", padx=(2, 0))
-        self.raw_depth_frame = ttk.Frame(colour_row)
-        ttk.Label(self.raw_depth_frame, text="Indexed bits").pack(side="left")
-        self.raw_depth_spin = ttk.Spinbox(
-            self.raw_depth_frame, from_=1, to=bitdepth.MAX_INDEX_BITS,
-            width=4, textvariable=self.raw_depth_var,
-            command=self._raw_ui_changed)
-        self.raw_depth_spin.pack(side="left", padx=(2, 0))
 
         self.raw_channel_row = ttk.Frame(self.raw_options)
+        ttk.Label(self.raw_channel_row, text="Channels").pack(side="left")
         self.raw_channel_labels = []
         self.raw_channel_spins = []
         for index, name in enumerate(("R", "G", "B", "A")):
             label = ttk.Label(self.raw_channel_row, text=name)
-            label.pack(side="left")
+            label.pack(side="left", padx=(4, 0))
             spin = ttk.Spinbox(
                 self.raw_channel_row, from_=0,
                 to=bitdepth.MAX_CHANNEL_BITS, width=3,
                 textvariable=self.raw_channel_vars[index])
-            spin.pack(side="left", padx=(1, 5))
+            spin.pack(side="left", padx=(1, 0))
+            spin.bind("<FocusOut>", self._raw_channel_done)
             self.raw_channel_labels.append(label)
             self.raw_channel_spins.append(spin)
             self.raw_channel_vars[index].trace_add(
@@ -2679,8 +2742,8 @@ class hex2pixApp(tk.Tk):
         ttk.Label(pattern, text="Pattern pixels (click paints, right-click skips)"
                   ).pack(anchor="w", pady=(6, 2))
         self.pattern_view = tk.Canvas(
-            pattern, width=self.pattern_size * self.pattern_cell_px,
-            height=self.pattern_size * self.pattern_cell_px,
+            pattern, width=self.pattern_width * self.pattern_cell_px,
+            height=self.pattern_height * self.pattern_cell_px,
             bg="#232326", highlightthickness=1, highlightbackground="#555")
         self.pattern_view.pack(anchor="w")
         self.pattern_view.bind("<Button-1>", self.on_pattern_click)
@@ -4155,7 +4218,9 @@ class hex2pixApp(tk.Tk):
     def paint_at(self, x, y, tool, color=None):
         if tool == "pencil" and self.brush_pattern():
             painted = self.pattern_dab(x, y)
-            self._mark_dirty(x, y, x, y, self.pattern_size // 2 + 1)
+            self._mark_dirty(x, y, x, y,
+                             max(self.pattern_width, self.pattern_height) // 2
+                             + 1)
             return painted
         color = color if color is not None else self.fg
         if tool == "eraser":
@@ -5017,7 +5082,8 @@ class hex2pixApp(tk.Tk):
         cell = self.pattern_cell_px
         x = int(event.x) // cell
         y = int(event.y) // cell
-        if not (0 <= x < self.pattern_size and 0 <= y < self.pattern_size):
+        if not (0 <= x < self.pattern_width
+                and 0 <= y < self.pattern_height):
             return
         erase = erase or bool(event.state & 0x0004)
         self.pattern_cells[y][x] = None if erase else tuple(self.fg)
@@ -5027,8 +5093,8 @@ class hex2pixApp(tk.Tk):
         view = self.pattern_view
         view.delete("all")
         cell = self.pattern_cell_px
-        for y in range(self.pattern_size):
-            for x in range(self.pattern_size):
+        for y in range(self.pattern_height):
+            for x in range(self.pattern_width):
                 color = self.pattern_cells[y][x]
                 fill = ("#%02x%02x%02x" % color[:3]) if color else "#232326"
                 view.create_rectangle(x * cell, y * cell,
@@ -5040,9 +5106,9 @@ class hex2pixApp(tk.Tk):
         if not hasattr(self, "pattern_text"):
             return
         rows = []
-        for y in range(self.pattern_size):
+        for y in range(self.pattern_height):
             row = []
-            for x in range(self.pattern_size):
+            for x in range(self.pattern_width):
                 color = self.pattern_cells[y][x]
                 row.append("." if color is None
                            else "%02X%02X%02X" % color[:3])
@@ -5056,19 +5122,20 @@ class hex2pixApp(tk.Tk):
         except HexError as exc:
             self.report_error(str(exc))
             return
-        size = max(1, min(16, max(block.width, block.height)))
-        self.set_pattern_size(size)
+        width = max(1, min(16, block.width))
+        height = max(1, min(16, block.height))
+        self.set_pattern_shape(width, height)
         for y, row in enumerate(block.rows):
-            if y >= size:
+            if y >= height:
                 continue
             for x, pixel in enumerate(row):
-                if x >= size:
+                if x >= width:
                     continue
                 try:
                     self.pattern_cells[y][x] = tuple(pixel)
                 except TypeError:
                     self.pattern_cells[y][x] = None
-        self.pattern_size_var.set(size)
+        self.pattern_size_var.set(max(width, height))
         self.draw_pattern_grid()
 
     def apply_pattern_size(self):
@@ -5079,23 +5146,31 @@ class hex2pixApp(tk.Tk):
         self.set_pattern_size(size)
 
     def set_pattern_size(self, size):
-        size = max(1, min(16, int(size)))
+        """Set a square pattern grid, as the Grid control does."""
+        self.set_pattern_shape(size, size)
+
+    def set_pattern_shape(self, width, height):
+        """Resize the pattern grid, keeping the cells that still fit."""
+        width = max(1, min(16, int(width)))
+        height = max(1, min(16, int(height)))
         old = self.pattern_cells
-        cells = [[None] * size for _ in range(size)]
-        for y in range(min(size, len(old))):
-            for x in range(min(size, len(old[y]))):
+        cells = [[None] * width for _ in range(height)]
+        for y in range(min(height, len(old))):
+            for x in range(min(width, len(old[y]))):
                 cells[y][x] = old[y][x]
         self.pattern_cells = cells
-        self.pattern_size = size
+        self.pattern_width = width
+        self.pattern_height = height
+        self.pattern_size = max(width, height)
         if hasattr(self, "pattern_view"):
             self.pattern_view.configure(
-                width=size * self.pattern_cell_px,
-                height=size * self.pattern_cell_px)
+                width=width * self.pattern_cell_px,
+                height=height * self.pattern_cell_px)
             self.draw_pattern_grid()
 
     def pattern_block(self):
-        return block_from_grid(self.pattern_cells, self.pattern_size,
-                               self.pattern_size)
+        return block_from_grid(self.pattern_cells, self.pattern_width,
+                               self.pattern_height)
 
     def pattern_spec(self, mode=None):
         return PatternSpec(
@@ -5133,24 +5208,65 @@ class hex2pixApp(tk.Tk):
         self.pattern_at(x, y, self.pattern_mode.get())
 
     def pattern_from_selection(self):
+        """Capture the selected pixels into the Pattern grid.
+
+        The grid takes the selection's own shape, and anything larger than
+        the 16-pixel grid limit is sampled down instead of cropped.
+        """
         selected = self._selection_piece()
         if selected is None:
             return
         (left, top, width, height), piece = selected
-        size = max(1, min(16, max(width, height)))
-        self.set_pattern_size(size)
-        for y in range(min(size, height)):
-            for x in range(min(size, width)):
-                color = piece.rgba(x, y)
-                self.pattern_cells[y][x] = color if color[3] else None
-        self.pattern_size_var.set(size)
+        step = max(1, -(-max(width, height) // 16))
+        grid_w = max(1, min(16, -(-width // step)))
+        grid_h = max(1, min(16, -(-height // step)))
+        self.set_pattern_shape(grid_w, grid_h)
+        for y in range(grid_h):
+            for x in range(grid_w):
+                self.pattern_cells[y][x] = self._pattern_cell(
+                    piece, x, y, step, width, height)
+        self.pattern_size_var.set(max(grid_w, grid_h))
         self.draw_pattern_grid()
+        self.show_pattern_docker()
         self.pattern_info.set("pattern loaded from %d,%d %dx%d"
                               % (left, top, width, height))
 
+    @staticmethod
+    def _pattern_cell(piece, x, y, step, width, height):
+        """Average one block of the selection, ignoring transparent pixels."""
+        red = green = blue = alpha = count = 0
+        for py in range(y * step, min((y + 1) * step, height)):
+            for px in range(x * step, min((x + 1) * step, width)):
+                pixel = piece.rgba(px, py)
+                if not pixel[3]:
+                    continue
+                red += pixel[0]
+                green += pixel[1]
+                blue += pixel[2]
+                alpha += pixel[3]
+                count += 1
+        if not count:
+            return None
+        return (red // count, green // count, blue // count,
+                alpha // count)
+
+    def show_pattern_docker(self):
+        """Bring the Pattern docker forward after capturing a pattern."""
+        tab = getattr(self, "docker_tabs", {}).get("pattern")
+        if tab is None:
+            return
+        self.set_docker_visible("pattern", True)
+        var = self.docker_vars.get("pattern")
+        if var is not None:
+            var.set(True)
+        try:
+            self.notebook.select(tab)
+        except tk.TclError:
+            pass
+
     def clear_pattern(self):
-        self.pattern_cells = [[None] * self.pattern_size
-                              for _ in range(self.pattern_size)]
+        self.pattern_cells = [[None] * self.pattern_width
+                              for _ in range(self.pattern_height)]
         self.draw_pattern_grid()
         self.pattern_info.set("")
 
@@ -5837,19 +5953,24 @@ class hex2pixApp(tk.Tk):
         self._format_changed()
 
     def _raw_refresh_fields(self):
-        """Show the preset, custom channels or indexed depth for the mode."""
-        if not hasattr(self, "raw_preset_frame"):
+        """Show the bits field that fits the mode: depth or channel widths."""
+        if not hasattr(self, "raw_bits_spin"):
             return
-        self.raw_preset_frame.pack_forget()
-        self.raw_depth_frame.pack_forget()
-        self.raw_channel_row.pack_forget()
-        if self.raw_mode_var.get() == "Indexed":
-            self.raw_depth_frame.pack(side="left")
+        indexed = self.raw_mode_var.get() == "Indexed"
+        self.raw_bits_spin.configure(
+            from_=1,
+            to=bitdepth.MAX_INDEX_BITS if indexed else bitdepth.MAX_BITS)
+        self._raw_sync_bits(indexed)
+        if indexed:
+            self.raw_preset_frame.pack_forget()
+            self.raw_channel_row.pack_forget()
             return
-        self.raw_preset_frame.pack(side="left")
-        if self.raw_preset_var.get() == "Custom":
+        if not self.raw_channel_row.winfo_manager():
             self.raw_channel_row.pack(fill="x", pady=1,
                                       before=self.raw_summary_label)
+        if not self.raw_preset_frame.winfo_manager():
+            self.raw_preset_frame.pack(fill="x", pady=1,
+                                       before=self.raw_channel_row)
 
     def _sync_raw_extension(self):
         """Keep the path extension in step with the chosen header."""
@@ -5865,6 +5986,7 @@ class hex2pixApp(tk.Tk):
         if not hasattr(self, "raw_header_var"):
             return
         self.raw_settings = dict(self._raw_settings())
+        self.raw_last_widths = self.raw_settings["raw_channels"]
         self._raw_refresh_fields()
         if self._export_format()["key"] == "raw":
             self._sync_raw_extension()
@@ -5883,10 +6005,73 @@ class hex2pixApp(tk.Tk):
                 break
         self._raw_ui_changed()
 
+    def _raw_channel_values(self):
+        """The four channel widths, empty boxes keeping their last value."""
+        last = getattr(self, "raw_last_widths", (0, 0, 0, 0))
+        values = []
+        for index, var in enumerate(self.raw_channel_vars):
+            value = _int_value(var, None)
+            if value is None:
+                value = last[index] if index < len(last) else 0
+            values.append(_bounded(value, 0, bitdepth.MAX_CHANNEL_BITS, 0))
+        return tuple(values)
+
+    def _raw_sync_bits(self, indexed=None):
+        """Point the Bits/pixel field at the depth or the channel total."""
+        if indexed is None:
+            indexed = self.raw_mode_var.get() == "Indexed"
+        if indexed:
+            total = _bounded(_int_value(self.raw_depth_var, 8), 1,
+                             bitdepth.MAX_INDEX_BITS, 8)
+        else:
+            total = sum(self._raw_channel_values())
+        self.raw_bits_var.set(total)
+
+    def _raw_bits_changed(self, event=None):
+        """Set the whole pixel depth from the Bits/pixel field."""
+        if getattr(self, "_raw_syncing", False):
+            return
+        total = _int_value(self.raw_bits_var, None)
+        if total is None:
+            return
+        if self.raw_mode_var.get() == "Indexed":
+            self.raw_depth_var.set(
+                _bounded(total, 1, bitdepth.MAX_INDEX_BITS, 8))
+            self._raw_ui_changed()
+            return
+        widths = bitdepth.widths_for_total(
+            _bounded(total, 1, bitdepth.MAX_BITS, 8),
+            self._raw_channel_values())
+        self._raw_syncing = True
+        try:
+            for var, bits in zip(self.raw_channel_vars, widths):
+                var.set(bits)
+        finally:
+            self._raw_syncing = False
+        self.raw_preset_var.set(bitdepth.preset_label(widths))
+        self._raw_ui_changed()
+
+    def _raw_bits_done(self, event=None):
+        """Refill an emptied Bits/pixel box when the control is left."""
+        if _int_value(self.raw_bits_var, None) is None:
+            self._raw_sync_bits()
+            self._raw_ui_changed()
+            return
+        self._raw_bits_changed()
+
     def _raw_channel_edited(self):
         if getattr(self, "_raw_syncing", False):
             return
-        self.raw_preset_var.set("Custom")
+        widths = self._raw_channel_values()
+        self.raw_preset_var.set(bitdepth.preset_label(widths))
+        self._raw_ui_changed()
+
+    def _raw_channel_done(self, event=None):
+        """Put back the last value of an emptied channel box."""
+        widths = self._raw_channel_values()
+        for var, bits in zip(self.raw_channel_vars, widths):
+            if _int_value(var, None) is None:
+                var.set(bits)
         self._raw_ui_changed()
 
     def _raw_settings(self):
@@ -5923,10 +6108,9 @@ class hex2pixApp(tk.Tk):
                 "aligned" if self.raw_packing_var.get() == "Aligned"
                 else "packed")
             settings["raw_depth"] = _bounded(
-                self.raw_depth_var.get(), 1, bitdepth.MAX_INDEX_BITS, 8)
-            settings["raw_channels"] = tuple(
-                _bounded(var.get(), 0, bitdepth.MAX_CHANNEL_BITS, 0)
-                for var in self.raw_channel_vars)
+                _int_value(self.raw_depth_var, 8), 1,
+                bitdepth.MAX_INDEX_BITS, 8)
+            settings["raw_channels"] = self._raw_channel_values()
         return settings
 
     def _update_export_options(self, event=None):
@@ -6012,12 +6196,19 @@ class hex2pixApp(tk.Tk):
             else:
                 bits = sum(settings["raw_channels"])
                 palette = 0
-            trimmed += "; %d bytes %s at %d bpp %s" % (
-                formats.raw_size(width * scale, height * scale, bits,
-                                 settings["raw_packing"],
-                                 settings["raw_header"], palette),
-                bitdepth.header_label(settings["raw_header"]), bits,
-                settings["raw_packing"])
+            size = formats.raw_size(width * scale, height * scale, bits,
+                                    settings["raw_packing"],
+                                    settings["raw_header"], palette,
+                                    settings["raw_mode"],
+                                    settings["raw_depth"],
+                                    settings["raw_channels"])
+            if settings["raw_header"] == "raw":
+                trimmed += "; %d bytes raw at %d bpp %s" % (
+                    size, bits, settings["raw_packing"])
+            else:
+                # A header stores a legal container, so do not name a depth.
+                trimmed += "; %d bytes %s" % (
+                    size, bitdepth.header_label(settings["raw_header"]))
         self.export_hint.set("%d x %d px -> %d x %d px%s"
                              % (width, height, width * scale,
                                 height * scale, trimmed))
@@ -6906,10 +7097,14 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------ layers
     def layer_row_text(self, index, layer):
-        text = "%s%s %d  %s  %s" % (
+        text = "%s%s %d  %s" % (
             "    " if layer.group else "",
-            "\u25cf" if layer.visible else "\u25cb", index + 1,
-            layer.name, LAYER_OP_LABELS.get(layer.op, layer.op))
+            "\u25cf" if layer.visible else "\u25cb", index + 1, layer.name)
+        for value, labels in ((layer.op, LAYER_OP_LABELS),
+                              (layer.gate, LAYER_GATE_LABELS),
+                              (layer.blend, LAYER_BLEND_LABELS)):
+            if value != "none":
+                text += "  %s" % labels.get(value, value)
         if layer.alpha < 255:
             text += "  %d%%" % int(round(layer.alpha * 100 / 255.0))
         if not layer.visible:
@@ -6980,7 +7175,10 @@ class hex2pixApp(tk.Tk):
         self.layer_list.selection_set(selected)
         self.layer_list.see(selected)
         layer = self.doc.active_layer
-        self.layer_op_var.set(LAYER_OP_LABELS.get(layer.op, "Normal"))
+        self.layer_op_var.set(LAYER_OP_LABELS.get(layer.op, "None"))
+        self.layer_gate_var.set(LAYER_GATE_LABELS.get(layer.gate, "None"))
+        self.layer_blend_var.set(
+            LAYER_BLEND_LABELS.get(layer.blend, "None"))
         self.layer_visible_var.set(bool(layer.visible))
         self.sync_layer_alpha(layer)
         self.sync_layer_group(layer)
@@ -7047,17 +7245,44 @@ class hex2pixApp(tk.Tk):
         self.layers_changed()
 
     def on_layer_op(self, event=None):
-        label = self.layer_op_var.get()
-        for op, text in LAYER_OP_LABELS.items():
-            if text == label:
-                self.set_layer_op(op)
-                return
+        op = LAYER_OP_BY_LABEL.get(self.layer_op_var.get())
+        if op:
+            self.set_layer_op(op)
 
     def set_layer_op(self, op):
-        if not op or op == self.doc.active_layer.op:
+        """Set the layer's arithmetic operation."""
+        if op not in LAYER_OPS or op == self.doc.active_layer.op:
             return
         before = self.doc.begin()
         self.doc.active_layer.op = op
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def on_layer_gate(self, event=None):
+        gate = LAYER_GATE_BY_LABEL.get(self.layer_gate_var.get())
+        if gate:
+            self.set_layer_gate(gate)
+
+    def set_layer_gate(self, gate):
+        """Set the layer's bitwise gate."""
+        if gate not in LAYER_GATES or gate == self.doc.active_layer.gate:
+            return
+        before = self.doc.begin()
+        self.doc.active_layer.gate = gate
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def on_layer_blend(self, event=None):
+        blend = LAYER_BLEND_BY_LABEL.get(self.layer_blend_var.get())
+        if blend:
+            self.set_layer_blend(blend)
+
+    def set_layer_blend(self, blend):
+        """Set the layer's blend mode."""
+        if blend not in LAYER_BLENDS or blend == self.doc.active_layer.blend:
+            return
+        before = self.doc.begin()
+        self.doc.active_layer.blend = blend
         self.doc.commit(before)
         self.layers_changed()
 
@@ -7183,11 +7408,13 @@ class hex2pixApp(tk.Tk):
         self.doc.commit(before)
         self.layers_changed()
 
-    def move_layer_to(self, target, index=None):
-        """Restack a layer at `target`; used by dragging a row."""
+    def move_layer_to(self, target, index=None, group=None):
+        """Restack a layer at `target`, moving it into `group` when given."""
         before = self.doc.begin()
-        if not self.doc.reorder_layer(target, index):
+        if not self.doc.move_layer_to(target, index, group):
             return
+        if group:
+            getattr(self, "_collapsed_groups", set()).discard(group)
         self.doc.commit(before)
         self.layers_changed()
 
@@ -7197,7 +7424,7 @@ class hex2pixApp(tk.Tk):
                                 if event is not None else None)
 
     def end_layer_drag(self, event=None):
-        """Drop a dragged row onto another row to move that layer there."""
+        """Drop a dragged row: restack it, or join the group it lands on."""
         row = getattr(self, "_layer_drag_row", None)
         self._layer_drag_row = None
         if event is None or row is None or row < 0:
@@ -7211,9 +7438,19 @@ class hex2pixApp(tk.Tk):
             return
         kind, source = rows[row]
         target_kind, target = rows[target_row]
-        if kind != "layer" or target_kind != "layer":
+        if kind != "layer":
             return
-        self.move_layer_to(target, source)
+        if target_kind == "group":
+            members = self.doc.group_members(target)
+            if not members or self.doc.layers[source].group == target:
+                return
+            # Land on top of that group's block so its header stays above the
+            # layer the drop just brought in.
+            self.move_layer_to(members[-1], source, target)
+            return
+        # Landing on a row adopts that row's group, so dropping onto an
+        # ungrouped layer is how a layer leaves its group.
+        self.move_layer_to(target, source, self.doc.layers[target].group)
 
     def group_layer(self):
         """Put the active layer in a new group."""
@@ -7224,15 +7461,24 @@ class hex2pixApp(tk.Tk):
         self.layers_changed()
 
     def ungroup_layer(self):
+        """Take the selected layer out of its group, or dissolve the group.
+
+        Selecting a group header ungroups every layer in it; selecting a
+        layer takes just that layer out, so the rest of the group stays.
+        """
         kind, value = self.selected_layer_row()
-        name = value if kind == "group" else self.doc.active_layer.group
-        if not name:
-            self.report_error("The active layer is not in a group.")
-            return
         before = self.doc.begin()
-        if not self.doc.remove_group(name):
-            return
-        getattr(self, "_collapsed_groups", set()).discard(name)
+        if kind == "group":
+            if not self.doc.remove_group(value):
+                return
+            getattr(self, "_collapsed_groups", set()).discard(value)
+        else:
+            layer = self.doc.layers[value]
+            if not layer.group:
+                self.report_error("That layer is not in a group.")
+                return
+            layer.group = ""
+            self.doc.prune_groups()
         self.doc.commit(before)
         self.layers_changed()
 
@@ -7354,9 +7600,11 @@ class hex2pixApp(tk.Tk):
         layer = self.doc.active_layer
         opacity = ("" if layer.alpha >= 255
                    else " %d%%" % int(round(layer.alpha * 100 / 255.0)))
-        mode = "L%d/%d %s%s%s  |  " % (
+        mode = "L%d/%d %s/%s/%s%s%s  |  " % (
             self.doc.layer_index + 1, self.doc.layer_count,
-            LAYER_OP_LABELS.get(layer.op, layer.op), opacity,
+            LAYER_OP_LABELS.get(layer.op, layer.op),
+            LAYER_GATE_LABELS.get(layer.gate, layer.gate),
+            LAYER_BLEND_LABELS.get(layer.blend, layer.blend), opacity,
             "" if layer.visible else " (hidden)")
         if self.playing:
             mode = "PLAY %d/%d  |  " % (self.play_index,
@@ -7639,11 +7887,11 @@ class hex2pixApp(tk.Tk):
             "Ctrl+C / Ctrl+V copy / paste hex block text\n"
             "Ctrl+O / Ctrl+S open / save\n"
             "Ctrl+E          save / export docker\n"
-            "Ctrl+Shift+N    new layer (Normal operation)\n"
+            "Ctrl+Shift+N    new layer (no operation, gate or blend)\n"
             "Alt+N / Alt+C   new layer / copy layer\n"
             "Alt+Delete      delete the active layer\n"
             "Alt+Up/Alt+Down restack the active layer\n"
-            "Layers tab      Normal / Add / Subtract / Multiply / Divide,\n"
+            "Layers tab      operation gate and blend mode,\n"
             "                New / Copy / Delete / Raise / Lower; the\n"
             "                Opacity slider blends the active layer;\n"
             "                drag a row to restack, double-click shows/hides\n"

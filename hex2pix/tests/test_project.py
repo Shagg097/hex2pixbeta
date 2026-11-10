@@ -24,7 +24,8 @@ class ProjectTest(unittest.TestCase):
                             alpha=False)
         document.bitmap.set_rgba(0, 0, (255, 0, 0, 255))
         document.bitmap.set_rgba(2, 1, (0, 255, 0, 128))
-        layer = document.add_layer("Ink", op="multiply")
+        layer = document.add_layer("Ink", op="multiply", gate="nand",
+                                   blend="screen")
         layer.alpha = 128
         layer.group = "Ink"
         document.ensure_group("Ink").alpha = 200
@@ -50,6 +51,8 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(loaded.layers[0].name, "Layer 1")
         self.assertEqual(loaded.layers[1].name, "Ink")
         self.assertEqual(loaded.layers[1].op, "multiply")
+        self.assertEqual(loaded.layers[1].gate, "nand")
+        self.assertEqual(loaded.layers[1].blend, "screen")
         self.assertEqual(loaded.layers[1].alpha, 128)
         self.assertEqual(loaded.layers[1].group, "Ink")
         self.assertEqual(loaded.layers[0].group, "")
