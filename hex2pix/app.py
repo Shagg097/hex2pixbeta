@@ -123,6 +123,7 @@ RAW_DEFAULTS = {
     "raw_depth": 8,
     "raw_channels": (4, 4, 4, 0),
     "raw_packing": "packed",
+    "raw_header": "raw",
 }
 
 
@@ -2440,8 +2441,100 @@ class hex2pixApp(tk.Tk):
                                   state="readonly")
         format_box.pack(fill="x", pady=(0, 4))
         format_box.bind("<<ComboboxSelected>>", self._format_changed)
+        self.format_box = format_box
 
-        ttk.Label(export, text="Source").pack(anchor="w")
+        self.custom_bits_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            export, text="Variable bits per pixel",
+            variable=self.custom_bits_var,
+            command=self._toggle_custom_bits).pack(anchor="w", pady=(0, 2))
+
+        settings = self._raw_settings()
+        widths = list(settings["raw_channels"])
+        self.raw_header_var = tk.StringVar(
+            value=bitdepth.header_label(settings["raw_header"]))
+        self.raw_mode_var = tk.StringVar(
+            value="Indexed" if settings["raw_mode"] == "indexed" else "RGB(A)")
+        self.raw_packing_var = tk.StringVar(
+            value="Aligned" if settings["raw_packing"] == "aligned"
+            else "Packed")
+        self.raw_preset_var = tk.StringVar(
+            value=bitdepth.preset_label(widths))
+        self.raw_channel_vars = [tk.IntVar(value=int(widths[index]))
+                                 for index in range(4)]
+        self.raw_depth_var = tk.IntVar(value=int(settings["raw_depth"]))
+        self.raw_summary = tk.StringVar(value="")
+
+        self.raw_options = ttk.Frame(export)
+        header_row = ttk.Frame(self.raw_options)
+        header_row.pack(fill="x", pady=1)
+        ttk.Label(header_row, text="Header").pack(side="left")
+        self.raw_header_box = ttk.Combobox(
+            header_row,
+            values=[label for label, _key in bitdepth.RAW_HEADERS],
+            width=10, state="readonly", textvariable=self.raw_header_var)
+        self.raw_header_box.pack(side="left", padx=(2, 8))
+        ttk.Label(header_row, text="Packing").pack(side="left")
+        self.raw_packing_box = ttk.Combobox(
+            header_row, values=bitdepth.RAW_PACKINGS, width=8,
+            state="readonly", textvariable=self.raw_packing_var)
+        self.raw_packing_box.pack(side="left", padx=(2, 0))
+
+        colour_row = ttk.Frame(self.raw_options)
+        colour_row.pack(fill="x", pady=1)
+        ttk.Label(colour_row, text="Colour").pack(side="left")
+        self.raw_mode_box = ttk.Combobox(
+            colour_row, values=bitdepth.RAW_MODES, width=8, state="readonly",
+            textvariable=self.raw_mode_var)
+        self.raw_mode_box.pack(side="left", padx=(2, 6))
+        self.raw_preset_frame = ttk.Frame(colour_row)
+        ttk.Label(self.raw_preset_frame, text="Preset").pack(side="left")
+        self.raw_preset_box = ttk.Combobox(
+            self.raw_preset_frame,
+            values=["Custom"] + [label for label, _widths in
+                                 bitdepth.CHANNEL_PRESETS],
+            width=16, state="readonly", textvariable=self.raw_preset_var)
+        self.raw_preset_box.pack(side="left", padx=(2, 0))
+        self.raw_depth_frame = ttk.Frame(colour_row)
+        ttk.Label(self.raw_depth_frame, text="Indexed bits").pack(side="left")
+        self.raw_depth_spin = ttk.Spinbox(
+            self.raw_depth_frame, from_=1, to=bitdepth.MAX_INDEX_BITS,
+            width=4, textvariable=self.raw_depth_var,
+            command=self._raw_ui_changed)
+        self.raw_depth_spin.pack(side="left", padx=(2, 0))
+
+        self.raw_channel_row = ttk.Frame(self.raw_options)
+        self.raw_channel_labels = []
+        self.raw_channel_spins = []
+        for index, name in enumerate(("R", "G", "B", "A")):
+            label = ttk.Label(self.raw_channel_row, text=name)
+            label.pack(side="left")
+            spin = ttk.Spinbox(
+                self.raw_channel_row, from_=0,
+                to=bitdepth.MAX_CHANNEL_BITS, width=3,
+                textvariable=self.raw_channel_vars[index])
+            spin.pack(side="left", padx=(1, 5))
+            self.raw_channel_labels.append(label)
+            self.raw_channel_spins.append(spin)
+            self.raw_channel_vars[index].trace_add(
+                "write", lambda *args: self._raw_channel_edited())
+
+        self.raw_summary_label = ttk.Label(
+            self.raw_options, textvariable=self.raw_summary,
+            foreground="#8ab4f8", wraplength=270)
+        self.raw_summary_label.pack(anchor="w", pady=(2, 0))
+
+        self.raw_header_box.bind("<<ComboboxSelected>>",
+                                 self._raw_ui_changed)
+        self.raw_packing_box.bind("<<ComboboxSelected>>",
+                                  self._raw_ui_changed)
+        self.raw_mode_box.bind("<<ComboboxSelected>>",
+                               self._raw_ui_changed)
+        self.raw_preset_box.bind("<<ComboboxSelected>>",
+                                 self._raw_preset_changed)
+
+        self.export_source_label = ttk.Label(export, text="Source")
+        self.export_source_label.pack(anchor="w")
         self.export_source = tk.StringVar(value=EXPORT_SOURCES[0])
         source_box = ttk.Combobox(export, values=EXPORT_SOURCES,
                                   textvariable=self.export_source,
@@ -2490,7 +2583,7 @@ class hex2pixApp(tk.Tk):
         self.matte_entry.pack(side="right")
         ttk.Label(alpha_row, text="Matte").pack(side="right", padx=2)
 
-        quality_row = ttk.Frame(export)
+        self.quality_row = quality_row = ttk.Frame(export)
         quality_row.pack(fill="x", pady=(4, 0))
         ttk.Label(quality_row, text="JPEG quality").pack(side="left")
         self.quality_var = tk.IntVar(value=92)
@@ -2498,7 +2591,7 @@ class hex2pixApp(tk.Tk):
                                         textvariable=self.quality_var)
         self.quality_spin.pack(side="right")
 
-        gif_row = ttk.Frame(export)
+        self.gif_row = gif_row = ttk.Frame(export)
         gif_row.pack(fill="x", pady=2)
         ttk.Label(gif_row, text="GIF colours").pack(side="left")
         self.gif_colors_var = tk.IntVar(value=256)
@@ -2507,7 +2600,7 @@ class hex2pixApp(tk.Tk):
                                    textvariable=self.gif_colors_var)
         self.gif_spin.pack(side="right")
 
-        png_row = ttk.Frame(export)
+        self.png_row = png_row = ttk.Frame(export)
         png_row.pack(fill="x", pady=2)
         ttk.Label(png_row, text="PNG level").pack(side="left")
         self.png_compress_var = tk.IntVar(value=6)
@@ -2515,16 +2608,8 @@ class hex2pixApp(tk.Tk):
                                     textvariable=self.png_compress_var)
         self.png_spin.pack(side="right")
 
-        raw_row = ttk.Frame(export)
-        raw_row.pack(fill="x", pady=2)
-        self.raw_button = ttk.Button(raw_row, text="Raw bits...",
-                                     command=self.edit_raw_bits)
-        self.raw_button.pack(side="left")
-        self.raw_summary = tk.StringVar(value="")
-        ttk.Label(raw_row, textvariable=self.raw_summary,
-                  foreground="#9fb3c8").pack(side="right")
-
-        ttk.Label(export, text="Path").pack(anchor="w", pady=(4, 0))
+        self.path_label = ttk.Label(export, text="Path")
+        self.path_label.pack(anchor="w", pady=(4, 0))
         self.export_path = tk.StringVar(value="")
         ttk.Entry(export, textvariable=self.export_path).pack(fill="x")
         ttk.Button(export, text="Browse...", command=self.browse_export).pack(
@@ -5532,19 +5617,95 @@ class hex2pixApp(tk.Tk):
         return formats.FORMAT_BY_LABEL.get(self.format_var.get(),
                                            formats.FORMATS[0])
 
+    def _export_extension(self):
+        item = self._export_format()
+        if item["key"] == "raw":
+            return bitdepth.header_ext(self._raw_settings()["raw_header"])
+        return item["ext"]
+
     def _format_changed(self, event=None):
         item = self._export_format()
+        if hasattr(self, "custom_bits_var"):
+            self.custom_bits_var.set(item["key"] == "raw")
         path = self.export_path.get().strip()
+        extension = self._export_extension()
         if path:
             stem, ext = os.path.splitext(path)
-            if ext.lower() != item["ext"]:
-                self.export_path.set(stem + item["ext"])
+            if ext.lower() != extension:
+                self.export_path.set(stem + extension)
         self._update_export_options()
 
+    def _toggle_custom_bits(self):
+        """Toggle the raw-bit encoder on and off from the Export panel."""
+        raw_label = formats.FORMAT_BY_KEY["raw"]["label"]
+        if self.custom_bits_var.get():
+            if self.format_var.get() != raw_label:
+                self._format_before_raw = self.format_var.get()
+                self.format_var.set(raw_label)
+        elif self.format_var.get() == raw_label:
+            self.format_var.set(getattr(self, "_format_before_raw",
+                                        formats.FORMAT_LABELS[0]))
+        self._format_changed()
+
+    def _raw_refresh_fields(self):
+        """Show the preset, custom channels or indexed depth for the mode."""
+        if not hasattr(self, "raw_preset_frame"):
+            return
+        self.raw_preset_frame.pack_forget()
+        self.raw_depth_frame.pack_forget()
+        self.raw_channel_row.pack_forget()
+        if self.raw_mode_var.get() == "Indexed":
+            self.raw_depth_frame.pack(side="left")
+            return
+        self.raw_preset_frame.pack(side="left")
+        if self.raw_preset_var.get() == "Custom":
+            self.raw_channel_row.pack(fill="x", pady=1,
+                                      before=self.raw_summary_label)
+
+    def _sync_raw_extension(self):
+        """Keep the path extension in step with the chosen header."""
+        path = self.export_path.get().strip()
+        if not path:
+            return
+        stem, ext = os.path.splitext(path)
+        if ext.lower() in (".raw", ".bmp", ".tga"):
+            self.export_path.set(
+                stem + bitdepth.header_ext(self._raw_settings()["raw_header"]))
+
+    def _raw_ui_changed(self, event=None):
+        if not hasattr(self, "raw_header_var"):
+            return
+        self.raw_settings = dict(self._raw_settings())
+        self._raw_refresh_fields()
+        if self._export_format()["key"] == "raw":
+            self._sync_raw_extension()
+        self._update_export_options()
+
+    def _raw_preset_changed(self, event=None):
+        label = self.raw_preset_var.get()
+        for name, widths in bitdepth.CHANNEL_PRESETS:
+            if name == label:
+                self._raw_syncing = True
+                try:
+                    for var, bits in zip(self.raw_channel_vars, widths):
+                        var.set(bits)
+                finally:
+                    self._raw_syncing = False
+                break
+        self._raw_ui_changed()
+
+    def _raw_channel_edited(self):
+        if getattr(self, "_raw_syncing", False):
+            return
+        self.raw_preset_var.set("Custom")
+        self._raw_ui_changed()
+
     def _raw_settings(self):
-        """The raw bit-depth options last chosen in the dialog."""
+        """The raw bit-depth options built into the Export panel."""
         settings = dict(RAW_DEFAULTS)
         settings.update(getattr(self, "raw_settings", None) or {})
+        settings["raw_header"] = bitdepth.header_key(
+            settings.get("raw_header"))
         settings["raw_depth"] = _bounded(settings.get("raw_depth", 8), 1,
                                          bitdepth.MAX_INDEX_BITS, 8)
         try:
@@ -5562,20 +5723,33 @@ class hex2pixApp(tk.Tk):
         settings["raw_packing"] = (
             "aligned" if str(settings.get("raw_packing", "packed")).lower()
             == "aligned" else "packed")
+        if hasattr(self, "raw_header_var"):
+            settings["raw_header"] = bitdepth.header_key(
+                bitdepth.RAW_HEADER_BY_LABEL.get(
+                    self.raw_header_var.get(), self.raw_header_var.get()))
+            settings["raw_mode"] = (
+                "indexed" if self.raw_mode_var.get() == "Indexed"
+                else "rgb")
+            settings["raw_packing"] = (
+                "aligned" if self.raw_packing_var.get() == "Aligned"
+                else "packed")
+            settings["raw_depth"] = _bounded(
+                self.raw_depth_var.get(), 1, bitdepth.MAX_INDEX_BITS, 8)
+            settings["raw_channels"] = tuple(
+                _bounded(var.get(), 0, bitdepth.MAX_CHANNEL_BITS, 0)
+                for var in self.raw_channel_vars)
         return settings
-
-    def edit_raw_bits(self):
-        dialog = RawBitsDialog(self, self._raw_settings())
-        self.wait_window(dialog)
-        if dialog.result:
-            self.raw_settings = dict(dialog.result)
-        self._update_export_options()
 
     def _update_export_options(self, event=None):
         if not hasattr(self, "matte_entry"):
             return
         item = self._export_format()
         key = item["key"]
+        raw = key == "raw"
+        if hasattr(self, "custom_bits_var"):
+            self.custom_bits_var.set(raw)
+        if hasattr(self, "format_box"):
+            self.format_box.state(["disabled"] if raw else ["!disabled"])
         if item["alpha"]:
             self.alpha_check.state(["!disabled"])
             keep = bool(self.export_alpha.get())
@@ -5587,17 +5761,34 @@ class hex2pixApp(tk.Tk):
                                (self.gif_spin, key == "gif"),
                                (self.png_spin, key == "png")):
             widget.state(["!disabled"] if active else ["disabled"])
-        raw = key == "raw"
-        self.raw_button.state(["!disabled"] if raw else ["disabled"])
+        for row, pady in ((self.quality_row, (4, 0)), (self.gif_row, 2),
+                          (self.png_row, 2)):
+            if raw:
+                row.pack_forget()
+            elif not row.winfo_manager():
+                row.pack(fill="x", pady=pady, before=self.path_label)
+        if hasattr(self, "raw_options"):
+            if raw:
+                if not self.raw_options.winfo_manager():
+                    self.raw_options.pack(fill="x", pady=1,
+                                          before=self.export_source_label)
+                self._raw_refresh_fields()
+            else:
+                self.raw_options.pack_forget()
         if raw:
             settings = self._raw_settings()
+            header = bitdepth.header_label(settings["raw_header"])
+            packing = settings["raw_packing"]
             if settings["raw_mode"] == "indexed":
-                bits = settings["raw_depth"]
-                label = "indexed"
+                label = "%d bpp indexed, %s, %s" % (
+                    settings["raw_depth"], header, packing)
             else:
-                bits = sum(settings["raw_channels"])
-                label = "RGB"
-            self.raw_summary.set("%d bpp %s" % (bits, label))
+                widths = settings["raw_channels"]
+                used = widths if widths[3] else widths[:3]
+                label = "%s, %d bpp %s, %s" % (
+                    ":".join(str(value) for value in used),
+                    sum(widths), packing, header)
+            self.raw_summary.set(label)
         else:
             self.raw_summary.set("")
         self._update_export_hint()
@@ -5628,12 +5819,16 @@ class hex2pixApp(tk.Tk):
             settings = self._raw_settings()
             if settings["raw_mode"] == "indexed":
                 bits = settings["raw_depth"]
+                palette = 1 << bits
             else:
                 bits = sum(settings["raw_channels"])
-            trimmed += "; %d bytes at %d bpp %s" % (
-                bitdepth.byte_size(width * scale, height * scale, bits,
-                                   settings["raw_packing"]),
-                bits, settings["raw_packing"])
+                palette = 0
+            trimmed += "; %d bytes %s at %d bpp %s" % (
+                formats.raw_size(width * scale, height * scale, bits,
+                                 settings["raw_packing"],
+                                 settings["raw_header"], palette),
+                bitdepth.header_label(settings["raw_header"]), bits,
+                settings["raw_packing"])
         self.export_hint.set("%d x %d px -> %d x %d px%s"
                              % (width, height, width * scale,
                                 height * scale, trimmed))
@@ -5641,28 +5836,31 @@ class hex2pixApp(tk.Tk):
     def _set_default_export_path(self):
         item = (self._export_format() if hasattr(self, "format_var")
                 else formats.FORMATS[0])
+        extension = self._export_extension() if hasattr(self, "format_var") \
+            else item["ext"]
         if self.doc.path:
-            base = os.path.splitext(self.doc.path)[0] + item["ext"]
+            base = os.path.splitext(self.doc.path)[0] + extension
         else:
             base = os.path.join(os.path.expanduser("~"),
-                                "hex2pix" + item["ext"])
+                                "hex2pix" + extension)
         self.export_path.set(base)
         self.refresh_export_panel()
 
     def browse_export(self):
         item = self._export_format()
+        extension = self._export_extension()
         current = self.export_path.get().strip()
         if current:
-            guess = os.path.splitext(current)[0] + item["ext"]
+            guess = os.path.splitext(current)[0] + extension
         elif self.doc.path:
-            guess = os.path.splitext(self.doc.path)[0] + item["ext"]
+            guess = os.path.splitext(self.doc.path)[0] + extension
         else:
-            guess = "hex2pix" + item["ext"]
+            guess = "hex2pix" + extension
         path = filedialog.asksaveasfilename(
             parent=self, title="Export image",
             initialfile=os.path.basename(guess),
-            defaultextension=item["ext"],
-            filetypes=[(item["label"], "*" + item["ext"]),
+            defaultextension=extension,
+            filetypes=[(item["label"], "*" + extension),
                        ("All files", "*.*")])
         if path:
             self.export_path.set(path)
@@ -5697,7 +5895,7 @@ class hex2pixApp(tk.Tk):
             if not path:
                 return
         item = self._export_format()
-        ext = item["ext"]
+        ext = self._export_extension()
         if not os.path.splitext(path)[1]:
             path += ext
             self.export_path.set(path)

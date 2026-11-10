@@ -34,6 +34,73 @@ MAX_INDEX_BITS = 8
 RAW_MODES = ("Indexed", "RGB(A)")
 RAW_PACKINGS = ("Packed", "Aligned")
 
+# Header wrappers for the custom-bit-depth stream. "raw" is headerless; the
+# BMP variants differ only in the size of their info header, and TGA writes a
+# TGA 2.0 header with an optional colour map.
+RAW_HEADERS = (
+    ("Raw (none)", "raw"),
+    ("BMP", "bmp"),
+    ("BMP V4", "bmpv4"),
+    ("BMP V5", "bmpv5"),
+    ("TGA", "tga"),
+)
+RAW_HEADER_KEYS = tuple(key for _label, key in RAW_HEADERS)
+RAW_HEADER_LABELS = {key: label for label, key in RAW_HEADERS}
+RAW_HEADER_BY_LABEL = {label: key for label, key in RAW_HEADERS}
+RAW_HEADER_EXT = {"raw": ".raw", "bmp": ".bmp", "bmpv4": ".bmp",
+                  "bmpv5": ".bmp", "tga": ".tga"}
+
+
+def check_header(header):
+    """Return the canonical header key or raise HexError."""
+    value = str(header or "raw")
+    key = value.lower()
+    for label, candidate in RAW_HEADERS:
+        if value.lower() == label.lower():
+            return candidate
+    if key not in RAW_HEADER_KEYS:
+        raise HexError("unknown raw header: %s" % header)
+    return key
+
+
+def header_key(value):
+    """Best-effort header key for UI values without raising."""
+    try:
+        return check_header(value)
+    except HexError:
+        return "raw"
+
+
+def header_label(key):
+    """Human label for a header key."""
+    return RAW_HEADER_LABELS.get(header_key(key), RAW_HEADER_LABELS["raw"])
+
+
+def header_ext(key):
+    """File extension for a header key."""
+    return RAW_HEADER_EXT[header_key(key)]
+
+
+def preset_label(widths):
+    """The channel preset matching `widths`, or Custom."""
+    packed = tuple(int(value) for value in widths)
+    for label, preset in CHANNEL_PRESETS:
+        if preset == packed:
+            return label
+    return "Custom"
+
+
+def channel_masks(widths):
+    """R/G/B/A bit masks for a most-significant-bit-first sample layout."""
+    masks = [0, 0, 0, 0]
+    shift = 0
+    for index in range(3, -1, -1):
+        width = int(widths[index])
+        if width:
+            masks[index] = ((1 << width) - 1) << shift
+        shift += width
+    return tuple(masks)
+
 # Label, (red, green, blue, alpha) bit widths. The alpha channel is optional.
 CHANNEL_PRESETS = (
     ("1:1:1 (3 bpp)", (1, 1, 1, 0)),

@@ -507,9 +507,9 @@ The **Export** docker (**Ctrl+E**) holds saving and exporting in one place.
 half collects the format, source (whole image, current layer, selection, or one
 file per visible layer), trim, scale, sampling, PPI, transparency or matte,
 JPEG quality, GIF colours and PNG level, then **Export image** writes the file
-from the same panel. **Raw bits...** opens a dialog for headerless 1–32 bpp
-output: indexed or RGB(A), per-channel widths, and packed or byte-aligned
-packing.
+from the same panel. **Variable bits per pixel** switches the panel to custom
+depth output, with a header choice (Raw, BMP, BMP V4, BMP V5 or TGA), indexed or
+RGB(A) colour, per-channel widths, and packed or byte-aligned packing.
 
 ## File formats
 
@@ -533,7 +533,7 @@ onto a matte colour, JPEG quality, GIF palette size and PNG compression level.
 | WEBP | yes | lossless |
 | JPEG | no | flattened, quality setting |
 | PPM | no | 24-bit binary `P6` |
-| Raw pixel bits | optional | headerless 1–32 bpp, indexed or RGB(A), packed or byte-aligned |
+| Raw pixel bits | optional | 1–32 bpp, Raw/BMP/BMP V4/BMP V5/TGA headers, indexed or RGB(A), packed or byte-aligned |
 | Hex text | n/a | every pixel as `RRGGBBAA`, `.` for transparent |
 
 BMP and PPM are written by hand rather than by the imaging library, so the
@@ -543,12 +543,16 @@ own BMP parser too, so a file hex2pix wrote reopens with its alpha intact.
 
 ### Raw bits
 
-**Raw pixel bits** writes a headerless 1–32 bpp stream, chosen with **Raw
-bits...**: **Indexed** (1–8 bpp, adaptive palette) or **RGB(A)** (per-channel
-widths). **Packed** runs pixels together MSB first, so 12-bit 4:4:4 is two
-pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`) and 6-bit 2:2:2 is four in
-three (`rrggbbrr ggbbrrgg bbrrggbb`); **Aligned** gives each pixel its own
-bytes with zero high bits (`0000rrrr ggggbbbb` and `00rrggbb`).
+**Variable bits per pixel** in the Export docker turns on the custom encoder.
+The **Header** choice is **Raw (none)** for values only, **BMP**, **BMP V4** or
+**BMP V5** for a BMP file header, or **TGA** for a TGA 2.0 header; indexed
+output gets a colour table. Colour is **Indexed** (1–8 bpp, adaptive palette)
+or **RGB(A)** (per-channel widths). **Packed** runs pixels together MSB first,
+so 12-bit 4:4:4 is two pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`)
+and 6-bit 2:2:2 is four in three (`rrggbbrr ggbbrrgg bbrrggbb`); **Aligned**
+gives each pixel its own bytes with zero high bits (`0000rrrr ggggbbbb` and
+`00rrggbb`). Nonstandard RGB depths are written as declared for custom
+readers; the standard indexed depths produce normal BMP/TGA files.
 
 ## Build the executable
 
@@ -576,7 +580,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 443 tests over the model, the canvas, formats, colours,
+The first command runs 450 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand
