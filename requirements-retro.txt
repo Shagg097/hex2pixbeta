@@ -1,0 +1,8 @@
+# Retro build dependencies: the Windows XP CPython 3.8.20 project publishes
+# 32-bit wheels matched to its interpreter. Pillow 11.0.38 is its XP build
+# (the version number is the fork's own); PyPI's Pillow 10.4 wheel targets
+# newer Windows. cx_Freeze's 5.1-subsystem launcher is what lets the frozen
+# executable start on Windows XP; PyInstaller 6's launcher requires Windows
+# Vista/7 or newer.
+Pillow @ https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/pillow-11.0.38-cp38-cp38-win32.whl
+cx-Freeze @ https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/cx_freeze-7.2.10-cp38-cp38-win32.whl

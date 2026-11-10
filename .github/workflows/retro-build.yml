@@ -1,0 +1,112 @@
+name: Retro build (CPython 3.8.20, 32-bit)
+
+# Retro compatibility line: Windows XP SP3 / Server 2003 through Windows 11.
+# The runtime is R-YaTian's 32-bit CPython 3.8.20, whose python.exe and
+# python38.dll declare a Windows 5.1 subsystem. PyInstaller 6's bootloader
+# declares 6.0, so this branch freezes with cx_Freeze: its launcher declares
+# 5.1 and therefore loads on XP. cx_Freeze has no one-file mode, so the build
+# is a portable folder shipped as a ZIP.
+#
+# Windows XP has no Universal CRT. Install the Visual C++ 2015-2019
+# Redistributable 16.7 (x86) there; it is the last release that supports XP.
+on:
+  push:
+    branches:
+      - retro-compat
+  pull_request:
+    branches:
+      - retro-compat
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test the retro portable folder
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Cache CPython 3.8.20 (32-bit, XP build)
+        uses: actions/cache@v4
+        with:
+          path: .py38
+          key: cpython-3.8.20-winxp-20241202-x86
+
+      - name: Install CPython 3.8.20 (32-bit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ./.py38/python.exe -c "import sys" 2>/dev/null; then
+            echo "using the cached CPython"
+          else
+            rm -rf .py38
+            url="https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/python-3.8.20-full.exe"
+            curl --fail --location --silent --show-error \
+              --retry 8 --retry-delay 5 --retry-max-time 300 --connect-timeout 20 \
+              -o py38xp.exe "$url"
+            MSYS_NO_PATHCONV=1 ./py38xp.exe /quiet InstallAllUsers=0 \
+              TargetDir="$(cygpath -w "$PWD/.py38")" \
+              Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 \
+              Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0 || true
+            rm -f py38xp.exe
+          fi
+          test -f .py38/python.exe
+          ./.py38/python.exe -c "import sys, platform, tkinter; assert platform.architecture()[0] == '32bit'; print(sys.version); print('Tk', tkinter.TkVersion)"
+
+      - name: Install retro requirements
+        shell: bash
+        run: ./.py38/python.exe -m pip install --disable-pip-version-check -r requirements-retro.txt
+
+      - name: Run the unit tests
+        shell: bash
+        run: ./.py38/python.exe -m unittest discover -s hex2pix/tests -t .
+
+      - name: Build the retro portable folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./.py38/python.exe packaging/cxfreeze_setup.py build_exe --build-exe dist/hex2pix-retro --silent
+
+      - name: Confirm the launcher and runtime target Windows XP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/hex2pix-retro/python38.dll
+          ./.py38/python.exe - <<'PY'
+          import pefile
+          for path in ("dist/hex2pix-retro/hex2pix.exe",
+                       "dist/hex2pix-retro/python38.dll"):
+              pe = pefile.PE(path, fast_load=True)
+              assert pe.FILE_HEADER.Machine == 0x14C, path
+              if path.endswith(".exe"):
+                  oh = pe.OPTIONAL_HEADER
+                  assert (oh.MajorSubsystemVersion, oh.MinorSubsystemVersion) <= (5, 1), path
+                  print(path, "32-bit, subsystem",
+                        oh.MajorSubsystemVersion, oh.MinorSubsystemVersion)
+          PY
+
+      - name: Smoke-test the retro build
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist/hex2pix-retro/hex2pix.exe --selftest
+          grep -q "RESULT: PASS" hex2pix-selftest.txt
+          grep -q "manual=True" hex2pix-selftest.txt
+          rm -f hex2pix-selftest.txt
+
+      - name: Zip the retro folder
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/hex2pix-retro/hex2pix.exe)) {
+            throw "The retro folder build is missing its executable."
+          }
+          Compress-Archive -Path dist/hex2pix-retro -DestinationPath dist/hex2pix-retro.zip -Force
+
+      - name: Upload the retro build
+        uses: actions/upload-artifact@v4
+        with:
+          name: hex2pix-py38-retro-x86
+          path: dist/hex2pix-retro.zip

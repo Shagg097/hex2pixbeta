@@ -569,6 +569,13 @@ needed on the target machine. `packaging\build_exe.cmd` also writes
 runtime DLLs beside the executable, which fixes a start-up failure of the
 single file that reads `Failed to load Python DLL`.
 
+On the `retro-compat` branch, `packaging\cxfreeze_setup.py` builds the
+XP-compatible portable folder instead:
+
+```
+.py38\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
+```
+
 ## Tests
 
 ```

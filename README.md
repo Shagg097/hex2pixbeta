@@ -11,12 +11,11 @@ document can be inspected as a normal image or as a grid of live hex codes.
 The mouse is fully supported for drawing, selecting and navigating. The
 keyboard is the primary instrument.
 
-> **Windows 7 compatibility branch.** This branch, `win7-compat`, keeps the
-> editor identical to `main` but freezes it against **CPython 3.8.20**, the last
-> CPython release with Windows 7 support, so the packaged executable runs on
-> Windows 7 SP1 and newer through WoW64 as well. `main` remains the 3.10 release
-> line. See
-> [Windows 7 compatibility](#windows-7-compatibility).
+> **Retro Windows branch.** This branch, `retro-compat`, keeps the editor
+> identical to `main` but freezes it against **32-bit CPython 3.8.20**, so the
+> portable build runs from Windows XP SP3 / Server 2003 through Windows 11.
+> `main` remains the 3.10 release line. See
+> [Retro Windows compatibility](#retro-windows-compatibility).
 
 
 ![hex2pix editor showing a pixel-art night scene, tool palette, color wheel and layer stack](docs/hex2pix-pixel-view.png)
@@ -56,66 +55,65 @@ This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
 
 ## Install on Windows
 
-**You do not need Python, pip or any other runtime installed.** The release
-executable is a self-contained Windows program: PyInstaller bundles CPython
-3.8.20 (32-bit), Tcl/Tk and Pillow together with the hex2pix code, so it runs on a
-machine that has never had Python on it. There is no installer and nothing to
-add to `PATH` — it is an ordinary windowed `.exe`.
+**You do not need Python, pip or any other runtime installed.** The retro build
+is a self-contained folder: cx_Freeze bundles 32-bit CPython 3.8.20, Tcl/Tk and
+Pillow beside the hex2pix code, so it runs on a machine that has never had
+Python on it. There is no installer and nothing to add to `PATH`.
 
-Download from the
-[Releases page](https://github.com/Shagg097/hex2pixbeta/releases):
+The branch workflow builds `hex2pix-retro.zip` and keeps it as the
+`hex2pix-py38-retro-x86` artifact on the
+[Actions page](https://github.com/Shagg097/hex2pixbeta/actions/workflows/retro-build.yml).
+Unzip it anywhere you can write — Desktop, `D:\Tools`, a USB stick — and run
+`hex2pix.exe` inside the folder. No administrator rights are needed.
 
-| File | Size | Use it when |
-| --- | --- | --- |
-| `hex2pix.exe` | ~18 MB | the usual choice: one file, no console window |
-| `hex2pix-portable.zip` | ~18 MB | antivirus blocks the single file (see below) |
-| [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat) | ~11 MB | Windows 7 SP1 and newer: the 32-bit CPython 3.8.20 `hex2pix.exe`, which also runs on 64-bit Windows (see [below](#windows-7-compatibility)); the same release also carries `hex2pix-portable.zip` |
-
-Put the executable (or the unzipped folder) anywhere you can write — Desktop,
-`D:\Tools`, a USB stick — and double-click it. No administrator rights are
-needed.
-
-- **Requirements:** Windows 7 SP1 or newer, 32-bit or 64-bit. This branch ships a 32-bit executable.
-- **First start takes a few seconds:** the single file unpacks its bundled
-  runtime into `%TEMP%\_MEIxxxxxx` on each start and removes it on exit.
+- **Requirements:** Windows XP SP3 / Server 2003 or newer, 32-bit or 64-bit.
+  Windows XP also needs the **Visual C++ 2015-2019 Redistributable 16.7 (x86)**
+  for the Universal CRT; later redists no longer support XP.
+- **Portable, not one file:** the runtime DLLs stay beside the executable, so
+  nothing is unpacked into `%TEMP%` at start-up.
 - **SmartScreen:** the download is not code-signed, so Windows may show
   "Windows protected your PC". Choose **More info** → **Run anyway**.
 - **No console window:** the executable is built as a GUI program, so no
   terminal opens beside the editor.
+- **32-bit process:** it also runs on 64-bit Windows through WoW64, but the
+  editor is limited to a 32-bit address space.
 
 Python is only needed to run or build from source; see
 [Run from source](#run-from-source) and
 [Build the executable](#build-the-executable).
 
-## Windows 7 compatibility
+## Retro Windows compatibility
 
-`main` freezes CPython 3.10, and CPython has required Windows 8.1 or newer from
-3.10 onward (3.12 and newer need Windows 10). This branch freezes **CPython
-3.8.20** instead, the last CPython release that supports Windows 7, so the same
-editor starts on Windows 7 SP1 and on every later Windows, 32-bit or 64-bit.
+`main` freezes CPython 3.10, which needs Windows 8.1 or newer (3.12 and newer
+need Windows 10). This branch freezes **32-bit CPython 3.8.20** from
+[R-YaTian/CPython3.8.20WinXP](https://github.com/R-YaTian/CPython3.8.20WinXP),
+a build whose interpreter, DLL and Tcl/Tk support Windows XP SP3 and Server 2003
+as well as every later Windows.
 
 The Python source is unchanged: everything under `hex2pix/` is identical to
-`main`, because it already runs on 3.8. Only the frozen toolchain differs, so the
-executable carries the 32-bit `python38.dll` and Tcl/Tk 8.6 rather than
-`python310.dll`. The runtime is R-YaTian's [Windows XP build of CPython
-3.8.20](https://github.com/R-YaTian/CPython3.8.20WinXP), whose interpreter and
-DLL declare a Windows 5.1 subsystem.
+`main`, because it already runs on 3.8. Only the frozen toolchain differs.
 
-PyInstaller 6's bootloader still declares a Windows 6.0 subsystem, so these
-executables start on Windows Vista/7 and newer, not on XP. The
-[`retro-compat` branch](https://github.com/Shagg097/hex2pixbeta/tree/retro-compat)
-fills that gap with cx_Freeze, whose launcher declares 5.1.
+**Why cx_Freeze instead of PyInstaller.** PyInstaller 6's bootloader declares a
+Windows 6.0 subsystem, so its output cannot start on XP even with an XP-capable
+Python. cx_Freeze's launcher declares 5.1, which XP accepts, so this branch
+builds a portable folder with cx_Freeze. cx_Freeze has no one-file mode; the
+folder is shipped as a ZIP and keeps its runtime beside the executable.
 
-Verified on this branch with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
+The Universal CRT is not part of Windows XP. Install the [Visual C++ 2015-2019
+Redistributable 16.7 (x86)](https://learn.microsoft.com/cpp/build/configuring-programs-for-windows-xp)
+there; 16.7 is the last release that supports XP. Windows Vista and 7 normally
+get the UCRT through Windows Update.
+
+Verified with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
 | `python -m unittest discover -s hex2pix/tests -t .` | 443 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
-| `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
-| `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
-| Interpreter inside both builds | 32-bit `python38.dll`, no `python310.dll` |
-| PE header of both executables | 32-bit (`0x14C`), subsystem 6.0 |
+| `packaging/cxfreeze_setup.py` to `dist\hex2pix-retro\` | built, `--selftest` gives `RESULT: PASS`, `manual=True` |
+| Launcher PE header | 32-bit (`0x14C`), subsystem 5.1 |
+| Runtime inside the folder | 32-bit `python38.dll`, Tcl/Tk 8.6 |
+| Windows XP execution | not tested on XP hardware; the launcher and runtime are XP-level |
 
 ### Building it
 
@@ -132,32 +130,35 @@ del py38xp.exe
 .py38\python.exe -c "import tkinter; print('tkinter ok')"
 ```
 
-Then install the pinned requirements into it and call the specs directly, because
-`packaging\build_exe.cmd` builds with whichever interpreter `py -3` resolves to:
+Then install the XP-matched wheels and build the portable folder:
 
 ```bat
-.py38\python.exe -m pip install -r requirements.txt
-.py38\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
-.py38\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
+.py38\python.exe -m pip install -r requirements-retro.txt
+.py38\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
 ```
+
+`requirements-retro.txt` points at the fork's own Pillow and cx_Freeze wheels;
+PyPI's current wheels target newer Windows. If cx_Freeze stops with
+`[WinError 123]` while scanning `PATH`, one entry on `PATH` is malformed — rerun
+the build with a minimal `PATH` containing Windows and `.py38`.
 
 ### What this branch costs
 
-- **Both Windows 7 and the frozen interpreter are out of support.** CPython 3.8
-  reached end of life on 7 October 2024, so no security fix after that date can
-  reach the interpreter inside the executable. Treat this as a compatibility line
-  for machines that cannot move, not as the recommended download.
-- **Dependency ceiling.** Pillow 10.4.0 is the last release that supports 3.8, and
-  `requirements.txt` pins the exact Pillow and PyInstaller versions verified here,
-  so newer library features will not arrive on this branch.
+- **Windows XP, Windows 7 and the frozen interpreter are out of support.**
+  CPython 3.8 reached end of life on 7 October 2024, so no security fix after
+  that date can reach the interpreter inside the folder. Treat this as a
+  compatibility line for machines that cannot move, not as the recommended
+  download.
+- **Dependency ceiling.** Pillow comes from the XP fork (11.0.38) and
+  `requirements-retro.txt` pins the exact wheels verified here, so newer library
+  features will not arrive on this branch.
 - **Distribution.** Version tags on `main` build the 3.10 executable through
   `.github/workflows/release.yml`; this branch is checked by
-  `.github/workflows/win7-build.yml` instead, which publishes this build in the
-  [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat)
-  and keeps each run's files as an `hex2pix-py38-win7-x86` artifact for 90 days.
-- **Windows XP is out of reach here.** PyInstaller's bootloader needs Windows
-  Vista/7 or newer. The `retro-compat` branch carries the same 32-bit CPython
-  runtime but freezes it with cx_Freeze, whose launcher targets XP.
+  `.github/workflows/retro-build.yml`, which keeps each run's ZIP as an
+  `hex2pix-py38-retro-x86` artifact for 90 days and does not attach it to a
+  release.
+- **No single file.** cx_Freeze only produces a folder, so retro users unzip
+  `hex2pix-retro.zip`; there is no one-file `hex2pix.exe` on this branch.
 
 ## Quick start
 
@@ -645,8 +646,17 @@ py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix.spec
 py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix_onedir.spec
 ```
 
-The result is `dist\hex2pix.exe`: one self-contained file with no Python
-installation required on the target machine.
+On `retro-compat`, build the XP-compatible portable folder with cx_Freeze
+instead; `build_exe.cmd` uses whichever `py -3` resolves to, which is the 3.10
+`main` line on a normal machine:
+
+```bash
+.py38\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
+```
+
+The PyInstaller result is `dist\hex2pix.exe`: one self-contained file with no
+Python installation required on the target machine. The cx_Freeze result is
+`dist\hex2pix-retro\hex2pix.exe` with its runtime beside it.
 
 ## Tests
 
@@ -675,7 +685,7 @@ dist\hex2pix.exe --selftest
 hex2pixmain/
 ├─ run_hex2pix.py          entry point and PyInstaller script
 ├─ requirements.txt        runtime and build dependencies
-├─ packaging/              PyInstaller specs and the Windows build helper
+├─ packaging/              PyInstaller specs, cx_Freeze setup and build helpers
 ├─ hex2pix/
 │  ├─ app.py               Tk window, panels and interaction
 │  ├─ model.py             bitmaps, documents, selections and edits
