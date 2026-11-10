@@ -507,7 +507,9 @@ The **Export** docker (**Ctrl+E**) holds saving and exporting in one place.
 half collects the format, source (whole image, current layer, selection, or one
 file per visible layer), trim, scale, sampling, PPI, transparency or matte,
 JPEG quality, GIF colours and PNG level, then **Export image** writes the file
-from the same panel.
+from the same panel. **Raw bits...** opens a dialog for headerless 1–32 bpp
+output: indexed or RGB(A), per-channel widths, and packed or byte-aligned
+packing.
 
 ## File formats
 
@@ -531,12 +533,22 @@ onto a matte colour, JPEG quality, GIF palette size and PNG compression level.
 | WEBP | yes | lossless |
 | JPEG | no | flattened, quality setting |
 | PPM | no | 24-bit binary `P6` |
+| Raw pixel bits | optional | headerless 1–32 bpp, indexed or RGB(A), packed or byte-aligned |
 | Hex text | n/a | every pixel as `RRGGBBAA`, `.` for transparent |
 
 BMP and PPM are written by hand rather than by the imaging library, so the
 24-bit BMP really is 24 bits per pixel with a `BITMAPINFOHEADER` — Pillow's
 own RGBA-to-BMP path drops alpha and still claims 32 bits. The loader has its
 own BMP parser too, so a file hex2pix wrote reopens with its alpha intact.
+
+### Raw bits
+
+**Raw pixel bits** writes a headerless 1–32 bpp stream, chosen with **Raw
+bits...**: **Indexed** (1–8 bpp, adaptive palette) or **RGB(A)** (per-channel
+widths). **Packed** runs pixels together MSB first, so 12-bit 4:4:4 is two
+pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`) and 6-bit 2:2:2 is four in
+three (`rrggbbrr ggbbrrgg bbrrggbb`); **Aligned** gives each pixel its own
+bytes with zero high bits (`0000rrrr ggggbbbb` and `00rrggbb`).
 
 ## Build the executable
 
@@ -564,7 +576,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 429 tests over the model, the canvas, formats, colours,
+The first command runs 443 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand

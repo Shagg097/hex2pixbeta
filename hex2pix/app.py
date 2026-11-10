@@ -21,7 +21,7 @@ from tkinter import (colorchooser, filedialog, font as tkfont, messagebox,
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from . import __version__, dither, filters, formats, icons
+from . import __version__, bitdepth, dither, filters, formats, icons
 from .integrations import (GITHUB_REPOSITORY, SettingsStore, UpdateError,
                            apply_update, check_for_update, download_update,
                            is_folder_build)
@@ -117,6 +117,13 @@ DEFAULT_HIDDEN_DOCKERS = ("block", "bytes", "dump", "export")
 
 EXPORT_SOURCES = ("Whole image", "Current layer", "Selection",
                   "Each visible layer")
+
+RAW_DEFAULTS = {
+    "raw_mode": "rgb",
+    "raw_depth": 8,
+    "raw_channels": (4, 4, 4, 0),
+    "raw_packing": "packed",
+}
 
 
 def _layer_export_path(path, name, index, ext):
@@ -676,6 +683,193 @@ class ColorWheel(tk.Canvas):
                                                    self._val)
             self.command((int(red * 255 + 0.5), int(green * 255 + 0.5),
                           int(blue * 255 + 0.5), 255), secondary)
+
+
+class RawBitsDialog(tk.Toplevel):
+    """Choose the layout of a raw pixel-bit export."""
+
+    def __init__(self, parent, settings=None):
+        tk.Toplevel.__init__(self, parent)
+        settings = dict(settings or {})
+        self.title("Raw pixel bits")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.result = None
+        self._syncing = False
+        widths = list(settings.get("raw_channels") or (8, 8, 8, 0))
+        while len(widths) < 4:
+            widths.append(0)
+        self.mode_var = tk.StringVar(
+            value="Indexed" if settings.get("raw_mode") == "indexed"
+            else "RGB(A)")
+        self.depth_var = tk.IntVar(value=int(settings.get("raw_depth", 8)))
+        self.packing_var = tk.StringVar(
+            value="Aligned" if settings.get("raw_packing") == "aligned"
+            else "Packed")
+        self.channel_vars = [tk.IntVar(value=int(widths[index]))
+                             for index in range(4)]
+        self.preset_var = tk.StringVar(value=self._preset_for(widths))
+        self.total_var = tk.StringVar(value="")
+
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+
+        mode_row = ttk.Frame(body)
+        mode_row.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(mode_row, text="Colour").pack(side="left")
+        ttk.Radiobutton(mode_row, text="Indexed", value="Indexed",
+                        variable=self.mode_var,
+                        command=self._refresh).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(mode_row, text="RGB(A)", value="RGB(A)",
+                        variable=self.mode_var,
+                        command=self._refresh).pack(side="left", padx=(6, 0))
+
+        ttk.Label(body, text="Preset").grid(row=1, column=0, sticky="w",
+                                           pady=(8, 2))
+        self.preset_box = ttk.Combobox(
+            body,
+            values=["Custom"] + [item[0] for item in
+                                 bitdepth.CHANNEL_PRESETS],
+            width=18, state="readonly", textvariable=self.preset_var)
+        self.preset_box.grid(row=1, column=1, sticky="ew", pady=(8, 2))
+        self.preset_box.bind("<<ComboboxSelected>>", self._preset_changed)
+
+        channel_row = ttk.Frame(body)
+        channel_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=2)
+        self.channel_labels = []
+        self.channel_spins = []
+        for index, name in enumerate(("R", "G", "B", "A")):
+            label = ttk.Label(channel_row, text=name)
+            label.pack(side="left")
+            spin = ttk.Spinbox(channel_row, from_=0,
+                               to=bitdepth.MAX_CHANNEL_BITS, width=3,
+                               textvariable=self.channel_vars[index])
+            spin.pack(side="left", padx=(1, 6))
+            self.channel_labels.append(label)
+            self.channel_spins.append(spin)
+            self.channel_vars[index].trace_add(
+                "write", lambda *args: self._edited())
+
+        ttk.Label(body, text="Indexed bits").grid(row=3, column=0,
+                                                  sticky="w", pady=2)
+        self.depth_spin = ttk.Spinbox(
+            body, from_=1, to=bitdepth.MAX_INDEX_BITS, width=5,
+            textvariable=self.depth_var, command=self._refresh)
+        self.depth_spin.grid(row=3, column=1, sticky="w", pady=2)
+
+        ttk.Label(body, text="Packing").grid(row=4, column=0, sticky="w",
+                                            pady=(6, 2))
+        packing_row = ttk.Frame(body)
+        packing_row.grid(row=4, column=1, sticky="w", pady=(6, 2))
+        for label in bitdepth.RAW_PACKINGS:
+            ttk.Radiobutton(packing_row, text=label, value=label,
+                            variable=self.packing_var,
+                            command=self._refresh).pack(side="left")
+
+        ttk.Label(body, textvariable=self.total_var, foreground="#8ab4f8",
+                  wraplength=270).grid(row=5, column=0, columnspan=2,
+                                       sticky="w", pady=(8, 0))
+        ttk.Label(body, text=(
+            "Packed joins pixels bit by bit: 12 bpp puts two pixels in "
+            "three bytes, 6 bpp puts four in three. Aligned starts every "
+            "pixel on a byte and leaves the high bits zero. Channels keep "
+            "the top bits of each 8-bit value."),
+                  foreground="#9fb3c8", wraplength=280).grid(
+                      row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=7, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=self.cancel).pack(
+            side="right")
+        ttk.Button(buttons, text="OK", command=self.accept).pack(
+            side="right", padx=4)
+        self.bind("<Return>", lambda event: self.accept())
+        self.bind("<Escape>", lambda event: self.cancel())
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self._refresh()
+        self.focus_set()
+
+    @staticmethod
+    def _preset_for(widths):
+        packed = tuple(int(value) for value in widths)
+        for label, preset in bitdepth.CHANNEL_PRESETS:
+            if preset == packed:
+                return label
+        return "Custom"
+
+    def _preset_changed(self, event=None):
+        label = self.preset_var.get()
+        for name, widths in bitdepth.CHANNEL_PRESETS:
+            if name == label:
+                self._syncing = True
+                try:
+                    for var, bits in zip(self.channel_vars, widths):
+                        var.set(bits)
+                finally:
+                    self._syncing = False
+                self.mode_var.set("RGB(A)")
+                break
+        self._refresh()
+
+    def _edited(self):
+        if self._syncing:
+            return
+        self.preset_var.set("Custom")
+        self._refresh()
+
+    def _widths(self):
+        widths = []
+        for var in self.channel_vars:
+            widths.append(_bounded(var.get(), 0, bitdepth.MAX_CHANNEL_BITS, 0))
+        return tuple(widths)
+
+    def _refresh(self):
+        indexed = self.mode_var.get() == "Indexed"
+        state = ["disabled"] if indexed else ["!disabled"]
+        self.preset_box.state(state)
+        for widget in self.channel_labels + self.channel_spins:
+            widget.state(state)
+        self.depth_spin.state(["!disabled"] if indexed else ["disabled"])
+        if indexed:
+            depth = _bounded(self.depth_var.get(), 1,
+                             bitdepth.MAX_INDEX_BITS, 8)
+            self.total_var.set("%d bpp indexed, %s" % (
+                depth, self.packing_var.get().lower()))
+            return
+        widths = self._widths()
+        total = sum(widths)
+        names = "RGBA" if widths[3] else "RGB"
+        used = widths if widths[3] else widths[:3]
+        note = "" if 1 <= total <= bitdepth.MAX_BITS else " (needs 1-32)"
+        self.total_var.set("%s %s, %d bpp %s%s" % (
+            names, ":".join(str(value) for value in used), total,
+            self.packing_var.get().lower(), note))
+
+    def accept(self):
+        widths = self._widths()
+        indexed = self.mode_var.get() == "Indexed"
+        if not indexed:
+            try:
+                bitdepth.channel_widths(widths)
+            except HexError as exc:
+                messagebox.showerror("Raw pixel bits", str(exc), parent=self)
+                return
+        self.result = {
+            "raw_mode": "indexed" if indexed else "rgb",
+            "raw_depth": _bounded(self.depth_var.get(), 1,
+                                  bitdepth.MAX_INDEX_BITS, 8),
+            "raw_channels": widths,
+            "raw_packing": ("aligned" if self.packing_var.get() == "Aligned"
+                            else "packed"),
+        }
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.destroy()
 
 
 class PaletteDialog(tk.Toplevel):
@@ -2320,6 +2514,15 @@ class hex2pixApp(tk.Tk):
         self.png_spin = ttk.Spinbox(png_row, from_=0, to=9, width=5,
                                     textvariable=self.png_compress_var)
         self.png_spin.pack(side="right")
+
+        raw_row = ttk.Frame(export)
+        raw_row.pack(fill="x", pady=2)
+        self.raw_button = ttk.Button(raw_row, text="Raw bits...",
+                                     command=self.edit_raw_bits)
+        self.raw_button.pack(side="left")
+        self.raw_summary = tk.StringVar(value="")
+        ttk.Label(raw_row, textvariable=self.raw_summary,
+                  foreground="#9fb3c8").pack(side="right")
 
         ttk.Label(export, text="Path").pack(anchor="w", pady=(4, 0))
         self.export_path = tk.StringVar(value="")
@@ -5338,6 +5541,36 @@ class hex2pixApp(tk.Tk):
                 self.export_path.set(stem + item["ext"])
         self._update_export_options()
 
+    def _raw_settings(self):
+        """The raw bit-depth options last chosen in the dialog."""
+        settings = dict(RAW_DEFAULTS)
+        settings.update(getattr(self, "raw_settings", None) or {})
+        settings["raw_depth"] = _bounded(settings.get("raw_depth", 8), 1,
+                                         bitdepth.MAX_INDEX_BITS, 8)
+        try:
+            widths = tuple(
+                _bounded(value, 0, bitdepth.MAX_CHANNEL_BITS, 0)
+                for value in settings.get("raw_channels") or (8, 8, 8, 0))
+        except TypeError:
+            widths = (8, 8, 8, 0)
+        if len(widths) != 4:
+            widths = (8, 8, 8, 0)
+        settings["raw_channels"] = widths
+        settings["raw_mode"] = (
+            "indexed" if str(settings.get("raw_mode", "rgb")).lower()
+            .startswith("index") else "rgb")
+        settings["raw_packing"] = (
+            "aligned" if str(settings.get("raw_packing", "packed")).lower()
+            == "aligned" else "packed")
+        return settings
+
+    def edit_raw_bits(self):
+        dialog = RawBitsDialog(self, self._raw_settings())
+        self.wait_window(dialog)
+        if dialog.result:
+            self.raw_settings = dict(dialog.result)
+        self._update_export_options()
+
     def _update_export_options(self, event=None):
         if not hasattr(self, "matte_entry"):
             return
@@ -5354,6 +5587,19 @@ class hex2pixApp(tk.Tk):
                                (self.gif_spin, key == "gif"),
                                (self.png_spin, key == "png")):
             widget.state(["!disabled"] if active else ["disabled"])
+        raw = key == "raw"
+        self.raw_button.state(["!disabled"] if raw else ["disabled"])
+        if raw:
+            settings = self._raw_settings()
+            if settings["raw_mode"] == "indexed":
+                bits = settings["raw_depth"]
+                label = "indexed"
+            else:
+                bits = sum(settings["raw_channels"])
+                label = "RGB"
+            self.raw_summary.set("%d bpp %s" % (bits, label))
+        else:
+            self.raw_summary.set("")
         self._update_export_hint()
 
     def _update_export_hint(self, event=None):
@@ -5378,6 +5624,16 @@ class hex2pixApp(tk.Tk):
         except (tk.TclError, ValueError):
             scale = 1
         trimmed = " then trimmed" if self.export_trim.get() else ""
+        if self._export_format()["key"] == "raw":
+            settings = self._raw_settings()
+            if settings["raw_mode"] == "indexed":
+                bits = settings["raw_depth"]
+            else:
+                bits = sum(settings["raw_channels"])
+            trimmed += "; %d bytes at %d bpp %s" % (
+                bitdepth.byte_size(width * scale, height * scale, bits,
+                                   settings["raw_packing"]),
+                bits, settings["raw_packing"])
         self.export_hint.set("%d x %d px -> %d x %d px%s"
                              % (width, height, width * scale,
                                 height * scale, trimmed))
@@ -5472,6 +5728,7 @@ class hex2pixApp(tk.Tk):
             "keep_alpha": keep_alpha,
             "gif_colors": gif_colors,
             "png_compress": png_compress,
+            **self._raw_settings(),
         }
         try:
             if self.export_source.get() == "Each visible layer":

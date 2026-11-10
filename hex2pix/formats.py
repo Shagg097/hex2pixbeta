@@ -15,6 +15,7 @@ import zipfile
 
 from PIL import Image
 
+from . import bitdepth
 from .model import (MATTE_WHITE, SKIP, Bitmap, Document, HexError, Layer,
                     block_from_bitmap, clamp, parse_block)
 
@@ -29,6 +30,8 @@ FORMATS = (
     {"key": "webp", "label": "WEBP lossless", "ext": ".webp", "alpha": True},
     {"key": "jpg", "label": "JPEG (flattened, quality)", "ext": ".jpg", "alpha": False},
     {"key": "ppm", "label": "PPM 24-bit", "ext": ".ppm", "alpha": False},
+    {"key": "raw", "label": "Raw pixel bits (1-32 bpp)", "ext": ".raw",
+     "alpha": True},
     {"key": "hex", "label": "Hex text (.txt)", "ext": ".txt", "alpha": False},
 )
 FORMAT_BY_KEY = {item["key"]: item for item in FORMATS}
@@ -353,6 +356,44 @@ def _ensure_dir(path):
         os.makedirs(parent)
 
 
+def save_raw(bitmap, path, mode="rgb", depth=8, channels=(8, 8, 8, 0),
+             packing="packed", matte=MATTE_WHITE):
+    """Write headerless pixel bits at 1-32 bits per pixel.
+
+    `mode` is "indexed" (1-8 bits per pixel, adaptive palette) or "rgb"
+    (`channels` are the red, green, blue and alpha widths). `packing` is
+    "packed" for a dense bit stream or "aligned" for whole bytes per pixel.
+    """
+    mode = str(mode or "rgb").lower()
+    packing = bitdepth.check_packing(packing)
+    if mode.startswith("index"):
+        try:
+            depth = int(depth)
+        except (TypeError, ValueError):
+            raise HexError("indexed bit depth must be a whole number")
+        if depth < 1 or depth > bitdepth.MAX_INDEX_BITS:
+            raise HexError("indexed bit depth must be 1-%d"
+                           % bitdepth.MAX_INDEX_BITS)
+        rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
+        indices, _palette = bitdepth.quantize_rgb(rgb, bitmap.width,
+                                                  bitmap.height, depth)
+        data = bitdepth.pack_samples(indices, depth, packing)
+    elif mode == "rgb":
+        widths = bitdepth.channel_widths(channels)
+        if widths[3]:
+            samples = bitdepth.sample_rgba(bitmap.data, widths)
+        else:
+            rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
+            samples = bitdepth.sample_rgb(rgb, widths[:3])
+        data = bitdepth.pack_samples(samples, sum(widths), packing)
+    else:
+        raise HexError("unknown raw colour mode: %s" % mode)
+    _ensure_dir(path)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return len(data)
+
+
 def _save_pillow(image, path, image_format, dpi=None, **kwargs):
     """Save with a dpi pair when the format accepts it, otherwise without."""
     if dpi:
@@ -366,12 +407,15 @@ def _save_pillow(image, path, image_format, dpi=None, **kwargs):
 
 
 def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
-         keep_alpha=True, gif_colors=256, png_compress=6):
+         keep_alpha=True, gif_colors=256, png_compress=6,
+         raw_mode="rgb", raw_depth=8, raw_channels=(8, 8, 8, 0),
+         raw_packing="packed"):
     """Write `bitmap` to `path` in the given format. Returns bytes written.
 
     `keep_alpha` flattens transparency onto `matte` when false, `gif_colors`
     caps the adaptive GIF palette and `png_compress` is Pillow's 0-9 deflate
-    level. Formats that cannot store alpha always flatten.
+    level. Formats that cannot store alpha always flatten. The `raw_*` options
+    pick the layout of the headerless raw pixel format.
     """
     path = str(path)
     key = (key or "png").lower()
@@ -388,6 +432,9 @@ def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
         save_ppm(bitmap, path, matte)
     elif key == "hex":
         save_hex_text(bitmap, path)
+    elif key == "raw":
+        save_raw(bitmap, path, raw_mode, raw_depth, raw_channels,
+                 raw_packing, matte)
     elif key == "jpg":
         _save_pillow(to_pil(bitmap, matte, flatten_alpha=True), path, "JPEG",
                      dpi=ppi, quality=int(quality), subsampling=0)

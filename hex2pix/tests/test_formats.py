@@ -7,7 +7,7 @@ import unittest
 
 from PIL import Image
 
-from hex2pix import formats
+from hex2pix import bitdepth, formats
 from hex2pix.model import Bitmap, HexError, parse_block
 
 
@@ -235,6 +235,125 @@ class FormatTests(unittest.TestCase):
             with Image.open(target) as image:
                 image.load()
                 self.assertEqual(image.size, (4, 3))
+
+
+class RawBitDepthTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def path(self, name):
+        return os.path.join(self.dir, name)
+
+    @staticmethod
+    def bitmap(*colors):
+        bitmap = Bitmap(len(colors), 1)
+        for x, color in enumerate(colors):
+            bitmap.set_rgba(x, 0, color)
+        return bitmap
+
+    def save_bytes(self, bitmap, **options):
+        target = self.path("out.raw")
+        size = formats.save(bitmap, target, "raw", **options)
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(size, len(data))
+        return data
+
+    def test_packed_streams_round_trip(self):
+        for bits in (1, 2, 3, 5, 6, 7, 9, 12, 17, 32):
+            values = [(index * 7 + 1) % (1 << bits) for index in range(11)]
+            data = bitdepth.pack_samples(values, bits, "packed")
+            self.assertEqual(len(data), (len(values) * bits + 7) // 8, bits)
+            self.assertEqual(
+                bitdepth.unpack_samples(data, bits, len(values), "packed"),
+                values, bits)
+
+    def test_aligned_stream_pads_the_high_bits(self):
+        data = bitdepth.pack_samples([0x135, 0xACE], 12, "aligned")
+        self.assertEqual(data, b"\x01\x35\x0a\xce")
+        self.assertEqual(
+            bitdepth.unpack_samples(data, 12, 2, "aligned"), [0x135, 0xACE])
+
+    def test_packed_tail_is_zero_padded(self):
+        self.assertEqual(bitdepth.pack_samples([1], 3, "packed"), b"\x20")
+
+    def test_12_bpp_packed_layout(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
+                             (0xAB, 0xCD, 0xEF, 255))
+        data = self.save_bytes(bitmap, raw_mode="rgb",
+                               raw_channels=(4, 4, 4, 0),
+                               raw_packing="packed")
+        self.assertEqual(data, b"\x13\x5a\xce")
+
+    def test_12_bpp_aligned_layout(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
+                             (0xAB, 0xCD, 0xEF, 255))
+        data = self.save_bytes(bitmap, raw_mode="rgb",
+                               raw_channels=(4, 4, 4, 0),
+                               raw_packing="aligned")
+        self.assertEqual(data, b"\x01\x35\x0a\xce")
+
+    def test_6_bpp_packed_layout(self):
+        bitmap = self.bitmap((0, 0, 0xC0, 255), (0x40, 0x40, 0x40, 255),
+                             (0x80, 0x80, 0x80, 255),
+                             (0xFF, 0xFF, 0xFF, 255))
+        data = self.save_bytes(bitmap, raw_channels=(2, 2, 2, 0),
+                               raw_packing="packed")
+        self.assertEqual(data, b"\x0d\x5a\xbf")
+
+    def test_6_bpp_aligned_layout(self):
+        bitmap = self.bitmap((0, 0, 0xC0, 255), (0x40, 0x40, 0x40, 255),
+                             (0x80, 0x80, 0x80, 255),
+                             (0xFF, 0xFF, 0xFF, 255))
+        data = self.save_bytes(bitmap, raw_channels=(2, 2, 2, 0),
+                               raw_packing="aligned")
+        self.assertEqual(data, b"\x03\x15\x2a\x3f")
+
+    def test_32_bpp_rgba_keeps_every_byte(self):
+        data = self.save_bytes(self.bitmap((0x12, 0x34, 0x56, 0x78)),
+                               raw_channels=(8, 8, 8, 8),
+                               raw_packing="packed")
+        self.assertEqual(data, b"\x12\x34\x56\x78")
+
+    def test_10_bit_channels_shift_up(self):
+        data = self.save_bytes(self.bitmap((0x12, 0x34, 0x56, 255)),
+                               raw_channels=(10, 10, 10, 0),
+                               raw_packing="packed")
+        expected = ((0x12 << 2) << 20) | ((0x34 << 2) << 10) | (0x56 << 2)
+        self.assertEqual(int.from_bytes(data, "big"), expected << 2)
+
+    def test_indexed_stream_uses_one_entry_per_bit(self):
+        indices, palette = bitdepth.quantize_rgb(
+            bytes([255, 255, 255] * 4 + [0, 0, 0] * 4), 8, 1, 1)
+        self.assertEqual(len(indices), 8)
+        self.assertEqual(set(indices), {0, 1})
+        self.assertEqual(sorted(palette), [(0, 0, 0), (255, 255, 255)])
+
+    def test_indexed_save_packs_bits(self):
+        bitmap = self.bitmap(*([(255, 255, 255, 255)] * 4
+                               + [(0, 0, 0, 255)] * 4))
+        data = self.save_bytes(bitmap, raw_mode="indexed", raw_depth=1,
+                               raw_packing="packed")
+        self.assertEqual(len(data), 1)
+        self.assertIn(data[0], (0x0F, 0xF0))
+
+    def test_raw_rejects_bad_channel_totals(self):
+        for channels in ((0, 0, 0, 0), (16, 16, 16, 16), (8, 8, 8, 9)):
+            with self.assertRaises(HexError):
+                formats.save(self.bitmap((0, 0, 0, 255)),
+                             self.path("bad.raw"), "raw",
+                             raw_channels=channels)
+
+    def test_indexed_depth_is_capped_at_eight(self):
+        with self.assertRaises(HexError):
+            formats.save(self.bitmap((0, 0, 0, 255)),
+                         self.path("bad.raw"), "raw",
+                         raw_mode="indexed", raw_depth=9)
+
+    def test_raw_is_offered_and_detected(self):
+        patterns = [pattern for _label, pattern in formats.SAVE_FILETYPES]
+        self.assertIn("*.raw", patterns)
+        self.assertEqual(formats.format_for_path("x.RAW"), "raw")
 
 
 if __name__ == "__main__":
