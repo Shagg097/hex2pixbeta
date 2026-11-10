@@ -127,18 +127,18 @@ into the checkout without touching PATH, shortcuts or the launcher:
 
 ```bat
 curl -L -o py38xp.exe "https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/python-3.8.20-full.exe"
-py38xp.exe /quiet InstallAllUsers=0 TargetDir="%CD%\.py38" Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0
+py38xp.exe /quiet InstallAllUsers=0 TargetDir="%CD%\python38-32" Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0
 del py38xp.exe
-.py38\python.exe -c "import tkinter; print('tkinter ok')"
+python38-32\python.exe -c "import tkinter; print('tkinter ok')"
 ```
 
 Then install the pinned requirements into it and call the specs directly, because
 `packaging\build_exe.cmd` builds with whichever interpreter `py -3` resolves to:
 
 ```bat
-.py38\python.exe -m pip install -r requirements.txt
-.py38\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
-.py38\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
+python38-32\python.exe -m pip install -r requirements.txt
+python38-32\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
+python38-32\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
 ```
 
 ### What this branch costs

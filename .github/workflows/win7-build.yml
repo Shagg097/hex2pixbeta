@@ -5,7 +5,7 @@ name: Windows 7 build (CPython 3.8.20, 32-bit)
 # no Windows installer for 3.8.20 (3.8.11 and later were security-only). This
 # build uses R-YaTian's Windows XP build of CPython 3.8.20: a 32-bit runtime
 # with Tcl/Tk whose python38.dll declares a Windows 5.1 subsystem. It is
-# unpacked into .py38/ in the checkout and always called by path: the runner's
+# unpacked into python38-32/ in the checkout and always called by path: the runner's
 # RUNNER_TEMP is a backslash Windows path that bash steps cannot use portably,
 # and the bash $PWD is a POSIX path that Windows PATH lookups cannot use.
 #
@@ -35,7 +35,7 @@ jobs:
       - name: Cache CPython 3.8.20 (32-bit, XP build)
         uses: actions/cache@v4
         with:
-          path: .py38
+          path: python38-32
           key: cpython-3.8.20-winxp-20241202-x86
 
       - name: Install CPython 3.8.20 (32-bit)
@@ -45,42 +45,42 @@ jobs:
           # The installer is a WiX Burn bundle. Include_pip and Include_tcltk
           # matter here; documentation, tests, the launcher, PATH changes and
           # shortcuts do not.
-          if ./.py38/python.exe -c "import sys" 2>/dev/null; then
+          if ./python38-32/python.exe -c "import sys" 2>/dev/null; then
             echo "using the cached CPython"
           else
-            rm -rf .py38
+            rm -rf python38-32
             url="https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/python-3.8.20-full.exe"
             curl --fail --location --silent --show-error \
               --retry 8 --retry-delay 5 --retry-max-time 300 --connect-timeout 20 \
               -o py38xp.exe "$url"
             MSYS_NO_PATHCONV=1 ./py38xp.exe /quiet InstallAllUsers=0 \
-              TargetDir="$(cygpath -w "$PWD/.py38")" \
+              TargetDir="$(cygpath -w "$PWD/python38-32")" \
               Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 \
               Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0 || true
             rm -f py38xp.exe
           fi
-          test -f .py38/python.exe
-          ./.py38/python.exe -c "import sys, platform, tkinter; assert platform.architecture()[0] == '32bit'; print(sys.version); print('Tk', tkinter.TkVersion)"
+          test -f python38-32/python.exe
+          ./python38-32/python.exe -c "import sys, platform, tkinter; assert platform.architecture()[0] == '32bit'; print(sys.version); print('Tk', tkinter.TkVersion)"
 
       - name: Install build requirements
         shell: bash
-        run: ./.py38/python.exe -m pip install --disable-pip-version-check -r requirements.txt
+        run: ./python38-32/python.exe -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Run the unit tests
         shell: bash
-        run: ./.py38/python.exe -m unittest discover -s hex2pix/tests -t .
+        run: ./python38-32/python.exe -m unittest discover -s hex2pix/tests -t .
 
       - name: Build hex2pix.exe
         shell: bash
         run: |
           set -euo pipefail
-          ./.py38/python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix.spec
+          ./python38-32/python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix.spec
 
       - name: Build the portable folder
         shell: bash
         run: |
           set -euo pipefail
-          ./.py38/python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix_onedir.spec
+          ./python38-32/python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging/hex2pix_onedir.spec
 
       - name: Confirm both builds are 32-bit Python 3.8
         shell: bash
@@ -92,7 +92,7 @@ jobs:
             exit 1
           fi
           grep -aq python38.dll dist/hex2pix.exe
-          ./.py38/python.exe - <<'PY'
+          ./python38-32/python.exe - <<'PY'
           import pefile
           for path in ("dist/hex2pix.exe", "dist/hex2pix-portable/hex2pix.exe"):
               pe = pefile.PE(path, fast_load=True)
