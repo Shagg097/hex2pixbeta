@@ -27,15 +27,24 @@ OP_BY_LABEL = {label: op for op, label in OP_LABELS.items()}
 
 # How a layer combines with the layers below it. "normal" is plain
 # source-over, the default: the layer covers what is underneath. The rest
-# combine per channel with the layers below. Unlike the byte operations above
-# there are no bitwise modes here.
-LAYER_OPS = ("normal", "add", "subtract", "multiply", "divide")
+# combine per channel with the layers below, including the bitwise Xor and
+# Nand gates and the usual photographic blend modes.
+LAYER_OPS = ("normal", "add", "subtract", "multiply", "divide",
+             "xor", "nand", "screen", "overlay", "darken", "lighten",
+             "difference")
 LAYER_OP_LABELS = {
     "normal": "Normal",
     "add": "Add",
     "subtract": "Subtract",
     "multiply": "Multiply",
     "divide": "Divide",
+    "xor": "Xor",
+    "nand": "Nand",
+    "screen": "Screen",
+    "overlay": "Overlay",
+    "darken": "Darken",
+    "lighten": "Lighten",
+    "difference": "Difference",
 }
 
 HEX_DIGITS = set("0123456789abcdefABCDEF")
@@ -96,6 +105,19 @@ def combine(a, b, op, strength=255, wrap=False):
         raw = bxor8(a, b)
     elif op == "nand":
         raw = bnot8(band8(a, b))
+    elif op == "screen":
+        raw = 255 - (255 - a) * (255 - b) / 255.0
+    elif op == "overlay":
+        if a < 128:
+            raw = 2.0 * a * b / 255.0
+        else:
+            raw = 255 - 2.0 * (255 - a) * (255 - b) / 255.0
+    elif op == "darken":
+        raw = min(a, b)
+    elif op == "lighten":
+        raw = max(a, b)
+    elif op == "difference":
+        raw = abs(a - b)
     else:
         raise HexError("unknown operation: %s" % op)
     raw = raw % 256 if wrap else clamp(raw, 0, 255)
@@ -636,50 +658,86 @@ class RotationDrag(object):
 
 
 # --------------------------------------------------------------------- layers
+class LayerGroup(object):
+    """A named set of layers that show, hide and merge together.
+
+    Membership lives on the layers themselves (`Layer.group`), so a group can
+    be reopened from any project without a separate tree structure.
+    """
+
+    __slots__ = ("name", "visible", "alpha")
+
+    def __init__(self, name="Group 1", visible=True, alpha=255):
+        self.name = str(name)
+        self.visible = bool(visible)
+        self.alpha = clamp(int(alpha), 0, 255)
+
+    def __repr__(self):
+        return "LayerGroup(%r)" % self.name
+
+    def copy(self):
+        return LayerGroup(self.name, self.visible, self.alpha)
+
+    def to_state(self):
+        return {"name": self.name, "visible": self.visible,
+                "alpha": self.alpha}
+
+    @classmethod
+    def from_state(cls, state):
+        return cls(state.get("name", "Group"), state.get("visible", True),
+                   state.get("alpha", 255))
+
+
 class Layer(object):
     """One bitmap in a document's layer stack.
 
     `op` is how the layer combines with the layers below it, and its alpha is
     the strength of that operation. `alpha` is the layer's own opacity, which
-    scales that strength for every pixel. `Document.layers[0]` is the bottom
-    layer.
+    scales that strength for every pixel. `group` names the layer's group, or
+    is empty when it is ungrouped. `Document.layers[0]` is the bottom layer.
     """
 
-    __slots__ = ("bitmap", "name", "op", "visible", "alpha")
+    __slots__ = ("bitmap", "name", "op", "visible", "alpha", "group")
 
     def __init__(self, width, height, name="Layer 1", op="normal",
-                 visible=True, data=None, alpha=255):
+                 visible=True, data=None, alpha=255, group=""):
         self.bitmap = Bitmap(width, height, data)
         self.name = str(name)
         self.op = op if op in LAYER_OPS else "normal"
         self.visible = bool(visible)
         self.alpha = clamp(int(alpha), 0, 255)
+        self.group = str(group or "")
 
     def __repr__(self):
         return "Layer(%r, %s)" % (self.name, self.op)
 
     def copy(self):
         return Layer(self.bitmap.width, self.bitmap.height, self.name, self.op,
-                     self.visible, bytes(self.bitmap.data), self.alpha)
+                     self.visible, bytes(self.bitmap.data), self.alpha,
+                     self.group)
 
     def to_state(self):
         return {"name": self.name, "op": self.op, "visible": self.visible,
-                "alpha": self.alpha, "data": bytes(self.bitmap.data)}
+                "alpha": self.alpha, "group": self.group,
+                "data": bytes(self.bitmap.data)}
 
     @classmethod
     def from_state(cls, state, width, height):
         return cls(width, height, state.get("name", "Layer"),
                    state.get("op", "normal"), state.get("visible", True),
-                   state.get("data"), state.get("alpha", 255))
+                   state.get("data"), state.get("alpha", 255),
+                   state.get("group", ""))
 
 
-def composite_layers(layers, rect=None, frame=None):
+def composite_layers(layers, rect=None, frame=None, groups=None):
     """Flatten the visible layers into one Bitmap.
 
     `frame` is the full canvas size and `rect` limits the result to one
     rectangle, which is what the canvas view composites while painting. Each
     layer combines with the stack below it using its own operation, with its
     alpha as the strength, so transparent pixels leave the result unchanged.
+    `groups` maps group names to LayerGroup objects; a hidden group hides its
+    members and a group opacity scales theirs.
     """
     if not layers:
         raise HexError("a document needs at least one layer")
@@ -695,6 +753,11 @@ def composite_layers(layers, rect=None, frame=None):
         src = layer.bitmap.data
         op = layer.op
         opacity = clamp(int(layer.alpha), 0, 255)
+        group = groups.get(layer.group) if groups and layer.group else None
+        if group is not None:
+            if not group.visible:
+                continue
+            opacity = opacity * clamp(int(group.alpha), 0, 255) // 255
         if not opacity:
             continue
         for row in range(h):
@@ -1468,6 +1531,7 @@ class Document(object):
                  color_mode="RGB", alpha=True):
         self.layers = [Layer(width, height, data=data)]
         self.layer_index = 0
+        self.groups = []
         self.selection = Selection(width, height)
         self.undo = UndoStack()
         self.path = path
@@ -1511,10 +1575,11 @@ class Document(object):
     def flatten(self, rect=None):
         """Composite the visible layers, or one rectangle, into a Bitmap."""
         if (self.layer_count == 1 and self.layers[0].visible
-                and self.layers[0].alpha >= 255):
+                and self.layers[0].alpha >= 255 and not self.layers[0].group):
             bitmap = self.layers[0].bitmap
             return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
-        return composite_layers(self.layers, rect, (self.width, self.height))
+        return composite_layers(self.layers, rect, (self.width, self.height),
+                                self.group_map())
 
     def add_layer(self, name=None, op="normal"):
         """Insert an empty layer above the active one and select it."""
@@ -1538,6 +1603,124 @@ class Document(object):
         index = self.layer_index if index is None else int(index)
         del self.layers[index]
         self.layer_index = min(index, self.layer_count - 1)
+        self.prune_groups()
+        return True
+
+    def prune_groups(self):
+        """Forget group entries that no longer have any members."""
+        names = set(layer.group for layer in self.layers if layer.group)
+        self.groups = [group for group in self.groups if group.name in names]
+
+    # ------------------------------------------------------------ groups
+    def group_map(self):
+        """Group name to LayerGroup, as composite_layers expects it."""
+        return {group.name: group for group in self.groups}
+
+    def group(self, name):
+        for group in self.groups:
+            if group.name == name:
+                return group
+        return None
+
+    def ensure_group(self, name=None):
+        """Return a group, creating it (with a fresh name) when needed."""
+        if name:
+            found = self.group(name)
+            if found is not None:
+                return found
+            group = LayerGroup(str(name))
+            self.groups.append(group)
+            return group
+        number = len(self.groups) + 1
+        name = "Group %d" % number
+        while self.group(name) is not None:
+            number += 1
+            name = "Group %d" % number
+        return self.ensure_group(name)
+
+    def group_layer(self, index=None, name=None):
+        """Put a layer into a group, creating the group when it is new."""
+        index = self.layer_index if index is None else int(index)
+        if index < 0 or index >= self.layer_count:
+            return None
+        group = self.ensure_group(name)
+        self.layers[index].group = group.name
+        return group
+
+    def group_members(self, name):
+        """Indices of the layers in a group, bottom first."""
+        return [index for index, layer in enumerate(self.layers)
+                if layer.group == name]
+
+    def rename_group(self, old, new):
+        """Rename a group and the layer tags that point at it."""
+        group = self.group(old)
+        new = str(new or "").strip()
+        if group is None or not new or new == old or self.group(new):
+            return False
+        group.name = new
+        for layer in self.layers:
+            if layer.group == old:
+                layer.group = new
+        return True
+
+    def rename_layer(self, index=None, name=None):
+        index = self.layer_index if index is None else int(index)
+        name = str(name or "").strip()
+        if index < 0 or index >= self.layer_count or not name:
+            return False
+        self.layers[index].name = name
+        return True
+
+    def remove_group(self, name, merge=False):
+        """Drop a group; its layers stay, ungrouped (or merged into one)."""
+        if merge:
+            return self.merge_group(name)
+        group = self.group(name)
+        if group is None:
+            return 0
+        count = 0
+        for layer in self.layers:
+            if layer.group == name:
+                layer.group = ""
+                count += 1
+        self.groups.remove(group)
+        return count
+
+    # ------------------------------------------------------------- merging
+    def merge_down(self, index=None):
+        """Combine a layer into the one below, using its op and opacity."""
+        index = self.layer_index if index is None else int(index)
+        if index <= 0 or index >= self.layer_count:
+            return False
+        below = self.layers[index - 1]
+        above = self.layers[index]
+        merged = composite_layers([below, above], None,
+                                  (self.width, self.height), self.group_map())
+        below.bitmap = merged
+        # The opacity is baked into the pixels now, so clear it to avoid
+        # scaling the merged result a second time.
+        below.alpha = 255
+        del self.layers[index]
+        self.layer_index = index - 1
+        return True
+
+    def merge_group(self, name):
+        """Flatten a whole group into one layer where its lowest member was."""
+        group = self.group(name)
+        members = self.group_members(name)
+        if group is None or not members:
+            return False
+        layers = [self.layers[index] for index in members]
+        merged = composite_layers(layers, None, (self.width, self.height),
+                                  {name: group})
+        result = Layer(self.width, self.height, group.name,
+                       layers[0].op, True, bytes(merged.data))
+        for index in reversed(members):
+            del self.layers[index]
+        self.layers.insert(members[0], result)
+        self.layer_index = clamp(members[0], 0, self.layer_count - 1)
+        self.groups.remove(group)
         return True
 
     def move_layer(self, delta, index=None):
@@ -1578,6 +1761,7 @@ class Document(object):
             "color_mode": self.color_mode,
             "alpha": self.alpha,
             "layers": [layer.to_state() for layer in self.layers],
+            "groups": [group.to_state() for group in self.groups],
             "layer_index": self.layer_index,
         }
 
@@ -1591,6 +1775,13 @@ class Document(object):
         else:
             self.layers = [Layer(width, height, data=state["data"])]
             self.layer_index = 0
+        self.groups = [LayerGroup.from_state(entry)
+                       for entry in state.get("groups") or []]
+        known = set(group.name for group in self.groups)
+        for layer in self.layers:
+            if layer.group and layer.group not in known:
+                self.groups.append(LayerGroup(layer.group))
+                known.add(layer.group)
         self.selection = Selection(width, height)
         self.ppi = state["ppi"]
         self.color_mode = state["color_mode"]
@@ -1617,6 +1808,7 @@ class Document(object):
 
     def replace_bitmap(self, bitmap, keep_selection=False):
         self.layers = [Layer(bitmap.width, bitmap.height, data=bitmap.data)]
+        self.groups = []
         self.layer_index = 0
         if not keep_selection:
             self.selection = Selection(bitmap.width, bitmap.height)

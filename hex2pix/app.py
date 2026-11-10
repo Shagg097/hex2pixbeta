@@ -1772,6 +1772,19 @@ class hex2pixApp(tk.Tk):
         layer_menu.add_command(label="Lower layer", accelerator="Alt+Down",
                                command=lambda: self.move_layer(-1))
         layer_menu.add_separator()
+        layer_menu.add_command(label="Rename layer or group...",
+                               accelerator="F2", command=self.rename_selected)
+        layer_menu.add_separator()
+        layer_menu.add_command(label="Group layer", accelerator="Alt+G",
+                               command=self.group_layer)
+        layer_menu.add_command(label="Ungroup", command=self.ungroup_layer)
+        layer_menu.add_command(label="Fold / unfold group",
+                               command=self.toggle_group_fold)
+        layer_menu.add_separator()
+        layer_menu.add_command(label="Merge down", accelerator="Ctrl+M",
+                               command=self.merge_down)
+        layer_menu.add_command(label="Merge group", command=self.merge_group)
+        layer_menu.add_separator()
         for op in LAYER_OPS:
             layer_menu.add_command(
                 label="Operation: %s" % LAYER_OP_LABELS[op],
@@ -2290,6 +2303,18 @@ class hex2pixApp(tk.Tk):
         op_box.pack(side="right")
         op_box.bind("<<ComboboxSelected>>", self.on_layer_op)
 
+        group_row = ttk.Frame(layers)
+        group_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(group_row, text="Group").pack(side="left")
+        self.layer_group_var = tk.StringVar(value="(none)")
+        self.layer_group_box = ttk.Combobox(group_row,
+                                            textvariable=self.layer_group_var,
+                                            values=["(none)"],
+                                            state="readonly", width=10)
+        self.layer_group_box.pack(side="right")
+        self.layer_group_box.bind("<<ComboboxSelected>>", self.on_layer_group)
+        self._layer_group_syncing = False
+
         self.layer_visible_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(layers, text="Visible",
                         variable=self.layer_visible_var,
@@ -2311,11 +2336,11 @@ class hex2pixApp(tk.Tk):
 
         buttons = ttk.Frame(layers)
         buttons.pack(fill="x", pady=(4, 0))
-        ttk.Button(buttons, text="New", width=6,
+        ttk.Button(buttons, text="New", width=5,
                    command=self.new_layer).pack(side="left")
-        ttk.Button(buttons, text="Copy", width=6,
+        ttk.Button(buttons, text="Copy", width=5,
                    command=self.duplicate_layer).pack(side="left", padx=2)
-        ttk.Button(buttons, text="Delete", width=6,
+        ttk.Button(buttons, text="Delete", width=5,
                    command=self.delete_layer).pack(side="left")
         move_row = ttk.Frame(layers)
         move_row.pack(fill="x", pady=(2, 0))
@@ -2328,15 +2353,31 @@ class hex2pixApp(tk.Tk):
                                                              fill="x",
                                                              expand=True,
                                                              padx=(2, 0))
+        group_buttons = ttk.Frame(layers)
+        group_buttons.pack(fill="x", pady=(2, 0))
+        ttk.Button(group_buttons, text="Group", width=6,
+                   command=self.group_layer).pack(side="left")
+        ttk.Button(group_buttons, text="Ungroup", width=8,
+                   command=self.ungroup_layer).pack(side="left", padx=2)
+        ttk.Button(group_buttons, text="Rename", width=8,
+                   command=self.rename_selected).pack(side="left")
+        merge_row = ttk.Frame(layers)
+        merge_row.pack(fill="x", pady=(2, 0))
+        ttk.Button(merge_row, text="Merge down",
+                   command=self.merge_down).pack(side="left", fill="x",
+                                                 expand=True)
+        ttk.Button(merge_row, text="Merge group",
+                   command=self.merge_group).pack(side="left", fill="x",
+                                                  expand=True, padx=(2, 0))
         self.layer_info = tk.StringVar(value="")
         ttk.Label(layers, textvariable=self.layer_info, foreground="#8ab4f8",
                   wraplength=280).pack(anchor="w", pady=(6, 0))
         ttk.Label(layers,
                   text="A layer combines with the layers below it using its "
-                       "operation; Normal simply covers what is underneath. "
+                       "operation and opacity. Groups collect layers under a "
+                       "named header; a hidden group hides its members. "
                        "Drag a row to restack it, double-click to show or "
-                       "hide. Alt+N/C/Delete adds, copies or removes a layer "
-                       "and Alt+Up/Down restacks it. Both views show the "
+                       "hide, F2 renames, Alt+G groups. Both views show the "
                        "result; the dump shows the active layer.",
                   foreground="#777", wraplength=280,
                   justify="left").pack(anchor="w", pady=(2, 0))
@@ -6865,7 +6906,8 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------ layers
     def layer_row_text(self, index, layer):
-        text = "%s %d  %s  %s" % (
+        text = "%s%s %d  %s  %s" % (
+            "    " if layer.group else "",
             "\u25cf" if layer.visible else "\u25cb", index + 1,
             layer.name, LAYER_OP_LABELS.get(layer.op, layer.op))
         if layer.alpha < 255:
@@ -6874,25 +6916,87 @@ class hex2pixApp(tk.Tk):
             text += "  (hidden)"
         return text
 
+    def layer_rows(self):
+        """The visible rows, top first: ('group', name) or ('layer', index)."""
+        collapsed = getattr(self, "_collapsed_groups", None)
+        if collapsed is None:
+            collapsed = self._collapsed_groups = set()
+        rows = []
+        seen = set()
+        for index in range(self.doc.layer_count - 1, -1, -1):
+            layer = self.doc.layers[index]
+            if layer.group:
+                if layer.group not in seen:
+                    seen.add(layer.group)
+                    rows.append(("group", layer.group))
+                if layer.group in collapsed:
+                    continue
+            rows.append(("layer", index))
+        return rows
+
+    def layer_row_of(self, index):
+        """The list row showing a layer, or None when its group is folded."""
+        for row, (kind, value) in enumerate(self.layer_rows()):
+            if kind == "layer" and value == index:
+                return row
+        return None
+
+    def group_row_text(self, group):
+        folded = group.name in getattr(self, "_collapsed_groups", set())
+        text = "%s %s %s  (%d)" % (
+            "\u25cf" if group.visible else "\u25cb",
+            "\u25b8" if folded else "\u25be", group.name,
+            len(self.doc.group_members(group.name)))
+        if group.alpha < 255:
+            text += "  %d%%" % int(round(group.alpha * 100 / 255.0))
+        if not group.visible:
+            text += "  (hidden)"
+        return text
+
     def refresh_layers(self):
         if not hasattr(self, "layer_list"):
             return
+        rows = self.layer_rows()
         self.layer_list.delete(0, "end")
-        for index in range(self.doc.layer_count - 1, -1, -1):
-            self.layer_list.insert("end", self.layer_row_text(
-                index, self.doc.layers[index]))
-        row = self.doc.layer_count - 1 - self.doc.layer_index
+        selected = None
+        for row, (kind, value) in enumerate(rows):
+            if kind == "group":
+                group = self.doc.group(value)
+                self.layer_list.insert("end", self.group_row_text(group)
+                                       if group is not None else value)
+            else:
+                self.layer_list.insert("end", self.layer_row_text(
+                    value, self.doc.layers[value]))
+                if value == self.doc.layer_index:
+                    selected = row
+        if selected is None:
+            for row, (kind, value) in enumerate(rows):
+                if kind == "group" and value == self.doc.active_layer.group:
+                    selected = row
+                    break
+        if selected is None:
+            selected = 0
         self.layer_list.selection_clear(0, "end")
-        self.layer_list.selection_set(row)
-        self.layer_list.see(row)
+        self.layer_list.selection_set(selected)
+        self.layer_list.see(selected)
         layer = self.doc.active_layer
         self.layer_op_var.set(LAYER_OP_LABELS.get(layer.op, "Normal"))
         self.layer_visible_var.set(bool(layer.visible))
         self.sync_layer_alpha(layer)
-        self.layer_info.set("%d layer%s, editing %s"
-                            % (self.doc.layer_count,
-                               "" if self.doc.layer_count == 1 else "s",
-                               layer.name))
+        self.sync_layer_group(layer)
+        self.refresh_layer_info()
+
+    def refresh_layer_info(self):
+        layer = self.doc.active_layer
+        info = "%d layer%s, editing %s" % (
+            self.doc.layer_count,
+            "" if self.doc.layer_count == 1 else "s", layer.name)
+        if layer.group:
+            info += " in %s" % layer.group
+        if self.doc.groups:
+            info += " \u00b7 %d group%s" % (
+                len(self.doc.groups), "" if len(self.doc.groups) == 1 else "s")
+        self.layer_info.set(info)
 
     def layers_changed(self):
         self.refresh_layers()
@@ -6900,27 +7004,45 @@ class hex2pixApp(tk.Tk):
         self.refresh_status()
         self.redraw()
 
+    def selected_layer_row(self):
+        """The ('group'|'layer', value) row under the list selection."""
+        rows = self.layer_rows()
+        picked = self.layer_list.curselection()
+        if picked and picked[0] < len(rows):
+            return rows[picked[0]]
+        return ("layer", self.doc.layer_index)
+
     def on_layer_select(self, event=None):
         picked = self.layer_list.curselection()
-        if not picked:
+        rows = self.layer_rows()
+        if not picked or picked[0] >= len(rows):
             return
-        index = self.doc.layer_count - 1 - picked[0]
-        if index == self.doc.layer_index:
+        kind, value = rows[picked[0]]
+        if kind == "group":
+            self.layer_info.set("Group %s selected: rename, fold, ungroup "
+                                "or merge it from the buttons below." % value)
             return
-        self.doc.layer_index = index
+        if value == self.doc.layer_index:
+            return
+        self.doc.layer_index = value
         self.layers_changed()
 
     def on_layer_toggle(self, event=None):
-        """Double-click a row: show or hide that layer, whichever it is."""
+        """Double-click a row: show or hide that layer or whole group."""
         row = self.layer_list.nearest(event.y) if event is not None else -1
-        if row < 0 or row >= self.layer_list.size():
+        rows = self.layer_rows()
+        if row < 0 or row >= len(rows):
             return
-        index = self.doc.layer_count - 1 - row
-        if index < 0 or index >= self.doc.layer_count:
-            return
-        layer = self.doc.layers[index]
+        kind, value = rows[row]
         before = self.doc.begin()
-        layer.visible = not layer.visible
+        if kind == "group":
+            group = self.doc.group(value)
+            if group is None:
+                return
+            group.visible = not group.visible
+        else:
+            layer = self.doc.layers[value]
+            layer.visible = not layer.visible
         self.doc.commit(before)
         self.layers_changed()
 
@@ -6981,12 +7103,13 @@ class hex2pixApp(tk.Tk):
             return
         layer.alpha = alpha
         self.layer_alpha_dirty = True
-        row = self.doc.layer_count - 1 - self.doc.layer_index
-        self.layer_list.delete(row)
-        self.layer_list.insert(row, self.layer_row_text(self.doc.layer_index,
-                                                        layer))
-        self.layer_list.selection_clear(0, "end")
-        self.layer_list.selection_set(row)
+        row = self.layer_row_of(self.doc.layer_index)
+        if row is not None:
+            self.layer_list.delete(row)
+            self.layer_list.insert(row, self.layer_row_text(
+                self.doc.layer_index, layer))
+            self.layer_list.selection_clear(0, "end")
+            self.layer_list.selection_set(row)
         self.refresh_status()
         self.redraw()
 
@@ -6996,9 +7119,45 @@ class hex2pixApp(tk.Tk):
         self.layer_alpha_before = None
         self.layer_alpha_dirty = False
 
+    def sync_layer_group(self, layer):
+        """Point the group picker at a layer without firing its command."""
+        if not hasattr(self, "layer_group_box"):
+            return
+        names = [group.name for group in self.doc.groups]
+        self._layer_group_syncing = True
+        try:
+            self.layer_group_box.configure(values=["(none)"] + names)
+            self.layer_group_var.set(layer.group or "(none)")
+        finally:
+            self._layer_group_syncing = False
+
+    def on_layer_group(self, event=None):
+        if getattr(self, "_layer_group_syncing", False):
+            return
+        name = self.layer_group_var.get()
+        layer = self.doc.active_layer
+        if name == "(none)":
+            if not layer.group:
+                return
+            before = self.doc.begin()
+            layer.group = ""
+            self.doc.prune_groups()
+            self.doc.commit(before)
+        else:
+            if layer.group == name:
+                return
+            before = self.doc.begin()
+            self.doc.ensure_group(name)
+            layer.group = name
+            self.doc.prune_groups()
+            self.doc.commit(before)
+        self.layers_changed()
+
     def new_layer(self):
+        group = self.doc.active_layer.group
         before = self.doc.begin()
-        self.doc.add_layer()
+        layer = self.doc.add_layer()
+        layer.group = group
         self.doc.commit(before)
         self.layers_changed()
 
@@ -7024,10 +7183,10 @@ class hex2pixApp(tk.Tk):
         self.doc.commit(before)
         self.layers_changed()
 
-    def move_layer_to(self, target):
-        """Restack the active layer at `target`; used by dragging a row."""
+    def move_layer_to(self, target, index=None):
+        """Restack a layer at `target`; used by dragging a row."""
         before = self.doc.begin()
-        if not self.doc.reorder_layer(target):
+        if not self.doc.reorder_layer(target, index):
             return
         self.doc.commit(before)
         self.layers_changed()
@@ -7041,14 +7200,111 @@ class hex2pixApp(tk.Tk):
         """Drop a dragged row onto another row to move that layer there."""
         row = getattr(self, "_layer_drag_row", None)
         self._layer_drag_row = None
-        if event is None or not row or row < 0:
+        if event is None or row is None or row < 0:
             return
         if event.y < 0 or event.y > self.layer_list.winfo_height():
             return
         target_row = self.layer_list.nearest(event.y)
-        if target_row < 0 or target_row == row:
+        rows = self.layer_rows()
+        if (target_row < 0 or target_row == row
+                or row >= len(rows) or target_row >= len(rows)):
             return
-        self.move_layer_to(self.doc.layer_count - 1 - target_row)
+        kind, source = rows[row]
+        target_kind, target = rows[target_row]
+        if kind != "layer" or target_kind != "layer":
+            return
+        self.move_layer_to(target, source)
+
+    def group_layer(self):
+        """Put the active layer in a new group."""
+        before = self.doc.begin()
+        if self.doc.group_layer() is None:
+            return
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def ungroup_layer(self):
+        kind, value = self.selected_layer_row()
+        name = value if kind == "group" else self.doc.active_layer.group
+        if not name:
+            self.report_error("The active layer is not in a group.")
+            return
+        before = self.doc.begin()
+        if not self.doc.remove_group(name):
+            return
+        getattr(self, "_collapsed_groups", set()).discard(name)
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def rename_selected(self):
+        """Rename the selected layer, or the selected group header."""
+        kind, value = self.selected_layer_row()
+        if kind == "group":
+            group = self.doc.group(value)
+            if group is None:
+                return
+            name = simpledialog.askstring("Rename group", "Group name:",
+                                          initialvalue=group.name, parent=self)
+            if name is None:
+                return
+            name = name.strip()
+            if not name or name == group.name:
+                return
+            before = self.doc.begin()
+            if not self.doc.rename_group(group.name, name):
+                self.report_error("There is already a group named %r." % name)
+                return
+        else:
+            layer = self.doc.layers[value]
+            name = simpledialog.askstring("Rename layer", "Layer name:",
+                                          initialvalue=layer.name, parent=self)
+            if name is None:
+                return
+            name = name.strip()
+            if not name or name == layer.name:
+                return
+            before = self.doc.begin()
+            if not self.doc.rename_layer(value, name):
+                return
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def toggle_group_fold(self):
+        kind, value = self.selected_layer_row()
+        name = value if kind == "group" else self.doc.active_layer.group
+        if not name:
+            self.report_error("The active layer is not in a group.")
+            return
+        collapsed = getattr(self, "_collapsed_groups", None)
+        if collapsed is None:
+            collapsed = self._collapsed_groups = set()
+        if name in collapsed:
+            collapsed.discard(name)
+        else:
+            collapsed.add(name)
+        self.refresh_layers()
+
+    def merge_down(self):
+        before = self.doc.begin()
+        if not self.doc.merge_down():
+            self.report_error("There is no layer below this one to merge "
+                              "into.")
+            return
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def merge_group(self):
+        kind, value = self.selected_layer_row()
+        name = value if kind == "group" else self.doc.active_layer.group
+        if not name:
+            self.report_error("The active layer is not in a group.")
+            return
+        before = self.doc.begin()
+        if not self.doc.merge_group(name):
+            return
+        getattr(self, "_collapsed_groups", set()).discard(name)
+        self.doc.commit(before)
+        self.layers_changed()
 
     def flip_image(self, horizontal):
         before = self.doc.begin()
@@ -7437,6 +7693,10 @@ class hex2pixApp(tk.Tk):
                 self.stop_playback()
             return "break"
 
+        if key == "F2":
+            self.rename_selected()
+            return "break"
+
         control = bool(event.state & 0x0004)
         shift = bool(event.state & 0x0001)
         char = (event.char or "").lower()
@@ -7450,7 +7710,9 @@ class hex2pixApp(tk.Tk):
                              "Down": lambda: self.move_layer(-1),
                              "n": self.new_layer,
                              "c": self.duplicate_layer,
-                             "Delete": self.delete_layer}
+                             "Delete": self.delete_layer,
+                             "g": self.group_layer,
+                             "m": self.merge_down}
             action = layer_actions.get(key) or layer_actions.get(char)
             if action:
                 action()
@@ -7474,6 +7736,11 @@ class hex2pixApp(tk.Tk):
             if key == "Tab":
                 self.next_tab(-1 if shift else 1)
                 return "break"
+            if key in ("m", "M") or (key in ("Return", "KP_Enter")
+                                      and char == "\r"):
+                # Ctrl+M arrives as Return on some Tk builds.
+                self.merge_down()
+                return "break"
             if shift and char == "n":
                 self.new_layer()
                 return "break"
@@ -7483,7 +7750,7 @@ class hex2pixApp(tk.Tk):
                 "v": self.paste_block, "o": self.open_document,
                 "s": self.save_document, "e": self.focus_export,
                 "n": self.new_document, "t": self.new_document,
-                "w": self.close_tab,
+                "w": self.close_tab, "m": self.merge_down,
             }
             action = actions.get(char if char.isalpha() else key.lower())
             if action:
@@ -8191,6 +8458,24 @@ def run_selftest(out_path=None):
         app.on_key(_KeyEvent("Escape", "\x1b"))
         layer_keys_ok = layer_keys_ok and not app.doc.selection.active
 
+        app.new_canvas(CanvasSpec(16, 16))
+        app.doc.bitmap.set_rgba(0, 0, (10, 20, 30, 255))
+        app.new_layer()
+        app.doc.bitmap.set_rgba(0, 0, (100, 100, 100, 255))
+        app.on_key(_KeyEvent("g", "", 0x0008))
+        group_ok = (app.doc.active_layer.group == "Group 1"
+                    and app.doc.group("Group 1") is not None
+                    and len(app.layer_rows()) == 3)
+        app.doc.ensure_group("Group 1").visible = False
+        group_ok = (group_ok
+                    and app.doc.flatten().rgba(0, 0) == (10, 20, 30, 255))
+        app.doc.ensure_group("Group 1").visible = True
+        app.refresh_layers()
+        app.merge_group()
+        merged_ok = (app.doc.layer_count == 2 and not app.doc.groups
+                     and app.doc.active_layer.name == "Group 1"
+                     and app.doc.bitmap.rgba(0, 0) == (100, 100, 100, 255))
+
         old_tool = app.tool
         app.tool = "line"
         app.shape_anchor = (0, 0)
@@ -8333,7 +8618,7 @@ def run_selftest(out_path=None):
                       fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                       gradient_ok, palette_ok, wheel_ok, quantize_ok,
                       dark_ok, light_ok, dockers_ok, overlay_ok,
-                      layer_keys_ok, mouse_ok))
+                      layer_keys_ok, group_ok, merged_ok, mouse_ok))
         gui_ok = gui_ok and all((tabs_ok, dirty_ok, drop_ok, smear_ok,
                                  tips_ok, pattern_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
@@ -8345,7 +8630,8 @@ def run_selftest(out_path=None):
                      "structure=%s pattern_text=%s fullscreen=%s "
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
                      "palette=%s wheel=%s quantize=%s dark=%s light=%s "
-                     "dockers=%s overlay=%s layer_keys=%s mouse=%s"
+                     "dockers=%s overlay=%s layer_keys=%s groups=%s "
+                     "merge=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -8356,7 +8642,7 @@ def run_selftest(out_path=None):
                         fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                         gradient_ok, palette_ok, wheel_ok, quantize_ok,
                         dark_ok, light_ok, dockers_ok, overlay_ok,
-                        layer_keys_ok, mouse_ok))
+                        layer_keys_ok, group_ok, merged_ok, mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))

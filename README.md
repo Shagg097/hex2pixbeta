@@ -110,7 +110,7 @@ Verified on this branch with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 462 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 472 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
 | `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
@@ -433,6 +433,13 @@ has an operation and an opacity:
 | Subtract | `below - above`, clamped |
 | Multiply | `below * above / 255` |
 | Divide | `below * 255 / above` |
+| Xor | `below XOR above`, per byte |
+| Nand | `NOT (below AND above)`, per byte |
+| Screen | `255 - (255-below)(255-above)/255` |
+| Overlay | Multiplies dark areas, screens light ones |
+| Darken | Darker of the two |
+| Lighten | Lighter of the two |
+| Difference | `abs(below - above)` |
 
 A pixel's alpha is the strength of the operation, so transparent pixels leave
 the stack alone. The **Opacity** slider blends the active layer without changing
@@ -444,6 +451,15 @@ work on the active layer. **New**, **Copy**, **Delete**, **Raise** and **Lower**
 manage the stack. `Ctrl+Shift+N` (or `Alt+N`) adds a layer; drag a row to restack it,
 double-click to hide or show it. `Alt+C` and `Alt+Delete` copy and remove the
 active layer, and `Alt+Up` / `Alt+Down` restack it.
+
+**Group** puts the active layer in a new group, and the **Group** picker moves
+the active layer into an existing group (or out of one with *none*). Each group
+shows as a header row above its members: double-click the header to hide or show
+the whole group, **Fold / unfold group** collapses it, and **Ungroup** releases
+the layers. Group names and layer names are both editable with **Rename** (or
+`F2`). **Merge down** combines the active layer into the one below using its
+operation and opacity, and **Merge group** flattens a whole group into one
+layer. A group's name, visibility and opacity are saved in the `.h2p` project.
 
 ## Canvas and documents
 
@@ -474,7 +490,8 @@ alpha and pixels together.
 **File > Save project as…** writes a `.h2p` file: a zip containing a
 `project.json` header, one raw RGBA entry per layer and the selection mask.
 Reopening it restores the layer stack, names, order, visibility, opacity,
-operations, canvas settings, active layer, palette, pattern, mirror setting,
+operations, group membership, canvas settings, active layer, palette, pattern,
+mirror setting,
 foreground/background colors and current view.
 
 Saving and exporting live together in the **Export** docker (**Ctrl+E**), not
@@ -638,6 +655,9 @@ controls than fit.
 | `Ctrl+Shift+N` | New layer |
 | `Alt+N` / `Alt+C` / `Alt+Delete` | New / copy / delete the active layer |
 | `Alt+Up` / `Alt+Down` | Raise / lower the active layer |
+| `Alt+G` | Group the active layer |
+| `F2` | Rename the selected layer or group |
+| `Ctrl+M` | Merge the active layer down |
 | `F5` / `F9` | Play / record a macro |
 | `F11` / `Escape` | Toggle fullscreen / leave it, cancel the current step and deselect |
 | `F1` | Keyboard reference |
@@ -671,7 +691,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **462 unit tests** covering the model, canvas geometry,
+The first command runs **472 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -707,7 +727,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              462 unit tests
+│  └─ tests/              472 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 
