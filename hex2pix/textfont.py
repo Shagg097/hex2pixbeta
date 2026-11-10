@@ -28,6 +28,14 @@ FONT_FILETYPES = [
 ]
 _BITMAP_EXTENSIONS = (".bdf", ".pcf")
 _PROBE_SIZES = (8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32)
+_STYLE_WORDS = frozenset((
+    "black", "bold", "book", "condensed", "demibold", "extrabold",
+    "extracondensed", "extralight", "heavy", "italic", "light", "medium",
+    "narrow", "oblique", "regular", "semibold", "semicond", "semiconden",
+    "semicondensed", "semilight", "thin", "ultralight",
+))
+_CHARSET_WORDS = frozenset(("baltic", "ce", "cyr", "cyrillic", "greek",
+                            "tur", "turkish"))
 
 FontFace = namedtuple("FontFace", "family style path index kind")
 RenderedText = namedtuple("RenderedText", "points width height")
@@ -220,11 +228,17 @@ def system_faces():
 
 
 def family_names():
-    """Sorted, non-vertical family names from the installed font catalog."""
+    """Sorted, non-vertical family and named-weight names from the catalog."""
     names = set()
     for face in system_faces():
-        if face.family and not face.family.startswith("@"):
-            names.add(face.family)
+        family = str(face.family or "").strip()
+        if not family or family.startswith("@"):
+            continue
+        names.add(family)
+        style = str(face.style or "").strip()
+        if style and style.casefold() not in ("regular", "normal") \
+                and style.casefold() not in _CHARSET_WORDS:
+            names.add(family + " " + style)
     return tuple(sorted(names, key=str.casefold))
 
 
@@ -244,26 +258,60 @@ def _style_flags(style):
     return bold, italic
 
 
-def _style_distance(style, bold, italic):
+def _split_alias(family):
+    """Split a Tk family alias into its base family and style words."""
+    words = str(family or "").strip().split()
+    extra = []
+    known = _STYLE_WORDS | _CHARSET_WORDS
+    while len(words) > 1:
+        word = words[-1].casefold().replace("-", "").replace(" ", "")
+        if word not in known:
+            break
+        extra.insert(0, words.pop())
+    return " ".join(words), extra
+
+
+def _style_distance(style, bold, italic, extra=()):
+    text = str(style or "").casefold()
+    extra_words = [str(word).casefold() for word in extra]
+    want_bold = bool(bold) or any(word in _STYLE_WORDS
+                                  and ("bold" in word or word in
+                                       ("black", "heavy"))
+                                  for word in extra_words)
+    want_italic = bool(italic) or any(word in ("italic", "oblique")
+                                      for word in extra_words)
     face_bold, face_italic = _style_flags(style)
-    return (abs(int(face_bold) - int(bool(bold))),
-            abs(int(face_italic) - int(bool(italic))),
-            0 if "regular" in str(style or "").casefold() else 1)
+    penalty = abs(int(face_bold) - int(want_bold))
+    penalty += abs(int(face_italic) - int(want_italic))
+    for word in extra_words:
+        if word in _CHARSET_WORDS:
+            continue
+        if word not in text:
+            penalty += 1
+    if not extra and "regular" not in text:
+        penalty += 1
+    return (penalty, 0 if face_bold == want_bold else 1,
+            0 if face_italic == want_italic else 1)
 
 
 def face_for(family, bold=False, italic=False, file_path=""):
-    """The best matching face for a family and requested style."""
+    """The best matching face for a family or a Tk-style family alias."""
     faces = faces_from_file(file_path) if file_path else system_faces()
     if not faces:
         return None
     wanted = str(family or "").strip().casefold()
     matches = [face for face in faces if face.family.casefold() == wanted]
+    extra = []
+    if not matches and not file_path:
+        base, extra = _split_alias(family)
+        matches = [face for face in faces
+                   if face.family.casefold() == base.casefold()]
     if not matches and file_path:
         matches = list(faces)
     if not matches:
         return None
-    return min(matches, key=lambda face: _style_distance(face.style, bold,
-                                                         italic))
+    return min(matches, key=lambda face: _style_distance(
+        face.style, bold, italic, extra))
 
 
 @lru_cache(maxsize=512)
@@ -277,6 +325,34 @@ def _valid_sizes(path, index):
             continue
         sizes.append(size)
     return tuple(sizes)
+
+
+_VARIATION_ALIASES = {
+    "semicond": "SemiCondensed",
+    "semiconden": "SemiCondensed",
+}
+
+
+def _apply_variation(font, extra):
+    """Select a named instance on a variable font, when it has one."""
+    if not extra:
+        return
+    try:
+        names = [name.decode("utf-8") if isinstance(name, bytes) else str(name)
+                 for name in font.get_variation_names()]
+    except (AttributeError, OSError, ValueError):
+        return
+    words = [_VARIATION_ALIASES.get(str(word).casefold(), str(word))
+             for word in extra]
+    candidates = [" ".join(words)] + words
+    for candidate in candidates:
+        for name in names:
+            if name.casefold() == candidate.casefold():
+                try:
+                    font.set_variation_by_name(name)
+                except (AttributeError, OSError, ValueError):
+                    pass
+                return
 
 
 def open_face(face, size):
@@ -294,6 +370,122 @@ def open_face(face, size):
         return _open_truetype(face.path, actual, face.index), actual
 
 
+def _gdi_render(text, family, size, bold=False, italic=False):
+    """Render a Windows font family through GDI, including legacy FON aliases."""
+    if sys.platform != "win32" or not text:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    class BitmapInfoHeader(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD),
+            ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG),
+            ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD),
+        ]
+
+    class BitmapInfo(ctypes.Structure):
+        _fields_ = [("bmiHeader", BitmapInfoHeader),
+                    ("bmiColors", wintypes.DWORD * 3)]
+
+    gdi32 = ctypes.windll.gdi32
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateFontW.restype = wintypes.HANDLE
+    gdi32.CreateFontW.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, ctypes.c_wchar_p]
+    gdi32.SelectObject.restype = wintypes.HANDLE
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+    gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.GetTextExtentPoint32W.restype = wintypes.BOOL
+    gdi32.GetTextExtentPoint32W.argtypes = [
+        wintypes.HDC, ctypes.c_wchar_p, ctypes.c_int,
+        ctypes.POINTER(wintypes.SIZE)]
+    gdi32.CreateDIBSection.restype = wintypes.HANDLE
+    gdi32.CreateDIBSection.argtypes = [
+        wintypes.HDC, ctypes.POINTER(BitmapInfo), wintypes.UINT,
+        ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+    gdi32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
+    gdi32.SetTextColor.argtypes = [wintypes.HDC, wintypes.DWORD]
+    gdi32.TextOutW.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_wchar_p, ctypes.c_int]
+    gdi32.GdiFlush.argtypes = []
+
+    height = max(1, int(size))
+    weight = 700 if bold else 400
+    italic_flag = 1 if italic else 0
+    dc = None
+    font = None
+    old = None
+    bitmap = None
+    bits = ctypes.c_void_p()
+    try:
+        dc = gdi32.CreateCompatibleDC(None)
+        if not dc:
+            return None
+        font = gdi32.CreateFontW(
+            -height, 0, 0, 0, weight, italic_flag, 0, 0, 0, 0, 0, 2, 0,
+            str(family))
+        if not font:
+            return None
+        old = gdi32.SelectObject(dc, font)
+        extent = wintypes.SIZE()
+        if not gdi32.GetTextExtentPoint32W(
+                dc, str(text), len(str(text)), ctypes.byref(extent)):
+            return None
+        width, text_height = int(extent.cx), int(extent.cy)
+        if width <= 0 or text_height <= 0:
+            return RenderedText((), 0, 0)
+        info = BitmapInfo()
+        info.bmiHeader.biSize = ctypes.sizeof(BitmapInfoHeader)
+        info.bmiHeader.biWidth = width
+        info.bmiHeader.biHeight = -text_height
+        info.bmiHeader.biPlanes = 1
+        info.bmiHeader.biBitCount = 32
+        info.bmiHeader.biCompression = 0
+        bitmap = gdi32.CreateDIBSection(
+            dc, ctypes.byref(info), 0, ctypes.byref(bits), None, 0)
+        if not bitmap or not bits:
+            return None
+        ctypes.memset(bits, 0, width * text_height * 4)
+        selected = gdi32.SelectObject(dc, bitmap)
+        gdi32.SetBkMode(dc, 1)
+        gdi32.SetTextColor(dc, 0x00FFFFFF)
+        gdi32.TextOutW(dc, 0, 0, str(text), len(str(text)))
+        gdi32.GdiFlush()
+        gdi32.SelectObject(dc, selected)
+        raw = ctypes.string_at(bits, width * text_height * 4)
+        points = tuple(
+            (index % width, index // width)
+            for index in range(width * text_height)
+            if raw[index * 4] or raw[index * 4 + 1] or raw[index * 4 + 2])
+    except (AttributeError, OSError, ValueError):
+        return None
+    finally:
+        if dc and old:
+            gdi32.SelectObject(dc, old)
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if font:
+            gdi32.DeleteObject(font)
+        if dc:
+            gdi32.DeleteDC(dc)
+    if not points:
+        return RenderedText((), 0, 0)
+    return RenderedText(points, width, text_height)
+
+
 def render_text(text, family, size, bold=False, italic=False, file_path=""):
     """Rasterize one line to pixel points, or None when the face is missing.
 
@@ -303,11 +495,17 @@ def render_text(text, family, size, bold=False, italic=False, file_path=""):
     """
     face = face_for(family, bold, italic, file_path)
     if face is None:
+        if not file_path:
+            return _gdi_render(text, family, size, bold, italic)
         return None
     try:
         font, actual = open_face(face, size)
     except (OSError, ValueError):
         return None
+    if not file_path:
+        base, extra = _split_alias(family)
+        if extra and face.family.casefold() == base.casefold():
+            _apply_variation(font, extra)
     text = str(text or "")
     if not text:
         return RenderedText((), 0, 0)

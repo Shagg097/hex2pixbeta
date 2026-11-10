@@ -3158,6 +3158,15 @@ class hex2pixApp(tk.Tk):
     def _text_font_choices(self):
         choices = [textfont.BUILTIN_FONT]
         choices.extend(textfont.family_names())
+        try:
+            tk_families = sorted(
+                (name for name in tkfont.families(self)
+                 if not name.startswith("@")), key=str.casefold)
+        except tk.TclError:
+            tk_families = ()
+        for name in tk_families:
+            if name not in choices:
+                choices.append(name)
         if self.text_font_file:
             label = self._custom_font_label()
             if label not in choices:

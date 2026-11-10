@@ -37,6 +37,13 @@ class FontCatalogTest(unittest.TestCase):
         self.assertTrue(textfont._style_flags(bold.style)[0])
         self.assertTrue(textfont._style_flags(italic.style)[1])
 
+    def test_tk_weight_aliases_resolve_to_a_face(self):
+        black = textfont.face_for("Arial Black")
+        if black is None:
+            self.skipTest("Arial Black is not installed")
+        self.assertTrue(textfont._style_flags(black.style)[0])
+        self.assertIn("black", black.style.casefold())
+
     def test_render_text_makes_cropped_pixel_points(self):
         face = next((item for item in self.faces if item.kind == "truetype"),
                     None)
@@ -51,6 +58,22 @@ class FontCatalogTest(unittest.TestCase):
         self.assertTrue(all(0 <= x < rendered.width
                             and 0 <= y < rendered.height
                             for x, y in rendered.points))
+
+    def test_variable_font_named_instances_render_differently(self):
+        if textfont.face_for("Bahnschrift Light") is None:
+            self.skipTest("Bahnschrift is not installed")
+        regular = textfont.render_text("H", "Bahnschrift", 32)
+        light = textfont.render_text("H", "Bahnschrift Light", 32)
+        self.assertIsNotNone(regular)
+        self.assertIsNotNone(light)
+        self.assertNotEqual(regular.points, light.points)
+
+    def test_legacy_windows_aliases_use_the_gdi_fallback(self):
+        if os.name != "nt" or textfont.face_for("Modern") is not None:
+            self.skipTest("Windows legacy GDI aliases are not available")
+        rendered = textfont.render_text("A", "Modern", 20)
+        self.assertIsNotNone(rendered)
+        self.assertTrue(rendered.points)
 
     def test_fixed_size_windows_fonts_render_too(self):
         face = next((item for item in self.faces
