@@ -208,8 +208,13 @@ def flatten_alpha(bitmap, matte=MATTE_WHITE):
     return bitmap
 
 
-def apply_spec_to_document(document, spec, matte=MATTE_WHITE):
-    """Reshape a document's canvas to `spec` in one undoable change."""
+def apply_spec_to_document(document, spec, matte=MATTE_WHITE,
+                           working_widths=None):
+    """Reshape a document's canvas to `spec` in one undoable change.
+
+    `working_widths` also sets and enforces the canvas working limit in the
+    same undo step, so Canvas Properties can change both at once.
+    """
     before = document.begin()
     old_size = (document.width, document.height)
     resized = (spec.width, spec.height) != old_size
@@ -236,5 +241,7 @@ def apply_spec_to_document(document, spec, matte=MATTE_WHITE):
     document.ppi = spec.ppi
     document.color_mode = spec.color_mode
     document.alpha = spec.alpha
+    if working_widths is not None:
+        document.set_working_widths(working_widths, quantize=True)
     document.commit(before)
     return document

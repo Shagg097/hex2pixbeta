@@ -75,6 +75,16 @@ class FontCatalogTest(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertTrue(rendered.points)
 
+    def test_collection_fonts_keep_all_faces(self):
+        path = next((item.path for item in self.faces
+                     if item.path.lower().endswith((".ttc", ".otc"))), None)
+        if path is None:
+            self.skipTest("no TrueType collection is available")
+        faces = textfont.faces_from_file(path)
+        self.assertGreater(len(faces), 1)
+        self.assertEqual(len(faces), textfont._font_face_count(path))
+        self.assertEqual(len({face.index for face in faces}), len(faces))
+
     def test_fixed_size_windows_fonts_render_too(self):
         face = next((item for item in self.faces
                      if item.path.lower().endswith(".fon")), None)
@@ -84,6 +94,61 @@ class FontCatalogTest(unittest.TestCase):
                                         file_path=face.path)
         self.assertIsNotNone(rendered)
         self.assertTrue(rendered.points)
+
+    @staticmethod
+    def _signature(rendered):
+        return (rendered.width, rendered.height, rendered.points)
+
+    def test_symbol_fonts_use_their_own_glyphs(self):
+        if textfont.face_for("Wingdings") is None:
+            self.skipTest("Wingdings is not installed")
+        first = textfont.render_text("A", "Wingdings", 20)
+        second = textfont.render_text("B", "Wingdings", 20)
+        self.assertTrue(first.points)
+        self.assertTrue(second.points)
+        self.assertNotEqual((first.width, first.height, first.points),
+                            (second.width, second.height, second.points))
+
+    def test_symbol_fonts_do_not_render_plain_letters(self):
+        wingdings = textfont.face_for("Wingdings")
+        webdings = textfont.face_for("Webdings")
+        plain = textfont.face_for("Arial")
+        if wingdings is None or webdings is None or plain is None:
+            self.skipTest("symbol fonts or Arial are not installed")
+        wing = textfont.render_text("A", "Wingdings", 24)
+        web = textfont.render_text("A", "Webdings", 24)
+        letter = textfont.render_text("A", "Arial", 24)
+        self.assertIsNotNone(wing)
+        self.assertIsNotNone(web)
+        self.assertIsNotNone(letter)
+        self.assertNotEqual(self._signature(wing), self._signature(letter))
+        self.assertNotEqual(self._signature(web), self._signature(letter))
+        self.assertNotEqual(self._signature(wing), self._signature(web))
+
+    def test_symbol_faces_are_detected_from_their_cmap(self):
+        checked = False
+        for family in ("Wingdings", "Webdings", "Symbol"):
+            face = textfont.face_for(family)
+            if face is None:
+                continue
+            checked = True
+            self.assertTrue(
+                textfont._is_symbol_face(face.path, face.index), family)
+        if not checked:
+            self.skipTest("no Windows symbol fonts are installed")
+
+    def test_notdef_rectangle_detection(self):
+        from PIL import Image, ImageDraw
+        solid = Image.new("L", (10, 12), 0)
+        ImageDraw.Draw(solid).rectangle([1, 1, 8, 10], fill=255)
+        self.assertTrue(textfont._mask_is_notdef(solid))
+        hollow = Image.new("L", (10, 12), 0)
+        ImageDraw.Draw(hollow).rectangle([1, 1, 8, 10], outline=255)
+        self.assertTrue(textfont._mask_is_notdef(hollow))
+        letter = Image.new("L", (10, 12), 0)
+        ImageDraw.Draw(letter).line([(2, 10), (5, 1), (8, 10)], fill=255,
+                                    width=2)
+        self.assertFalse(textfont._mask_is_notdef(letter))
 
     def test_empty_text_has_no_ink(self):
         face = next((item for item in self.faces if item.kind == "truetype"),

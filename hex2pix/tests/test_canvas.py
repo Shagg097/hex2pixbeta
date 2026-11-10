@@ -6,7 +6,7 @@ from hex2pix.canvas import (ANCHOR_CODES, CanvasSpec, apply_spec_to_document,
                              convert_mode, flatten_alpha, offset_for,
                              physical_size, px_per_unit, resize_canvas,
                              scale_image)
-from hex2pix.model import Bitmap, Document, HexError
+from hex2pix.model import Bitmap, Document, HexError, paint_brush
 
 RED = (255, 0, 0, 255)
 BLUE = (0, 0, 255, 255)
@@ -144,6 +144,67 @@ class ModeTests(unittest.TestCase):
         bitmap.set_rgba(0, 0, (10, 20, 30, 0))
         flatten_alpha(bitmap, (0, 0, 0))
         self.assertEqual(bitmap.rgba(0, 0), (0, 0, 0, 255))
+
+
+class WorkingLimitTests(unittest.TestCase):
+    def test_working_layout_keeps_packing_and_order(self):
+        document = Document(1, 1)
+        document.set_working_layout({"raw_channels": (5, 6, 5, 0),
+                                     "raw_packing": "aligned",
+                                     "raw_order": "BGR"}, quantize=False)
+        self.assertEqual(document.working_widths, (5, 6, 5, 0))
+        self.assertEqual(document.working_layout(),
+                         {"raw_channels": (5, 6, 5, 0),
+                          "raw_packing": "aligned",
+                          "raw_order": "BGR"})
+
+    def test_set_working_widths_reduces_existing_pixels(self):
+        document = Document(1, 1)
+        document.bitmap.set_rgba(0, 0, (0x12, 0x34, 0x56, 0x78))
+        document.set_working_widths((4, 4, 4, 0))
+        self.assertEqual(document.bitmap.rgba(0, 0),
+                         (0x10, 0x30, 0x50, 0x78))
+
+    def test_commit_limits_direct_writes(self):
+        document = Document(2, 1)
+        document.set_working_widths((4, 4, 4, 0), quantize=False)
+        before = document.begin()
+        paint_brush(document.bitmap, None, 0, 0, 1,
+                    (0xAB, 0xCD, 0xEF, 0x40))
+        document.commit(before)
+        self.assertEqual(document.bitmap.rgba(0, 0),
+                         (0xA0, 0xC0, 0xE0, 0x40))
+
+    def test_region_limit_leaves_other_pixels_alone(self):
+        document = Document(3, 1)
+        document.set_working_widths((4, 4, 4, 0), quantize=False)
+        document.bitmap.set_rgba(0, 0, (0x12, 0x34, 0x56, 0x78))
+        document.bitmap.set_rgba(2, 0, (0x12, 0x34, 0x56, 0x78))
+        document.limit_pixels((0, 0, 1, 1))
+        self.assertEqual(document.bitmap.rgba(0, 0),
+                         (0x10, 0x30, 0x50, 0x78))
+        self.assertEqual(document.bitmap.rgba(2, 0),
+                         (0x12, 0x34, 0x56, 0x78))
+
+    def test_alpha_channel_is_limited_only_when_it_has_bits(self):
+        document = Document(1, 1)
+        document.set_working_widths((4, 4, 4, 4), quantize=False)
+        before = document.begin()
+        document.bitmap.set_rgba(0, 0, (0x12, 0x34, 0x56, 0x7F))
+        document.commit(before)
+        self.assertEqual(document.bitmap.rgba(0, 0),
+                         (0x10, 0x30, 0x50, 0x70))
+
+    def test_undo_reapplies_the_limit(self):
+        document = Document(1, 1)
+        document.bitmap.set_rgba(0, 0, (0x12, 0x34, 0x56, 0x78))
+        document.set_working_widths((4, 4, 4, 0), quantize=False)
+        before = document.begin()
+        document.bitmap.set_rgba(0, 0, (0xFF, 0xFF, 0xFF, 0xFF))
+        document.commit(before)
+        self.assertTrue(document.undo_last())
+        self.assertEqual(document.bitmap.rgba(0, 0),
+                         (0x10, 0x30, 0x50, 0x78))
 
 
 class SpecApplyTests(unittest.TestCase):

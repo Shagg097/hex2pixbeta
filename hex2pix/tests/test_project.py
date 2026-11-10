@@ -24,7 +24,8 @@ class ProjectTest(unittest.TestCase):
                             alpha=False)
         document.bitmap.set_rgba(0, 0, (255, 0, 0, 255))
         document.bitmap.set_rgba(2, 1, (0, 255, 0, 128))
-        layer = document.add_layer("Ink", op="multiply")
+        layer = document.add_layer("Ink", op="multiply", gate="nand",
+                                   blend="screen")
         layer.alpha = 128
         layer.group = "Ink"
         document.ensure_group("Ink").alpha = 200
@@ -50,6 +51,8 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(loaded.layers[0].name, "Layer 1")
         self.assertEqual(loaded.layers[1].name, "Ink")
         self.assertEqual(loaded.layers[1].op, "multiply")
+        self.assertEqual(loaded.layers[1].gate, "nand")
+        self.assertEqual(loaded.layers[1].blend, "screen")
         self.assertEqual(loaded.layers[1].alpha, 128)
         self.assertEqual(loaded.layers[1].group, "Ink")
         self.assertEqual(loaded.layers[0].group, "")
@@ -77,6 +80,24 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(len(header["layers"]), 2)
         self.assertEqual(header["groups"][0]["name"], "Ink")
         self.assertEqual(header["layers"][1]["group"], "Ink")
+
+    def test_working_layout_is_saved(self):
+        document = self.document()
+        document.set_working_layout({"raw_channels": (8, 8, 8, 8),
+                                     "raw_packing": "aligned",
+                                     "raw_order": "BGR"}, quantize=False)
+        formats.save_project(self.path, document)
+        with zipfile.ZipFile(self.path) as archive:
+            header = json.loads(archive.read("project.json").decode("utf-8"))
+        self.assertEqual(header["working"],
+                         {"raw_channels": [8, 8, 8, 8],
+                          "raw_packing": "aligned",
+                          "raw_order": "BGR"})
+        loaded = formats.load_project(self.path).document
+        self.assertEqual(loaded.working_layout(),
+                         {"raw_channels": (8, 8, 8, 8),
+                          "raw_packing": "aligned",
+                          "raw_order": "BGR"})
 
     def test_selection_is_saved(self):
         formats.save_project(self.path, self.document())
