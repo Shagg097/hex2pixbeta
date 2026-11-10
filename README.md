@@ -125,22 +125,22 @@ into the checkout without touching PATH, shortcuts or the launcher:
 
 ```bat
 curl -L -o py38xp.exe "https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/python-3.8.20-full.exe"
-py38xp.exe /quiet InstallAllUsers=0 TargetDir="%CD%\.py38" Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0
+py38xp.exe /quiet InstallAllUsers=0 TargetDir="%CD%\python38-32" Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0
 del py38xp.exe
-.py38\python.exe -c "import tkinter; print('tkinter ok')"
+python38-32\python.exe -c "import tkinter; print('tkinter ok')"
 ```
 
 Then install the XP-matched wheels and build the portable folder:
 
 ```bat
-.py38\python.exe -m pip install -r requirements-retro.txt
-.py38\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
+python38-32\python.exe -m pip install -r requirements-retro.txt
+python38-32\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
 ```
 
 `requirements-retro.txt` points at the fork's own Pillow and cx_Freeze wheels;
 PyPI's current wheels target newer Windows. If cx_Freeze stops with
 `[WinError 123]` while scanning `PATH`, one entry on `PATH` is malformed — rerun
-the build with a minimal `PATH` containing Windows and `.py38`.
+the build with a minimal `PATH` containing Windows and `python38-32`.
 
 ### What this branch costs
 
@@ -651,7 +651,7 @@ instead; `build_exe.cmd` uses whichever `py -3` resolves to, which is the 3.10
 `main` line on a normal machine:
 
 ```bash
-.py38\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
+python38-32\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
 ```
 
 The PyInstaller result is `dist\hex2pix.exe`: one self-contained file with no

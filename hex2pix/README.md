@@ -573,7 +573,7 @@ On the `retro-compat` branch, `packaging\cxfreeze_setup.py` builds the
 XP-compatible portable folder instead:
 
 ```
-.py38\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
+python38-32\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
 ```
 
 ## Tests
