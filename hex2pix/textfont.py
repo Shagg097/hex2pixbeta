@@ -11,6 +11,7 @@ does not appear in the catalog.
 from __future__ import annotations
 
 import os
+import struct
 import sys
 from collections import namedtuple
 from functools import lru_cache
@@ -52,13 +53,16 @@ def _layout_engine():
 
 
 def _open_truetype(path, size, index=0):
+    # FreeTypeFont is the same loader as ImageFont.truetype, without that
+    # helper's fallback search through the whole Windows font directory
+    # whenever a legacy face cannot be opened at the requested size.
     kwargs = {"index": int(index)}
     try:
         kwargs["layout_engine"] = _layout_engine()
-        return ImageFont.truetype(path, int(size), **kwargs)
+        return ImageFont.FreeTypeFont(path, int(size), **kwargs)
     except TypeError:
         kwargs.pop("layout_engine", None)
-        return ImageFont.truetype(path, int(size), **kwargs)
+        return ImageFont.FreeTypeFont(path, int(size), **kwargs)
 
 
 def _open_bitmap(path):
@@ -75,6 +79,68 @@ def _font_name(font, path):
     if not family:
         family = os.path.splitext(os.path.basename(path))[0]
     return family, style
+
+
+@lru_cache(maxsize=512)
+def _is_symbol_face(path, index=0):
+    """True when a font has a Windows symbol cmap instead of Unicode.
+
+    Wingdings, Webdings and Symbol map their pictures to U+F020-U+F0FF in a
+    platform-3/symbol cmap. FreeType treats that table as unmapped and draws
+    .notdef for ordinary text, so these faces need the GDI symbol path.
+    """
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(12)
+            if len(header) != 12:
+                return False
+            if header[:4] == b"ttcf":
+                count = struct.unpack_from(">I", header, 8)[0]
+                if not 0 < count <= 256 or not 0 <= index < count:
+                    return False
+                offsets = handle.read(4 * count)
+                if len(offsets) != 4 * count:
+                    return False
+                base = struct.unpack_from(">I", offsets, 4 * index)[0]
+            else:
+                base = 0
+            handle.seek(base)
+            table_header = handle.read(12)
+            if len(table_header) != 12:
+                return False
+            count = struct.unpack_from(">H", table_header, 4)[0]
+            if not 0 < count <= 512:
+                return False
+            records = handle.read(16 * count)
+            if len(records) != 16 * count:
+                return False
+            cmap = None
+            for offset in range(0, len(records), 16):
+                if records[offset:offset + 4] == b"cmap":
+                    cmap = struct.unpack_from(">I", records, offset + 8)[0]
+                    break
+            if cmap is None:
+                return False
+            handle.seek(cmap)
+            cmap_header = handle.read(4)
+            if len(cmap_header) != 4:
+                return False
+            count = struct.unpack_from(">H", cmap_header, 2)[0]
+            if not 0 < count <= 64:
+                return False
+            entries = handle.read(8 * count)
+            if len(entries) != 8 * count:
+                return False
+            symbol = False
+            for offset in range(0, len(entries), 8):
+                platform, encoding = struct.unpack_from(">HH", entries, offset)
+                if platform == 0 or (platform == 3 and encoding in (1, 10)):
+                    return False
+                if platform == 3 and encoding == 0:
+                    symbol = True
+            return symbol
+    except (OSError, struct.error, ValueError):
+        return False
 
 
 def _font_dirs():
@@ -178,6 +244,21 @@ def _font_paths():
 
 
 @lru_cache(maxsize=512)
+def _font_face_count(path):
+    """Number of faces in a TrueType/OpenType collection, else one."""
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(12)
+        if len(header) == 12 and header[:4] == b"ttcf":
+            count = struct.unpack_from(">I", header, 8)[0]
+            if count:
+                return min(count, 64)
+    except (OSError, struct.error, ValueError):
+        pass
+    return 1
+
+
+@lru_cache(maxsize=512)
 def faces_from_file(path):
     """Every usable face in one font file, including collection members."""
     path = os.path.abspath(str(path or ""))
@@ -194,14 +275,17 @@ def faces_from_file(path):
 
     faces = []
     seen = set()
-    for index in range(64):
+    for index in range(_font_face_count(path)):
         font = None
-        for size in _PROBE_SIZES:
-            try:
-                font = _open_truetype(path, size, index)
-            except (OSError, ValueError):
-                continue
-            break
+        try:
+            font = _open_truetype(path, 12, index)
+        except (OSError, ValueError):
+            for size in _PROBE_SIZES:
+                try:
+                    font = _open_truetype(path, size, index)
+                except (OSError, ValueError):
+                    continue
+                break
         if font is None:
             break
         family, style = _font_name(font, path)
@@ -227,6 +311,7 @@ def system_faces():
     return tuple(faces)
 
 
+@lru_cache(maxsize=1)
 def family_names():
     """Sorted, non-vertical family and named-weight names from the catalog."""
     names = set()
@@ -545,7 +630,21 @@ def _glyphs_are_notdef(font, text):
     return all((image.size, image.tobytes()) == first for image in images[1:])
 
 
-def _gdi_render(text, family, size, bold=False, italic=False):
+def _symbol_bytes(text):
+    """Translate symbol-font text to the byte codes GDI expects."""
+    data = bytearray()
+    for char in str(text or ""):
+        code = ord(char)
+        if 0xF000 <= code <= 0xF0FF:
+            code -= 0xF000
+        if 0 <= code <= 0xFF:
+            data.append(code)
+        else:
+            data.append(ord("?"))
+    return bytes(data)
+
+
+def _gdi_render(text, family, size, bold=False, italic=False, symbol=False):
     """Render a Windows font family through GDI, including legacy FON aliases."""
     if sys.platform != "win32" or not text:
         return None
@@ -583,6 +682,10 @@ def _gdi_render(text, family, size, bold=False, italic=False):
     gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
     gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
     gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.GetTextExtentPoint32A.restype = wintypes.BOOL
+    gdi32.GetTextExtentPoint32A.argtypes = [
+        wintypes.HDC, ctypes.c_char_p, ctypes.c_int,
+        ctypes.POINTER(wintypes.SIZE)]
     gdi32.GetTextExtentPoint32W.restype = wintypes.BOOL
     gdi32.GetTextExtentPoint32W.argtypes = [
         wintypes.HDC, ctypes.c_wchar_p, ctypes.c_int,
@@ -593,10 +696,14 @@ def _gdi_render(text, family, size, bold=False, italic=False):
         ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
     gdi32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
     gdi32.SetTextColor.argtypes = [wintypes.HDC, wintypes.DWORD]
+    gdi32.TextOutA.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_char_p, ctypes.c_int]
     gdi32.TextOutW.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
                                ctypes.c_wchar_p, ctypes.c_int]
     gdi32.GdiFlush.argtypes = []
 
+    text = str(text or "")
+    raw_text = _symbol_bytes(text) if symbol else text
     height = max(1, int(size))
     weight = 700 if bold else 400
     italic_flag = 1 if italic else 0
@@ -610,14 +717,19 @@ def _gdi_render(text, family, size, bold=False, italic=False):
         if not dc:
             return None
         font = gdi32.CreateFontW(
-            -height, 0, 0, 0, weight, italic_flag, 0, 0, 0, 0, 0, 2, 0,
-            str(family))
+            -height, 0, 0, 0, weight, italic_flag, 0, 0, 2 if symbol else 0,
+            0, 0, 2, 0, str(family))
         if not font:
             return None
         old = gdi32.SelectObject(dc, font)
         extent = wintypes.SIZE()
-        if not gdi32.GetTextExtentPoint32W(
-                dc, str(text), len(str(text)), ctypes.byref(extent)):
+        if symbol:
+            extent_ok = gdi32.GetTextExtentPoint32A(
+                dc, raw_text, len(raw_text), ctypes.byref(extent))
+        else:
+            extent_ok = gdi32.GetTextExtentPoint32W(
+                dc, raw_text, len(raw_text), ctypes.byref(extent))
+        if not extent_ok:
             return None
         width, text_height = int(extent.cx), int(extent.cy)
         if width <= 0 or text_height <= 0:
@@ -637,7 +749,10 @@ def _gdi_render(text, family, size, bold=False, italic=False):
         selected = gdi32.SelectObject(dc, bitmap)
         gdi32.SetBkMode(dc, 1)
         gdi32.SetTextColor(dc, 0x00FFFFFF)
-        gdi32.TextOutW(dc, 0, 0, str(text), len(str(text)))
+        if symbol:
+            gdi32.TextOutA(dc, 0, 0, raw_text, len(raw_text))
+        else:
+            gdi32.TextOutW(dc, 0, 0, raw_text, len(raw_text))
         gdi32.GdiFlush()
         gdi32.SelectObject(dc, selected)
         raw = ctypes.string_at(bits, width * text_height * 4)
@@ -713,10 +828,11 @@ def render_text(text, family, size, bold=False, italic=False, file_path=""):
     # .notdef box instead; GDI can, and also rescues legacy faces whose only
     # glyphs FreeType cannot draw. Prefer its result when the signs are there.
     if sys.platform == "win32" and not file_path:
-        charset = _font_charset(face.family, bold, italic)
-        if (charset == 2 or not points
-                or _glyphs_are_notdef(font, text)):
-            fallback = _gdi_render(text, face.family, size, bold, italic)
+        symbol = (_is_symbol_face(face.path, face.index)
+                  or _font_charset(face.family, bold, italic) == 2)
+        if (symbol or not points or _glyphs_are_notdef(font, text)):
+            fallback = _gdi_render(text, face.family, size, bold, italic,
+                                   symbol=symbol)
             if fallback is not None and fallback.points:
                 return fallback
     if not points:
@@ -727,6 +843,9 @@ def render_text(text, family, size, bold=False, italic=False, file_path=""):
 def clear_cache():
     """Forget discovered files and faces, e.g. after installing a font."""
     _font_paths.cache_clear()
+    _font_face_count.cache_clear()
+    _is_symbol_face.cache_clear()
     faces_from_file.cache_clear()
     system_faces.cache_clear()
+    family_names.cache_clear()
     _valid_sizes.cache_clear()

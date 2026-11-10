@@ -113,7 +113,7 @@ Verified with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 542 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 545 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/cxfreeze_setup.py` to `dist\hex2pix-retro\` | built, `--selftest` gives `RESULT: PASS`, `manual=True` |
 | Launcher PE header | 32-bit (`0x14C`), subsystem 5.1 |
@@ -770,7 +770,7 @@ python38-32\python.exe -m unittest discover -s hex2pix/tests -t .
 python38-32\python.exe run_hex2pix.py --selftest
 ```
 
-The first command runs **542 unit tests** covering the model, canvas geometry,
+The first command runs **545 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -806,7 +806,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              542 unit tests
+│  └─ tests/              545 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 
