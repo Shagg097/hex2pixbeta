@@ -33,6 +33,11 @@ DEFAULT_SETTINGS = {
     "check_updates": True,
     "skipped_version": "",
     "custom_brush": "",
+    "text_font": "Pixel 5x7",
+    "text_font_file": "",
+    "text_size": "16",
+    "text_bold": False,
+    "text_italic": False,
 }
 
 
