@@ -30,8 +30,8 @@ FORMATS = (
     {"key": "webp", "label": "WEBP lossless", "ext": ".webp", "alpha": True},
     {"key": "jpg", "label": "JPEG (flattened, quality)", "ext": ".jpg", "alpha": False},
     {"key": "ppm", "label": "PPM 24-bit", "ext": ".ppm", "alpha": False},
-    {"key": "raw", "label": "Raw pixel bits (1-32 bpp)", "ext": ".raw",
-     "alpha": True},
+    {"key": "raw", "label": "Raw pixel bits (1-32 bpp, headers)",
+     "ext": ".raw", "alpha": True},
     {"key": "hex", "label": "Hex text (.txt)", "ext": ".txt", "alpha": False},
 )
 FORMAT_BY_KEY = {item["key"]: item for item in FORMATS}
@@ -356,16 +356,9 @@ def _ensure_dir(path):
         os.makedirs(parent)
 
 
-def save_raw(bitmap, path, mode="rgb", depth=8, channels=(8, 8, 8, 0),
-             packing="packed", matte=MATTE_WHITE):
-    """Write headerless pixel bits at 1-32 bits per pixel.
-
-    `mode` is "indexed" (1-8 bits per pixel, adaptive palette) or "rgb"
-    (`channels` are the red, green, blue and alpha widths). `packing` is
-    "packed" for a dense bit stream or "aligned" for whole bytes per pixel.
-    """
+def _raw_samples(bitmap, mode, depth, channels, matte):
+    """Samples, palette, bits per pixel and alpha width for a raw export."""
     mode = str(mode or "rgb").lower()
-    packing = bitdepth.check_packing(packing)
     if mode.startswith("index"):
         try:
             depth = int(depth)
@@ -375,23 +368,169 @@ def save_raw(bitmap, path, mode="rgb", depth=8, channels=(8, 8, 8, 0),
             raise HexError("indexed bit depth must be 1-%d"
                            % bitdepth.MAX_INDEX_BITS)
         rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
-        indices, _palette = bitdepth.quantize_rgb(rgb, bitmap.width,
-                                                  bitmap.height, depth)
-        data = bitdepth.pack_samples(indices, depth, packing)
-    elif mode == "rgb":
-        widths = bitdepth.channel_widths(channels)
-        if widths[3]:
-            samples = bitdepth.sample_rgba(bitmap.data, widths)
-        else:
-            rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
-            samples = bitdepth.sample_rgb(rgb, widths[:3])
-        data = bitdepth.pack_samples(samples, sum(widths), packing)
-    else:
+        indices, palette = bitdepth.quantize_rgb(
+            rgb, bitmap.width, bitmap.height, depth)
+        return indices, palette, depth, 0
+    if mode != "rgb":
         raise HexError("unknown raw colour mode: %s" % mode)
+    widths = bitdepth.channel_widths(channels)
+    if widths[3]:
+        samples = bitdepth.sample_rgba(bitmap.data, widths)
+    else:
+        rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
+        samples = bitdepth.sample_rgb(rgb, widths[:3])
+    return samples, None, sum(widths), widths[3]
+
+
+def _palette_bytes(palette, with_alpha=False, pad_bmp=False):
+    """BMP/TGA colour table bytes (BGR or BGRA) for a quantized palette."""
+    out = bytearray()
+    for entry in palette or ():
+        red, green, blue = [int(value) for value in entry[:3]]
+        out.extend((blue, green, red))
+        if with_alpha:
+            out.append(int(entry[3]) if len(entry) > 3 else 255)
+        elif pad_bmp:
+            out.append(0)
+    return bytes(out)
+
+
+def _bmp_custom_header(width, height, bits, image_size, ppi, header,
+                       palette_count, widths):
+    """A BMP file header plus BITMAPINFOHEADER/V4/V5 for a custom depth."""
+    header = bitdepth.check_header(header)
+    if header not in ("bmp", "bmpv4", "bmpv5"):
+        raise HexError("not a BMP header: %s" % header)
+    header_size = {"bmp": 40, "bmpv4": 108, "bmpv5": 124}[header]
+    masks = bitdepth.channel_masks(widths or (0, 0, 0, 0))
+    compression = (3 if header in ("bmpv4", "bmpv5")
+                   and bits in (16, 32) and not palette_count else 0)
+    pixels_per_meter = int(round(float(ppi or 72.0) / 0.0254))
+    info = struct.pack("<IiiHHIIiiII", header_size, width, height, 1, bits,
+                       compression, image_size, pixels_per_meter,
+                       pixels_per_meter, palette_count, 0)
+    if header in ("bmpv4", "bmpv5"):
+        info += struct.pack("<IIII", *masks)
+        info += struct.pack("<I", 0)          # LCS_CALIBRATED_RGB
+        info += b"\x00" * 36                   # endpoints
+        info += b"\x00" * 12                   # gamma red/green/blue
+    if header == "bmpv5":
+        info += struct.pack("<IIII", 4, 0, 0, 0)  # LCS_GM_IMAGES
+    if len(info) != header_size:
+        raise HexError("internal BMP header size mismatch")
+    return info, header_size
+
+
+def _bmp_custom(bitmap, mode, depth, channels, packing, matte, ppi,
+                header):
+    """Wrap a custom-bit-depth stream in a BMP file.
+
+    Rows are packed independently, stored bottom-up and padded to a four-byte
+    boundary, as BMP requires. Indexed depths 1-8 get a BGR colour table.
+    Depths BMP does not define (for example 12 bpp) are written as declared;
+    such files are for tools that understand the custom layout, not ordinary
+    BMP viewers.
+    """
+    samples, palette, bits, alpha_bits = _raw_samples(
+        bitmap, mode, depth, channels, matte)
+    width, height = bitmap.width, bitmap.height
+    row_bytes = (width * ((bits + 7) // 8) if packing == "aligned"
+                 else (width * bits + 7) // 8)
+    stride = (row_bytes + 3) // 4 * 4
+    rows = []
+    for y in range(height):
+        row = bitdepth.pack_samples(samples[y * width:(y + 1) * width],
+                                    bits, packing)
+        rows.append(row + b"\x00" * (stride - len(row)))
+    payload = b"".join(reversed(rows))
+    palette_data = _palette_bytes(palette, pad_bmp=True) if palette else b""
+    info, header_size = _bmp_custom_header(
+        width, height, bits, stride * height, ppi, header,
+        len(palette) if palette else 0, (0, 0, 0, 0) if palette else channels)
+    offset = 14 + header_size + len(palette_data)
+    file_size = offset + len(payload)
+    file_header = struct.pack("<2sIHHI", b"BM", file_size, 0, 0, offset)
+    return file_header + info + palette_data + payload
+
+
+def _tga_custom(bitmap, mode, depth, channels, packing, matte, header):
+    """Wrap a custom-bit-depth stream in a TGA 2.0 file.
+
+    Indexed depths get a 24-bit BGR colour map; RGBA streams set the TGA alpha
+    descriptor when an alpha channel is present. As with the BMP path, depths
+    TGA does not define are written as declared for custom readers.
+    """
+    samples, palette, bits, alpha_bits = _raw_samples(
+        bitmap, mode, depth, channels, matte)
+    width, height = bitmap.width, bitmap.height
+    payload = bitdepth.pack_samples(samples, bits, packing)
+    if palette:
+        cmap_type = 1
+        image_type = 1
+        cmap_length = 1 << bits
+        cmap_depth = 24
+        palette_data = _palette_bytes(palette)
+        palette_data += b"\x00" * (cmap_length * 3 - len(palette_data))
+        descriptor = 0x20
+    else:
+        cmap_type = 0
+        image_type = 2
+        cmap_length = 0
+        cmap_depth = 0
+        palette_data = b""
+        descriptor = 0x20 | (8 if alpha_bits else 0)
+    header_bytes = struct.pack(
+        "<BBBHHBHHHHBB", 0, cmap_type, image_type, 0, cmap_length,
+        cmap_depth, 0, 0, width, height, bits, descriptor)
+    return header_bytes + palette_data + payload
+
+
+def save_raw(bitmap, path, mode="rgb", depth=8, channels=(8, 8, 8, 0),
+             packing="packed", matte=MATTE_WHITE, header="raw", ppi=72.0):
+    """Write pixel bits at 1-32 bits per pixel, optionally with a header.
+
+    `mode` is "indexed" (1-8 bits per pixel, adaptive palette) or "rgb"
+    (`channels` are the red, green, blue and alpha widths). `packing` is
+    "packed" for a dense bit stream or "aligned" for whole bytes per pixel.
+    `header` is "raw" for headerless data, one of the BMP variants, or "tga".
+    """
+    packing = bitdepth.check_packing(packing)
+    header = bitdepth.check_header(header)
+    if header == "raw":
+        samples, _palette, bits, _alpha_bits = _raw_samples(
+            bitmap, mode, depth, channels, matte)
+        data = bitdepth.pack_samples(samples, bits, packing)
+    elif header in ("bmp", "bmpv4", "bmpv5"):
+        data = _bmp_custom(bitmap, mode, depth, channels, packing, matte,
+                           ppi, header)
+    else:
+        data = _tga_custom(bitmap, mode, depth, channels, packing, matte,
+                           header)
     _ensure_dir(path)
     with open(path, "wb") as handle:
         handle.write(data)
     return len(data)
+
+
+def raw_size(width, height, bits, packing="packed", header="raw",
+             palette_count=0):
+    """Bytes a custom-bit-depth export will take, including its header."""
+    header = bitdepth.check_header(header)
+    bits = int(bits)
+    if header == "raw":
+        return bitdepth.byte_size(width, height, bits, packing)
+    if header in ("bmp", "bmpv4", "bmpv5"):
+        if bitdepth.check_packing(packing) == "aligned":
+            row_bytes = int(width) * ((bits + 7) // 8)
+        else:
+            row_bytes = (int(width) * bits + 7) // 8
+        stride = (row_bytes + 3) // 4 * 4
+        header_size = {"bmp": 40, "bmpv4": 108, "bmpv5": 124}[header]
+        return (14 + header_size + int(palette_count) * 4
+                + stride * int(height))
+    palette_bytes = int(palette_count) * 3 if palette_count else 0
+    return 18 + palette_bytes + bitdepth.byte_size(width, height, bits,
+                                                    packing)
 
 
 def _save_pillow(image, path, image_format, dpi=None, **kwargs):
@@ -409,13 +548,13 @@ def _save_pillow(image, path, image_format, dpi=None, **kwargs):
 def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
          keep_alpha=True, gif_colors=256, png_compress=6,
          raw_mode="rgb", raw_depth=8, raw_channels=(8, 8, 8, 0),
-         raw_packing="packed"):
+         raw_packing="packed", raw_header="raw"):
     """Write `bitmap` to `path` in the given format. Returns bytes written.
 
     `keep_alpha` flattens transparency onto `matte` when false, `gif_colors`
     caps the adaptive GIF palette and `png_compress` is Pillow's 0-9 deflate
     level. Formats that cannot store alpha always flatten. The `raw_*` options
-    pick the layout of the headerless raw pixel format.
+    pick the layout and optional header of the custom-bit-depth format.
     """
     path = str(path)
     key = (key or "png").lower()
@@ -434,7 +573,7 @@ def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
         save_hex_text(bitmap, path)
     elif key == "raw":
         save_raw(bitmap, path, raw_mode, raw_depth, raw_channels,
-                 raw_packing, matte)
+                 raw_packing, matte, raw_header, ppi)
     elif key == "jpg":
         _save_pillow(to_pil(bitmap, matte, flatten_alpha=True), path, "JPEG",
                      dpi=ppi, quality=int(quality), subsampling=0)

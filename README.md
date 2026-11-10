@@ -108,7 +108,7 @@ Verified with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 443 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 450 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/cxfreeze_setup.py` to `dist\hex2pix-retro\` | built, `--selftest` gives `RESULT: PASS`, `manual=True` |
 | Launcher PE header | 32-bit (`0x14C`), subsystem 5.1 |
@@ -476,8 +476,10 @@ visible layer), trim transparent edges, scale 1–32× with nearest or bilinear
 sampling, set the PPI stored in the file, keep or drop transparency against a
 matte, and tune JPEG quality, GIF palette size and PNG compression. The docker
 shows the active project file and the resulting pixel size before you write.
-**Raw bits...** opens a dialog for headerless 1–32 bpp output: indexed or
-RGB(A), preset or per-channel widths, and packed or byte-aligned packing.
+**Variable bits per pixel** switches the panel to custom-depth output: choose
+Raw (none), BMP, BMP V4, BMP V5 or TGA; Indexed or RGB(A); a channel preset or
+per-channel widths; and packed or byte-aligned packing. BMP and TGA headers wrap
+the stream, and indexed modes carry a colour table.
 
 **File > Open…** recognizes `.h2p` automatically. Once a document is a `.h2p`,
 `Ctrl+S` saves the project instead of flattening it to an image.
@@ -497,7 +499,7 @@ Reading goes through Pillow: PNG, BMP, GIF, TGA, ICO, TIFF, WEBP, JPEG and PPM.
 | WEBP | Yes | Lossless |
 | JPEG | No | Flattened, adjustable quality |
 | PPM | No | Binary `P6` |
-| Raw pixel bits | Optional | Headerless 1–32 bpp; indexed or RGB(A), packed or byte-aligned |
+| Raw pixel bits | Optional | 1–32 bpp; Raw/BMP/BMP V4/BMP V5/TGA headers; indexed or RGB(A), packed or byte-aligned |
 | Hex text | n/a | `RRGGBBAA` rows; `.` for transparent |
 
 BMP and PPM are written by hand rather than through Pillow, so the 24-bit BMP
@@ -506,11 +508,15 @@ alpha intact.
 
 ### Raw bits
 
-**Raw pixel bits** writes a headerless stream: the values only, with no size,
-palette or row padding. **Raw bits...** in the Export docker chooses between
-**Indexed** (1–8 bits per pixel on an adaptive palette) and **RGB(A)** (0–16
-bits per channel, adding up to 32). Channels are written most significant bit
-first in R, G, B, A order and keep the top bits of each 8-bit value.
+**Variable bits per pixel** in the Export docker turns on the custom encoder.
+Its **Header** value can be **Raw (none)** for the values only, **BMP**, **BMP
+V4** or **BMP V5** for a BMP file header, or **TGA** for a TGA 2.0 header. BMP
+and TGA add a colour table for indexed output and wrap the packed payload;
+nonstandard RGB depths are written as declared for tools that understand the
+custom layout. Choose **Indexed** (1–8 bits per pixel on an adaptive palette) or
+**RGB(A)** (0–16 bits per channel, adding up to 32). Channels are written most
+significant bit first in R, G, B, A order and keep the top bits of each 8-bit
+value.
 
 **Packed** runs the pixels together bit by bit. 12-bit 4:4:4 therefore puts two
 pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`), and 6-bit 2:2:2 puts
@@ -665,7 +671,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **443 unit tests** covering the model, canvas geometry,
+The first command runs **450 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -701,7 +707,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              443 unit tests
+│  └─ tests/              450 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 

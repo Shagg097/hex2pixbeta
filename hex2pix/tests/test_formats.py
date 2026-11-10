@@ -337,6 +337,93 @@ class RawBitDepthTests(unittest.TestCase):
         self.assertEqual(len(data), 1)
         self.assertIn(data[0], (0x0F, 0xF0))
 
+    def test_bmp_header_wraps_custom_bits(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
+                             (0xAB, 0xCD, 0xEF, 255))
+        target = self.path("out.bmp")
+        size = formats.save(bitmap, target, "raw", raw_mode="rgb",
+                            raw_channels=(4, 4, 4, 0),
+                            raw_packing="packed", raw_header="bmp")
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(size, len(data))
+        self.assertEqual(data[:2], b"BM")
+        self.assertEqual(struct.unpack_from("<I", data, 14)[0], 40)
+        self.assertEqual(struct.unpack_from("<H", data, 28)[0], 12)
+        self.assertEqual(struct.unpack_from("<ii", data, 18), (2, 1))
+        offset = struct.unpack_from("<I", data, 10)[0]
+        self.assertEqual(data[offset:], b"\x13\x5a\xce\x00")
+
+    def test_bmp_v4_and_v5_headers_are_selectable(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255))
+        for header, header_size in (("bmpv4", 108), ("bmpv5", 124)):
+            target = self.path(header + ".bmp")
+            formats.save(bitmap, target, "raw", raw_mode="rgb",
+                         raw_channels=(4, 4, 4, 0), raw_packing="packed",
+                         raw_header=header)
+            with open(target, "rb") as handle:
+                data = handle.read()
+            self.assertEqual(struct.unpack_from("<I", data, 14)[0],
+                             header_size, header)
+            self.assertEqual(struct.unpack_from("<H", data, 28)[0], 12,
+                             header)
+
+    def test_tga_header_wraps_custom_bits(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
+                             (0xAB, 0xCD, 0xEF, 255))
+        target = self.path("out.tga")
+        formats.save(bitmap, target, "raw", raw_mode="rgb",
+                     raw_channels=(4, 4, 4, 0), raw_packing="packed",
+                     raw_header="tga")
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(data[:3], b"\x00\x00\x02")
+        self.assertEqual(struct.unpack_from("<HH", data, 12), (2, 1))
+        self.assertEqual(data[16], 12)
+        self.assertEqual(data[18:], b"\x13\x5a\xce")
+
+    def test_indexed_bmp_has_a_colour_table(self):
+        bitmap = self.bitmap(*([(255, 255, 255, 255)] * 4
+                               + [(0, 0, 0, 255)] * 4))
+        target = self.path("indexed.bmp")
+        formats.save(bitmap, target, "raw", raw_mode="indexed",
+                     raw_depth=1, raw_packing="packed", raw_header="bmp")
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(struct.unpack_from("<H", data, 28)[0], 1)
+        offset = struct.unpack_from("<I", data, 10)[0]
+        self.assertEqual(offset, 54 + 8)
+        self.assertEqual(len(data) - offset, 4)
+        with Image.open(target) as image:
+            image.load()
+            self.assertEqual(image.size, (8, 1))
+
+    def test_indexed_tga_has_a_colour_map(self):
+        bitmap = self.bitmap(*([(255, 255, 255, 255)] * 4
+                               + [(0, 0, 0, 255)] * 4))
+        target = self.path("indexed.tga")
+        formats.save(bitmap, target, "raw", raw_mode="indexed",
+                     raw_depth=1, raw_packing="packed", raw_header="tga")
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(data[1:3], b"\x01\x01")
+        self.assertEqual(struct.unpack_from("<H", data, 5)[0], 2)
+        self.assertEqual(data[7], 24)
+        self.assertEqual(data[16], 1)
+        self.assertEqual(len(data), 18 + 6 + 1)
+
+    def test_raw_size_accounts_for_headers(self):
+        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "raw"), 3)
+        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "bmp"), 58)
+        self.assertEqual(formats.raw_size(2, 1, 12, "packed", "tga"), 21)
+
+    def test_header_names_and_extensions(self):
+        self.assertEqual(bitdepth.header_key("BMP V4"), "bmpv4")
+        self.assertEqual(bitdepth.header_label("bmpv5"), "BMP V5")
+        self.assertEqual(bitdepth.header_ext("tga"), ".tga")
+        with self.assertRaises(HexError):
+            bitdepth.check_header("png")
+
     def test_raw_rejects_bad_channel_totals(self):
         for channels in ((0, 0, 0, 0), (16, 16, 16, 16), (8, 8, 8, 9)):
             with self.assertRaises(HexError):
