@@ -2,9 +2,10 @@
 
 import unittest
 
-from hex2pix.filters import (brightness, contrast, edges, grayscale, hue_shift,
-                             luminance, noise, posterize, saturate, sepia,
-                             threshold)
+from hex2pix.filters import (auto_levels, blur, brightness, contrast, edges,
+                             gamma, grayscale, hue_shift, invert, luminance,
+                             mix_filter, noise, pixelate, posterize, saturate,
+                             sepia, sharpen, solarize, threshold)
 from hex2pix.model import Bitmap
 
 RED = (255, 0, 0, 255)
@@ -243,6 +244,184 @@ class MaskTest(unittest.TestCase):
         self.assertEqual(edges(bitmap, mask), 1)
         self.assertEqual(bitmap.rgba(0, 1), (0, 0, 0, 255))
         self.assertEqual(bitmap.rgba(2, 1), (255, 255, 255, 255))
+
+
+class InvertTest(unittest.TestCase):
+    def test_red_becomes_cyan(self):
+        bitmap = one(RED)
+        self.assertEqual(invert(bitmap, None), 1)
+        self.assertEqual(bitmap.rgba(0, 0), (0, 255, 255, 255))
+
+    def test_alpha_is_kept(self):
+        bitmap = one((10, 20, 30, 40))
+        invert(bitmap, None)
+        self.assertEqual(bitmap.rgba(0, 0)[3], 40)
+
+    def test_mask_limits_the_change(self):
+        bitmap = Bitmap(2, 1)
+        bitmap.set_rgba(0, 0, RED)
+        bitmap.set_rgba(1, 0, RED)
+        mask = bytearray(2)
+        mask[1] = 255
+        self.assertEqual(invert(bitmap, mask), 1)
+        self.assertEqual(bitmap.rgba(0, 0), RED)
+        self.assertEqual(bitmap.rgba(1, 0), (0, 255, 255, 255))
+
+
+class SolarizeTest(unittest.TestCase):
+    def test_bright_pixels_are_inverted(self):
+        bitmap = one((200, 200, 200, 255))
+        self.assertEqual(solarize(bitmap, None, 128), 1)
+        self.assertEqual(bitmap.rgba(0, 0), (55, 55, 55, 255))
+
+    def test_dark_pixels_are_untouched(self):
+        bitmap = one(DARK)
+        solarize(bitmap, None, 128)
+        self.assertEqual(bitmap.rgba(0, 0), DARK)
+
+    def test_level_zero_inverts_everything(self):
+        bitmap = one(RED)
+        solarize(bitmap, None, 0)
+        self.assertEqual(bitmap.rgba(0, 0), (0, 255, 255, 255))
+
+
+class GammaTest(unittest.TestCase):
+    def test_two_hundred_lightens_midtones(self):
+        bitmap = one((64, 64, 64, 255))
+        gamma(bitmap, None, 200)
+        self.assertEqual(bitmap.rgba(0, 0), (128, 128, 128, 255))
+
+    def test_hundred_is_identity(self):
+        bitmap = one((64, 64, 64, 255))
+        gamma(bitmap, None, 100)
+        self.assertEqual(bitmap.rgba(0, 0), (64, 64, 64, 255))
+
+    def test_below_hundred_darkens(self):
+        bitmap = one((200, 200, 200, 255))
+        gamma(bitmap, None, 50)
+        self.assertEqual(bitmap.rgba(0, 0), (157, 157, 157, 255))
+
+    def test_alpha_is_kept(self):
+        bitmap = one((64, 64, 64, 33))
+        gamma(bitmap, None, 200)
+        self.assertEqual(bitmap.rgba(0, 0)[3], 33)
+
+
+class AutoLevelsTest(unittest.TestCase):
+    def test_stretches_the_tone_range(self):
+        bitmap = Bitmap(2, 1)
+        bitmap.set_rgba(0, 0, (50, 50, 50, 255))
+        bitmap.set_rgba(1, 0, (200, 200, 200, 255))
+        self.assertEqual(auto_levels(bitmap, None), 2)
+        self.assertEqual(bitmap.rgba(0, 0), (0, 0, 0, 255))
+        self.assertEqual(bitmap.rgba(1, 0), (255, 255, 255, 255))
+
+    def test_flat_image_is_unchanged(self):
+        bitmap = one((100, 100, 100, 255))
+        auto_levels(bitmap, None)
+        self.assertEqual(bitmap.rgba(0, 0), (100, 100, 100, 255))
+
+    def test_alpha_is_kept(self):
+        bitmap = one((10, 20, 30, 44))
+        auto_levels(bitmap, None)
+        self.assertEqual(bitmap.rgba(0, 0)[3], 44)
+
+
+class BlurTest(unittest.TestCase):
+    def test_flat_area_stays_flat(self):
+        bitmap = Bitmap(3, 3)
+        for y in range(3):
+            for x in range(3):
+                bitmap.set_rgba(x, y, GREY)
+        blur(bitmap, None, 1)
+        for y in range(3):
+            for x in range(3):
+                self.assertEqual(bitmap.rgba(x, y), GREY)
+
+    def test_a_single_dot_spreads(self):
+        bitmap = Bitmap(3, 1)
+        bitmap.set_rgba(0, 0, (0, 0, 0, 255))
+        bitmap.set_rgba(1, 0, (255, 255, 255, 255))
+        bitmap.set_rgba(2, 0, (0, 0, 0, 255))
+        self.assertEqual(blur(bitmap, None, 1), 3)
+        for x in range(3):
+            self.assertEqual(bitmap.rgba(x, 0), (85, 85, 85, 255))
+
+    def test_alpha_is_kept(self):
+        bitmap = one((255, 255, 255, 42))
+        blur(bitmap, None, 2)
+        self.assertEqual(bitmap.rgba(0, 0)[3], 42)
+
+
+class SharpenTest(unittest.TestCase):
+    def edge(self):
+        bitmap = Bitmap(3, 1)
+        for x, level in enumerate((100, 200, 100)):
+            bitmap.set_rgba(x, 0, (level, level, level, 255))
+        return bitmap
+
+    def test_high_contrast_centre_is_pushed_up(self):
+        bitmap = self.edge()
+        self.assertEqual(sharpen(bitmap, None, 100), 3)
+        self.assertEqual(bitmap.rgba(1, 0), (255, 255, 255, 255))
+
+    def test_flat_area_is_unchanged(self):
+        bitmap = Bitmap(3, 1)
+        for x in range(3):
+            bitmap.set_rgba(x, 0, (100, 100, 100, 255))
+        sharpen(bitmap, None, 100)
+        for x in range(3):
+            self.assertEqual(bitmap.rgba(x, 0), (100, 100, 100, 255))
+
+    def test_zero_amount_changes_nothing(self):
+        bitmap = self.edge()
+        before = list(bitmap.data)
+        sharpen(bitmap, None, 0)
+        self.assertEqual(bitmap.data, bytearray(before))
+
+
+class PixelateTest(unittest.TestCase):
+    def test_block_is_averaged(self):
+        bitmap = Bitmap(2, 1)
+        bitmap.set_rgba(0, 0, (0, 0, 0, 255))
+        bitmap.set_rgba(1, 0, (255, 255, 255, 255))
+        self.assertEqual(pixelate(bitmap, None, 2), 2)
+        self.assertEqual(bitmap.rgba(0, 0), (127, 127, 127, 255))
+        self.assertEqual(bitmap.rgba(1, 0), (127, 127, 127, 255))
+
+    def test_alpha_is_kept(self):
+        bitmap = one((255, 255, 255, 12))
+        pixelate(bitmap, None, 4)
+        self.assertEqual(bitmap.rgba(0, 0)[3], 12)
+
+    def test_mask_limits_the_change(self):
+        bitmap = Bitmap(2, 1)
+        bitmap.set_rgba(0, 0, (0, 0, 0, 255))
+        bitmap.set_rgba(1, 0, (255, 255, 255, 255))
+        mask = bytearray(2)
+        mask[0] = 255
+        self.assertEqual(pixelate(bitmap, mask, 2), 1)
+        self.assertEqual(bitmap.rgba(0, 0), (127, 127, 127, 255))
+        self.assertEqual(bitmap.rgba(1, 0), (255, 255, 255, 255))
+
+
+class MixFilterTest(unittest.TestCase):
+    def test_quarter_strength_blends_with_the_original(self):
+        bitmap = one(RED)
+        self.assertEqual(mix_filter(bitmap, None, grayscale, 25), 1)
+        self.assertEqual(bitmap.rgba(0, 0), (210, 19, 19, 255))
+
+    def test_zero_strength_changes_nothing(self):
+        bitmap = one(RED)
+        self.assertEqual(mix_filter(bitmap, None, grayscale, 0), 0)
+        self.assertEqual(bitmap.rgba(0, 0), RED)
+
+    def test_full_strength_matches_the_filter(self):
+        mixed = one(RED)
+        plain = one(RED)
+        mix_filter(mixed, None, grayscale, 100)
+        grayscale(plain, None)
+        self.assertEqual(mixed.rgba(0, 0), plain.rgba(0, 0))
 
 
 if __name__ == "__main__":

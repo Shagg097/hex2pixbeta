@@ -8,10 +8,14 @@ from hex2pix.model import (
     Bitmap, Document, HexError, Selection, apply_hue, apply_map, apply_op,
     apply_ramp, blit, block_from_bitmap, clean_path, clear_region, combine,
     flip_horizontal,
-    flip_vertical, flood_fill, format_dump, hex_str, hue_shift, invert_colors,
+    flip_vertical, flood_fill, format_dump, hex_code, hex_str, hue_shift,
+    invert_colors,
     paint_brush, paint_line, parse_block, parse_hex, parse_hex_map, pick_related,
     RotationDrag, extract_selection, piece_mask, place_block, rotate90,
     rotate_piece, rotate_ramp, scale_box,
+    box_from_quad, quad_centre, quad_from_box, quad_handles,
+    quad_move_corner, quad_rotate, quad_scale, quad_shear, quad_translate,
+    warp_piece,
     selected_bytes, selection_ellipse_mask, selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block, unique_colors,
     fill_holes,
@@ -39,6 +43,9 @@ class HexColorTests(unittest.TestCase):
         self.assertEqual(hex_str(255, 0, 0), "FF0000")
         self.assertEqual(hex_str(255, 0, 0, 0), "FF000000")
         self.assertEqual(hex_str(1, 2, 3, 254), "010203FE")
+        self.assertEqual(hex_code((1, 2, 3, 255), "BGR"), "030201")
+        self.assertEqual(hex_code((1, 2, 3, 4), "BGR"), "03020104")
+        self.assertEqual(hex_code((1, 2, 3, 255), "RGX"), "010203")
 
     def test_combine_reference_values(self):
         self.assertEqual(combine(250, 20, "add", 255, True), 14)
@@ -95,7 +102,52 @@ class LayerReorderTests(unittest.TestCase):
         self.assertTrue(doc.reorder_layer(2, index=0))
         self.assertEqual([l.name for l in doc.layers],
                          ["middle", "top", "base"])
-        self.assertEqual(doc.layer_index, 2)
+        # "top" is still the active layer, now one slot lower.
+        self.assertEqual(doc.layer_index, 1)
+
+
+class LayerGroupMoveTests(unittest.TestCase):
+    def _stack(self):
+        doc = Document(4, 4)
+        doc.layers[0].name = "base"
+        doc.add_layer("middle")
+        doc.add_layer("top")
+        return doc
+
+    def test_a_layer_can_be_dragged_into_a_group(self):
+        doc = self._stack()
+        doc.group_layer(index=0, name="Art")
+        self.assertTrue(doc.move_layer_to(1, index=2, group="Art"))
+        self.assertEqual([layer.name for layer in doc.layers],
+                         ["base", "top", "middle"])
+        self.assertEqual(doc.layers[1].group, "Art")
+        self.assertEqual([layer.name for layer in
+                          (doc.layers[index]
+                           for index in doc.group_members("Art"))],
+                         ["base", "top"])
+        self.assertEqual(doc.layer_index, 1)
+
+    def test_dropping_outside_a_group_leaves_it(self):
+        doc = self._stack()
+        doc.group_layer(index=0, name="Art")
+        self.assertTrue(doc.move_layer_to(0, index=1, group=""))
+        self.assertEqual(doc.layers[0].group, "")
+        self.assertEqual([doc.layers[index].name
+                          for index in doc.group_members("Art")],
+                         ["base"])
+
+    def test_an_empty_group_is_forgotten(self):
+        doc = self._stack()
+        doc.group_layer(index=1, name="Art")
+        self.assertTrue(doc.move_layer_to(1, index=1, group=""))
+        self.assertEqual(doc.groups, [])
+
+    def test_moves_that_change_nothing_report_false(self):
+        doc = self._stack()
+        self.assertFalse(doc.move_layer_to(1, index=1))
+        doc.group_layer(index=1, name="Art")
+        self.assertFalse(doc.move_layer_to(1, index=1, group="Art"))
+        self.assertFalse(doc.move_layer_to(9, index=1))
 
 
 class BlockTests(unittest.TestCase):
@@ -417,10 +469,10 @@ class UndoTests(unittest.TestCase):
 
 
 class LayerTests(unittest.TestCase):
-    def stacked(self, op):
+    def stacked(self, op="none", gate="none", blend="none"):
         document = Document(1, 1)
         document.bitmap.set_rgba(0, 0, (200, 100, 50, 255))
-        document.add_layer(op=op)
+        document.add_layer(op=op, gate=gate, blend=blend)
         document.bitmap.set_rgba(0, 0, (100, 100, 100, 255))
         return document.flatten().rgba(0, 0)
 
@@ -434,10 +486,98 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(combine(100, 0, "divide", 255, False), 255)
 
     def test_layer_operations(self):
-        self.assertEqual(self.stacked("add"), (255, 200, 150, 255))
-        self.assertEqual(self.stacked("subtract"), (100, 0, 0, 255))
-        self.assertEqual(self.stacked("multiply"), (78, 39, 19, 255))
-        self.assertEqual(self.stacked("divide"), (255, 255, 127, 255))
+        self.assertEqual(self.stacked(op="add"), (255, 200, 150, 255))
+        self.assertEqual(self.stacked(op="subtract"), (100, 0, 0, 255))
+        self.assertEqual(self.stacked(op="multiply"), (78, 39, 19, 255))
+        self.assertEqual(self.stacked(op="divide"), (255, 255, 127, 255))
+        for op in model.LAYER_OPS:
+            self.assertIn(op, model.LAYER_OP_LABELS)
+
+    def test_layer_gate_and_blend_operations(self):
+        self.assertEqual(combine(200, 100, "xor"), 172)
+        self.assertEqual(combine(200, 100, "nand"), 191)
+        self.assertEqual(combine(10, 200, "screen"), 202)
+        self.assertEqual(combine(100, 200, "overlay"), 157)
+        self.assertEqual(combine(10, 200, "darken"), 10)
+        self.assertEqual(combine(10, 200, "lighten"), 200)
+        self.assertEqual(combine(10, 200, "difference"), 190)
+        self.assertEqual(self.stacked(gate="nand"), (191, 155, 223, 255))
+        self.assertEqual(self.stacked(gate="xor"), (172, 0, 86, 255))
+        self.assertEqual(self.stacked(blend="screen"), (222, 161, 130, 255))
+        self.assertEqual(self.stacked(blend="overlay"), (188, 78, 39, 255))
+        self.assertEqual(self.stacked(blend="darken"), (100, 100, 50, 255))
+        self.assertEqual(self.stacked(blend="lighten"), (200, 100, 100, 255))
+        self.assertEqual(self.stacked(blend="difference"), (100, 0, 50, 255))
+        for gate in model.LAYER_GATES:
+            self.assertIn(gate, model.LAYER_GATE_LABELS)
+        for blend in model.LAYER_BLENDS:
+            self.assertIn(blend, model.LAYER_BLEND_LABELS)
+
+    def test_every_gate_type_computes_its_truth_table(self):
+        below, above = 0xF0, 0x0F
+        self.assertEqual(model.gate_value(below, above, "and"), 0x00)
+        self.assertEqual(model.gate_value(below, above, "or"), 0xFF)
+        self.assertEqual(model.gate_value(below, above, "xor"), 0xFF)
+        self.assertEqual(model.gate_value(below, above, "nand"), 0xFF)
+        self.assertEqual(model.gate_value(below, above, "nor"), 0x00)
+        self.assertEqual(model.gate_value(below, above, "xnor"), 0x00)
+        self.assertEqual(model.gate_value(below, above, "not"), 0xF0)
+        for gate in model.LAYER_GATES:
+            if gate != "none":
+                value = model.gate_value(below, above, gate)
+                self.assertTrue(0 <= value <= 255, gate)
+
+    def test_three_option_groups_add_up_on_one_layer(self):
+        document = Document(1, 1)
+        document.bitmap.set_rgba(0, 0, (200, 100, 50, 255))
+        document.add_layer(op="multiply", gate="nand", blend="screen")
+        document.bitmap.set_rgba(0, 0, (100, 100, 100, 255))
+        all_three = document.flatten().rgba(0, 0)[:3]
+        expected = tuple(model.combine_layer(value, 100, "multiply", "nand",
+                                            "screen")
+                         for value in (200, 100, 50))
+        self.assertEqual(all_three, expected)
+        self.assertNotEqual(all_three, self.stacked(op="multiply")[:3])
+        self.assertNotEqual(all_three, self.stacked(gate="nand")[:3])
+        self.assertNotEqual(all_three, self.stacked(blend="screen")[:3])
+
+    def test_layer_state_keeps_the_three_groups_apart(self):
+        document = Document(1, 1)
+        layer = document.active_layer
+        layer.op = "divide"
+        layer.gate = "nor"
+        layer.blend = "screen"
+        state = layer.to_state()
+        self.assertEqual((state["op"], state["gate"], state["blend"]),
+                         ("divide", "nor", "screen"))
+        restored = model.Layer.from_state(state, 1, 1)
+        self.assertEqual((restored.op, restored.gate, restored.blend),
+                         ("divide", "nor", "screen"))
+        copied = layer.copy()
+        self.assertEqual((copied.op, copied.gate, copied.blend),
+                         ("divide", "nor", "screen"))
+
+    def test_older_projects_move_op_into_the_right_group(self):
+        for old, op, gate, blend in (("normal", "none", "none", "none"),
+                                     ("screen", "none", "none", "screen"),
+                                     ("multiply", "multiply", "none",
+                                      "none"),
+                                     ("xor", "none", "xor", "none"),
+                                     ("nand", "none", "nand", "none")):
+            state = {"name": "Layer", "op": old, "data": b"\x00" * 4}
+            layer = model.Layer.from_state(state, 1, 1)
+            self.assertEqual((layer.op, layer.gate, layer.blend),
+                             (op, gate, blend), old)
+        # Two-group projects saved earlier: "op" was the gate.
+        for old_gate, old_blend, gate, blend in (("nand", "normal", "nand",
+                                                 "none"),
+                                                ("none", "screen", "none",
+                                                 "screen")):
+            state = {"name": "Layer", "op": old_gate, "blend": old_blend,
+                     "data": b"\x00" * 4}
+            layer = model.Layer.from_state(state, 1, 1)
+            self.assertEqual((layer.op, layer.gate, layer.blend),
+                             ("none", gate, blend), old_gate)
 
     def test_layer_alpha_is_the_strength(self):
         document = Document(1, 1)
@@ -471,14 +611,17 @@ class LayerTests(unittest.TestCase):
         document.undo_last()
         self.assertEqual(document.layer_count, 1)
         self.assertEqual(document.bitmap.rgba(0, 0), RED)
-        self.assertEqual(document.active_layer.op, "normal")
+        self.assertEqual(document.active_layer.op, "none")
 
     def test_normal_is_the_default_and_covers(self):
         document = Document(1, 1)
         document.bitmap.set_rgba(0, 0, (200, 100, 50, 255))
-        self.assertEqual(document.active_layer.op, "normal")
+        self.assertEqual(model.LAYER_OP_LABELS["none"], "None")
+        self.assertEqual(model.LAYER_GATE_LABELS["none"], "None")
+        self.assertEqual(model.LAYER_BLEND_LABELS["none"], "None")
+        self.assertEqual(document.active_layer.op, "none")
         document.add_layer()
-        self.assertEqual(document.active_layer.op, "normal")
+        self.assertEqual(document.active_layer.op, "none")
         document.bitmap.set_rgba(0, 0, (10, 20, 30, 255))
         self.assertEqual(document.flatten().rgba(0, 0), (10, 20, 30, 255))
 
@@ -537,6 +680,107 @@ class LayerTests(unittest.TestCase):
         document.move_layer(-1)
         self.assertEqual(document.active_layer.op, "subtract")
         self.assertEqual(document.flatten().rgba(0, 0), (200, 100, 50, 255))
+
+
+class LayerGroupTests(unittest.TestCase):
+    def document(self):
+        document = Document(1, 1)
+        document.bitmap.set_rgba(0, 0, (10, 20, 30, 255))
+        document.layers[0].name = "base"
+        document.add_layer("ink")
+        document.bitmap.set_rgba(0, 0, (200, 100, 50, 255))
+        return document
+
+    def test_group_and_members(self):
+        document = self.document()
+        group = document.group_layer()
+        self.assertEqual(group.name, "Group 1")
+        self.assertEqual(document.active_layer.group, "Group 1")
+        self.assertEqual(document.group_members("Group 1"), [1])
+        document.group_layer(index=0, name="Group 1")
+        self.assertEqual(document.group_members("Group 1"), [0, 1])
+        document.group_layer(index=1, name="Ink")
+        self.assertEqual([l.group for l in document.layers],
+                         ["Group 1", "Ink"])
+        self.assertEqual([g.name for g in document.groups],
+                         ["Group 1", "Ink"])
+        self.assertEqual(document.ensure_group("Group 1").name, "Group 1")
+
+    def test_group_visibility_and_alpha(self):
+        document = self.document()
+        document.group_layer()
+        group = document.group("Group 1")
+        group.visible = False
+        self.assertEqual(document.flatten().rgba(0, 0), (10, 20, 30, 255))
+        group.visible = True
+        group.alpha = 128
+        self.assertEqual(document.flatten().rgba(0, 0), (105, 60, 40, 255))
+
+    def test_rename_group_renames_members(self):
+        document = self.document()
+        document.group_layer()
+        self.assertTrue(document.rename_group("Group 1", "Sky"))
+        self.assertEqual(document.group("Sky").name, "Sky")
+        self.assertEqual(document.active_layer.group, "Sky")
+        document.group_layer(index=0, name="Base")
+        self.assertFalse(document.rename_group("Sky", "Base"))
+        self.assertFalse(document.rename_group("Sky", ""))
+        self.assertFalse(document.rename_group("Nope", "Mist"))
+
+    def test_rename_layer(self):
+        document = self.document()
+        self.assertTrue(document.rename_layer(1, "Shade"))
+        self.assertEqual(document.layers[1].name, "Shade")
+        self.assertFalse(document.rename_layer(1, "  "))
+
+    def test_remove_group_keeps_layers(self):
+        document = self.document()
+        document.group_layer()
+        self.assertEqual(document.remove_group("Group 1"), 1)
+        self.assertEqual(document.layer_count, 2)
+        self.assertFalse(document.groups)
+        self.assertEqual(document.active_layer.group, "")
+
+    def test_remove_layer_prunes_the_group(self):
+        document = self.document()
+        document.group_layer()
+        self.assertTrue(document.remove_layer())
+        self.assertFalse(document.groups)
+
+    def test_merge_down_uses_the_layer_operation(self):
+        document = self.document()
+        document.active_layer.op = "add"
+        self.assertTrue(document.merge_down())
+        self.assertEqual(document.layer_count, 1)
+        self.assertEqual(document.flatten().rgba(0, 0), (210, 120, 80, 255))
+        self.assertFalse(document.merge_down())
+
+    def test_merge_group(self):
+        document = self.document()
+        document.group_layer()
+        document.add_layer()
+        document.layers[2].group = "Group 1"
+        document.bitmap.set_rgba(0, 0, (0, 255, 0, 255))
+        before = document.begin()
+        self.assertTrue(document.merge_group("Group 1"))
+        self.assertEqual(document.layer_count, 2)
+        self.assertEqual(document.active_layer.name, "Group 1")
+        self.assertEqual(document.active_layer.bitmap.rgba(0, 0),
+                         (0, 255, 0, 255))
+        self.assertIsNone(document.group("Group 1"))
+        document.commit(before)
+        document.undo_last()
+        self.assertEqual(document.layer_count, 3)
+        self.assertIsNotNone(document.group("Group 1"))
+
+    def test_groups_survive_undo(self):
+        document = self.document()
+        before = document.begin()
+        document.group_layer()
+        document.commit(before)
+        document.undo_last()
+        self.assertFalse(document.groups)
+        self.assertEqual(document.active_layer.group, "")
 
 
 class HoleFillTests(unittest.TestCase):
@@ -794,6 +1038,112 @@ class RotationDragTests(unittest.TestCase):
             self.assertGreaterEqual(angle, 0)
             self.assertLess(angle, 360)
             self.assertEqual(angle % 5, 0)
+
+
+class QuadGeometryTests(unittest.TestCase):
+    def test_box_round_trip(self):
+        self.assertEqual(quad_from_box((2, 3, 4, 2)),
+                         [(2.0, 3.0), (6.0, 3.0), (6.0, 5.0), (2.0, 5.0)])
+        self.assertEqual(box_from_quad(quad_from_box((2, 3, 4, 2))),
+                         (2, 3, 4, 2))
+
+    def test_translate_moves_every_corner(self):
+        quad = quad_from_box((0, 0, 2, 2))
+        moved = quad_translate(quad, 3, -1)
+        self.assertEqual(moved[0], (3.0, -1.0))
+        self.assertEqual(moved[2], (5.0, 1.0))
+
+    def test_scale_around_anchor_keeps_it_fixed(self):
+        quad = quad_from_box((2, 2, 4, 4))
+        scaled = quad_scale(quad, (2.0, 2.0), 2.0)
+        self.assertEqual(scaled[0], (2.0, 2.0))
+        self.assertEqual(scaled[2], (10.0, 10.0))
+
+    def test_rotation_turns_clockwise(self):
+        quad = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)]
+        turned = quad_rotate(quad, (1.0, 0.0), 90)
+        self.assertAlmostEqual(turned[0][0], 1.0)
+        self.assertAlmostEqual(turned[0][1], 0.0)
+        self.assertAlmostEqual(turned[1][0], 1.0)
+        self.assertAlmostEqual(turned[1][1], 1.0)
+
+    def test_shear_moves_only_the_chosen_edge(self):
+        quad = quad_from_box((0, 0, 10, 10))
+        top = quad_shear(quad, 0, 3)
+        self.assertEqual(top[0], (3.0, 0.0))
+        self.assertEqual(top[1], (13.0, 0.0))
+        self.assertEqual(top[2], (10.0, 10.0))
+        right = quad_shear(quad, 1, 4)
+        self.assertEqual(right[1], (10.0, 4.0))
+        self.assertEqual(right[2], (10.0, 14.0))
+        self.assertEqual(right[0], (0.0, 0.0))
+
+    def test_move_one_corner_leaves_the_rest(self):
+        quad = quad_from_box((0, 0, 4, 4))
+        moved = quad_move_corner(quad, 2, -1, 2)
+        self.assertEqual(moved[2], (3.0, 6.0))
+        self.assertEqual(moved[0], quad[0])
+
+    def test_handles_cover_corners_edges_and_rotation(self):
+        handles = quad_handles(quad_from_box((0, 0, 10, 10)), 24.0)
+        self.assertEqual(len(handles), 9)
+        self.assertEqual(handles[0], ("corner", 0, (0.0, 0.0)))
+        self.assertEqual(handles[4], ("edge", 0, (5.0, 0.0)))
+        self.assertEqual(handles[8], ("rotate", -1, (5.0, -24.0)))
+
+
+class WarpPieceTests(unittest.TestCase):
+    def piece(self):
+        bitmap = Bitmap(2, 2)
+        bitmap.set_rgba(0, 0, RED)
+        bitmap.set_rgba(1, 0, GREEN)
+        bitmap.set_rgba(0, 1, BLUE)
+        bitmap.set_rgba(1, 1, (255, 255, 255, 255))
+        return bitmap
+
+    def test_identity_box_keeps_every_pixel(self):
+        piece = self.piece()
+        left, top, warped = warp_piece(piece, quad_from_box((1, 1, 2, 2)),
+                                       8, 8)
+        self.assertEqual((left, top), (1, 1))
+        self.assertEqual((warped.width, warped.height), (2, 2))
+        for y in range(2):
+            for x in range(2):
+                self.assertEqual(warped.rgba(x, y), piece.rgba(x, y))
+
+    def test_double_scale_repeats_pixels(self):
+        piece = self.piece()
+        _, _, warped = warp_piece(piece, quad_from_box((0, 0, 4, 4)), 8, 8)
+        self.assertEqual(warped.rgba(0, 0), RED)
+        self.assertEqual(warped.rgba(1, 1), RED)
+        self.assertEqual(warped.rgba(2, 0), GREEN)
+        self.assertEqual(warped.rgba(3, 1), GREEN)
+        self.assertEqual(warped.rgba(0, 2), BLUE)
+        self.assertEqual(warped.rgba(3, 3), (255, 255, 255, 255))
+
+    def test_clipped_quad_returns_the_visible_box(self):
+        _, _, warped = warp_piece(self.piece(),
+                                  quad_from_box((-2, -2, 4, 4)), 8, 8)
+        self.assertEqual((warped.width, warped.height), (2, 2))
+        self.assertEqual(warped.rgba(0, 0), (255, 255, 255, 255))
+
+    def test_transparent_source_pixels_stay_transparent(self):
+        piece = Bitmap(1, 1)
+        _, _, warped = warp_piece(piece, quad_from_box((0, 0, 2, 2)), 4, 4)
+        self.assertEqual(warped.rgba(0, 0), (0, 0, 0, 0))
+
+    def test_perspective_quad_tilts_the_piece(self):
+        piece = Bitmap(2, 1)
+        piece.set_rgba(0, 0, RED)
+        piece.set_rgba(1, 0, GREEN)
+        quad = [(0.0, 0.0), (4.0, 0.0), (2.0, 4.0), (1.0, 4.0)]
+        left, top, warped = warp_piece(piece, quad, 8, 8)
+        self.assertEqual((left, top), (0, 0))
+        self.assertGreater(warped.height, 1)
+        colours = set(warped.rgba(x, y) for y in range(warped.height)
+                      for x in range(warped.width))
+        self.assertIn(RED, colours)
+        self.assertIn(GREEN, colours)
 
 
 if __name__ == "__main__":

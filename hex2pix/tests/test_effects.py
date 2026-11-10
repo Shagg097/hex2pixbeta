@@ -63,6 +63,20 @@ class BlurTest(unittest.TestCase):
         blur_area(twice, None, 2, 2, 1, 100, source=source)
         self.assertEqual(once.rgba(2, 2), twice.rgba(2, 2))
 
+    def test_amount_widens_the_neighbourhood(self):
+        bitmap = Bitmap(9, 1)
+        bitmap.fill(RED)
+        bitmap.set_rgba(4, 0, BLUE)
+        blur_area(bitmap, None, 4, 0, 1, 100, amount=2)
+        self.assertEqual(bitmap.rgba(4, 0), (204, 0, 51, 255))
+
+    def test_amount_zero_leaves_the_pixels_alone(self):
+        bitmap = Bitmap(3, 3)
+        bitmap.fill(RED)
+        bitmap.set_rgba(1, 1, BLUE)
+        blur_area(bitmap, None, 1, 1, 1, 100, amount=0)
+        self.assertEqual(bitmap.rgba(1, 1), BLUE)
+
     def test_stroke_softens_a_row(self):
         bitmap = Bitmap(9, 1)
         for x in range(0, 9, 2):

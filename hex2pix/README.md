@@ -564,7 +564,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 429 tests over the model, the canvas, formats, colours,
+The first command runs 545 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand

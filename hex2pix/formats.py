@@ -15,8 +15,9 @@ import zipfile
 
 from PIL import Image
 
+from . import bitdepth
 from .model import (MATTE_WHITE, SKIP, Bitmap, Document, HexError, Layer,
-                    block_from_bitmap, clamp, parse_block)
+                    LayerGroup, block_from_bitmap, clamp, parse_block)
 
 FORMATS = (
     {"key": "png", "label": "PNG (8-bit RGBA)", "ext": ".png", "alpha": True},
@@ -29,6 +30,8 @@ FORMATS = (
     {"key": "webp", "label": "WEBP lossless", "ext": ".webp", "alpha": True},
     {"key": "jpg", "label": "JPEG (flattened, quality)", "ext": ".jpg", "alpha": False},
     {"key": "ppm", "label": "PPM 24-bit", "ext": ".ppm", "alpha": False},
+    {"key": "raw", "label": "Raw pixel bits (1-32 bpp, headers)",
+     "ext": ".raw", "alpha": True},
     {"key": "hex", "label": "Hex text (.txt)", "ext": ".txt", "alpha": False},
 )
 FORMAT_BY_KEY = {item["key"]: item for item in FORMATS}
@@ -353,6 +356,276 @@ def _ensure_dir(path):
         os.makedirs(parent)
 
 
+def _raw_samples(bitmap, mode, depth, channels, matte, order="RGB"):
+    """Samples, palette, bits per pixel and alpha width for a raw export."""
+    mode = str(mode or "rgb").lower()
+    if mode.startswith("index"):
+        try:
+            depth = int(depth)
+        except (TypeError, ValueError):
+            raise HexError("indexed bit depth must be a whole number")
+        if depth < 1 or depth > bitdepth.MAX_INDEX_BITS:
+            raise HexError("indexed bit depth must be 1-%d"
+                           % bitdepth.MAX_INDEX_BITS)
+        rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
+        indices, palette = bitdepth.quantize_rgb(
+            rgb, bitmap.width, bitmap.height, depth)
+        return indices, palette, depth, 0
+    if mode != "rgb":
+        raise HexError("unknown raw colour mode: %s" % mode)
+    widths = bitdepth.channel_widths(channels)
+    if widths[3]:
+        samples = bitdepth.sample_rgba(bitmap.data, widths, order)
+    else:
+        rgb = flatten(bitmap.data, bitmap.width, bitmap.height, matte)
+        samples = bitdepth.sample_rgb(rgb, widths[:3], order)
+    return samples, None, sum(widths), widths[3]
+
+
+def _palette_bytes(palette, with_alpha=False, pad_bmp=False):
+    """BMP/TGA colour table bytes (BGR or BGRA) for a quantized palette."""
+    out = bytearray()
+    for entry in palette or ():
+        red, green, blue = [int(value) for value in entry[:3]]
+        out.extend((blue, green, red))
+        if with_alpha:
+            out.append(int(entry[3]) if len(entry) > 3 else 255)
+        elif pad_bmp:
+            out.append(0)
+    return bytes(out)
+
+
+def _bmp_pixel(sample, alpha):
+    """BGR(A) bytes for one 8-bit-per-channel sample."""
+    if alpha:
+        return bytes(((sample >> 8) & 0xFF, (sample >> 16) & 0xFF,
+                      (sample >> 24) & 0xFF, sample & 0xFF))
+    return bytes((sample & 0xFF, (sample >> 8) & 0xFF, (sample >> 16) & 0xFF))
+
+
+def _ordered_masks(widths, order="RGB"):
+    """BMP colour masks for channels laid out in `order`, most significant
+    first, with the alpha mask left empty the way the BMP writers expect."""
+    widths = [int(value) for value in widths[:3]]
+    order = bitdepth.check_order(order)[:3]
+    shift = sum(widths)
+    shifts = {}
+    for letter in order:
+        shift -= widths["RGB".index(letter)]
+        shifts[letter] = shift
+    masks = []
+    for letter in "RGB":
+        width = widths["RGB".index(letter)]
+        masks.append(((1 << width) - 1) << shifts[letter])
+    return tuple(masks) + (0,)
+
+
+def _bmp_layout(mode, depth, channels=None, total=None, order="RGB"):
+    """Pixel depth, compression and masks BMP will store.
+
+    BMP only defines 1, 4, 8, 16, 24 and 32 bits per pixel, so the requested
+    channel widths are mapped onto the nearest of those. At 16 bits the masks
+    carry the channel order, so any RGB permutation survives; 24/32-bit BMP
+    has a fixed BGR(A) byte order.
+    """
+    if str(mode or "rgb").lower().startswith("index"):
+        bits = max(1, min(bitdepth.MAX_INDEX_BITS, int(depth or 8)))
+        palette_bits = 1 if bits <= 1 else 4 if bits <= 4 else 8
+        return palette_bits, 0, (0, 0, 0, 0)
+    widths = bitdepth.channel_widths(channels) if channels else ()
+    total = sum(widths) if widths else int(total or 0)
+    if total <= 16:
+        target = ((5, 5, 5, 0) if tuple(widths[:3]) == (5, 5, 5)
+                  else (5, 6, 5, 0))
+        return 16, 3, _ordered_masks(target[:3], order)
+    if total <= 24:
+        return 24, 0, (0x00FF0000, 0x0000FF00, 0x000000FF, 0)
+    return 32, 0, (0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000)
+
+
+def _bmp_custom_header(width, height, bits, image_size, ppi, header,
+                       palette_count, masks, compression):
+    """A BITMAPINFOHEADER/V4/V5 for a legal BMP pixel depth."""
+    header = bitdepth.check_header(header)
+    if header not in ("bmp", "bmpv4", "bmpv5"):
+        raise HexError("not a BMP header: %s" % header)
+    header_size = {"bmp": 40, "bmpv4": 108, "bmpv5": 124}[header]
+    if header in ("bmpv4", "bmpv5") and bits == 32 and masks[3]:
+        compression = 3
+    pixels_per_meter = int(round(float(ppi or 72.0) / 0.0254))
+    info = struct.pack("<IiiHHIIiiII", header_size, width, height, 1, bits,
+                       compression, image_size, pixels_per_meter,
+                       pixels_per_meter, palette_count, 0)
+    if header in ("bmpv4", "bmpv5"):
+        info += struct.pack("<IIII", *masks)
+        info += struct.pack("<I", 0)          # LCS_CALIBRATED_RGB
+        info += b"\x00" * 36                   # endpoints
+        info += b"\x00" * 12                   # gamma red/green/blue
+    elif compression == 3:
+        # BI_BITFIELDS puts three colour masks after a plain header.
+        info += struct.pack("<III", *tuple(masks)[:3])
+    if header == "bmpv5":
+        info += struct.pack("<IIII", 4, 0, 0, 0)  # LCS_GM_IMAGES
+    expected = header_size + (12 if header == "bmp"
+                              and compression == 3 else 0)
+    if len(info) != expected:
+        raise HexError("internal BMP header size mismatch")
+    return info
+
+
+def _bmp_custom(bitmap, mode, depth, channels, packing, matte, ppi,
+                header, order="RGB"):
+    """Wrap the artwork in a BMP file that ordinary readers can open.
+
+    BMP only defines 1, 4, 8, 16, 24 and 32 bits per pixel, so the requested
+    channel widths are stored in the nearest legal form: RGB totals up to 16
+    bits become 16 bpp with the standard 5:5:5 or 5:6:5 masks, larger totals
+    become 24 or 32 bpp, and indexed depths move up to the next colour-table
+    depth. Rows are byte-aligned, padded to four bytes and stored bottom-up,
+    as BMP requires.
+    """
+    width, height = bitmap.width, bitmap.height
+    container, compression, masks = _bmp_layout(mode, depth, channels,
+                                                order=order)
+    if str(mode or "rgb").lower().startswith("index"):
+        samples, palette, _bits, _alpha = _raw_samples(
+            bitmap, mode, depth, channels, matte)
+        rows = [bitdepth.pack_samples(samples[y * width:(y + 1) * width],
+                                      container, "packed")
+                for y in range(height)]
+        palette_data = _palette_bytes(palette, pad_bmp=True)
+        palette_data += b"\x00" * ((1 << container) * 4
+                                   - len(palette_data))
+        palette_count = 1 << container
+    else:
+        widths = bitdepth.channel_widths(channels)
+        rgb = flatten(bitmap.data, width, height, matte)
+        palette_data = b""
+        palette_count = 0
+        if container == 16:
+            target = ((5, 5, 5, 0) if tuple(widths[:3]) == (5, 5, 5)
+                      else (5, 6, 5, 0))
+            samples = bitdepth.sample_rgb(rgb, target[:3], order)
+            rows = [b"".join(struct.pack("<H", sample) for sample in
+                             samples[y * width:(y + 1) * width])
+                    for y in range(height)]
+        else:
+            keep_alpha = container == 32 and bool(widths[3])
+            if keep_alpha:
+                samples = bitdepth.sample_rgba(bitmap.data, (8, 8, 8, 8))
+            else:
+                samples = bitdepth.sample_rgb(rgb, (8, 8, 8))
+            rows = [b"".join(_bmp_pixel(sample, keep_alpha)
+                             for sample in samples[y * width:(y + 1) * width])
+                    for y in range(height)]
+    row_bytes = (width * container + 7) // 8
+    stride = (row_bytes + 3) // 4 * 4
+    payload = b"".join(row + b"\x00" * (stride - len(row))
+                       for row in reversed(rows))
+    info = _bmp_custom_header(
+        width, height, container, stride * height, ppi, header,
+        palette_count, masks, compression)
+    offset = 14 + len(info) + len(palette_data)
+    file_size = offset + len(payload)
+    file_header = struct.pack("<2sIHHI", b"BM", file_size, 0, 0, offset)
+    return file_header + info + palette_data + payload
+
+
+def _tga_custom(bitmap, mode, depth, channels, packing, matte, header):
+    """Wrap the artwork in a TGA 2.0 file that readers can open.
+
+    TGA stores 8-bit colour-mapped, 24 bpp BGR or 32 bpp BGRA pixels, so
+    indexed artwork becomes 8-bit indices with a 24-bit colour map, and direct
+    colour is written at 24 bpp, or 32 bpp when an alpha channel is in use.
+    """
+    width, height = bitmap.width, bitmap.height
+    if str(mode or "rgb").lower().startswith("index"):
+        samples, palette, bits, _alpha = _raw_samples(
+            bitmap, mode, depth, channels, matte)
+        cmap_length = 1 << max(1, min(bitdepth.MAX_INDEX_BITS, bits))
+        palette_data = _palette_bytes(palette)
+        palette_data += b"\x00" * (cmap_length * 3 - len(palette_data))
+        payload = bytes(int(sample) & 0xFF for sample in samples)
+        header_bytes = struct.pack(
+            "<BBBHHBHHHHBB", 0, 1, 1, 0, cmap_length, 24, 0, 0,
+            width, height, 8, 0x20)
+        return header_bytes + palette_data + payload
+    widths = bitdepth.channel_widths(channels)
+    alpha = bool(widths[3])
+    if alpha:
+        samples = bitdepth.sample_rgba(bitmap.data, (8, 8, 8, 8))
+    else:
+        samples = bitdepth.sample_rgb(
+            flatten(bitmap.data, width, height, matte), (8, 8, 8))
+    payload = b"".join(_bmp_pixel(sample, alpha) for sample in samples)
+    header_bytes = struct.pack(
+        "<BBBHHBHHHHBB", 0, 0, 2, 0, 0, 0, 0, 0, width, height,
+        32 if alpha else 24, 0x20 | (8 if alpha else 0))
+    return header_bytes + payload
+
+
+def save_raw(bitmap, path, mode="rgb", depth=8, channels=(8, 8, 8, 0),
+             packing="packed", matte=MATTE_WHITE, header="raw", ppi=72.0,
+             order="RGB"):
+    """Write pixel bits at 1-32 bits per pixel, optionally with a header.
+
+    `mode` is "indexed" (1-8 bits per pixel, adaptive palette) or "rgb"
+    (`channels` are the red, green, blue and alpha widths). `packing` is
+    "packed" for a dense bit stream or "aligned" for whole bytes per pixel.
+    `order` puts the channels into the sample in any RGB permutation (BGR and
+    so on), `header` is "raw" for headerless data, one of the BMP variants,
+    or "tga". A 16-bit BMP carries the order in its colour masks; 24/32-bit
+    BMP and TGA fix their byte order to BGR(A), and indexed output stores
+    palette indices, so `order` does not reach those files.
+    """
+    packing = bitdepth.check_packing(packing)
+    header = bitdepth.check_header(header)
+    if header == "raw":
+        samples, _palette, bits, _alpha_bits = _raw_samples(
+            bitmap, mode, depth, channels, matte, order)
+        data = bitdepth.pack_samples(samples, bits, packing)
+    elif header in ("bmp", "bmpv4", "bmpv5"):
+        data = _bmp_custom(bitmap, mode, depth, channels, packing, matte,
+                           ppi, header, order)
+    else:
+        data = _tga_custom(bitmap, mode, depth, channels, packing, matte,
+                           header)
+    _ensure_dir(path)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return len(data)
+
+
+def raw_size(width, height, bits, packing="packed", header="raw",
+             palette_count=0, mode="rgb", depth=None, channels=None):
+    """Bytes a raw export will take, including its header.
+
+    `bits` is the requested pixel depth; `mode`, `depth` and `channels` let
+    the headers report the legal container they actually write.
+    """
+    header = bitdepth.check_header(header)
+    bits = int(bits)
+    indexed = str(mode or "rgb").lower().startswith("index")
+    if header == "raw":
+        return bitdepth.byte_size(width, height, bits, packing)
+    if header in ("bmp", "bmpv4", "bmpv5"):
+        container, compression, _masks = _bmp_layout(mode, depth or bits,
+                                                     channels, total=bits)
+        row_bytes = (int(width) * container + 7) // 8
+        stride = (row_bytes + 3) // 4 * 4
+        info_size = {"bmp": 40, "bmpv4": 108, "bmpv5": 124}[header]
+        if header == "bmp" and compression == 3:
+            info_size += 12
+        palette_bytes = (1 << container) * 4 if indexed else 0
+        return 14 + info_size + palette_bytes + stride * int(height)
+    if indexed:
+        entries = 1 << max(1, min(bitdepth.MAX_INDEX_BITS,
+                                 int(depth or bits)))
+        return 18 + entries * 3 + int(width) * int(height)
+    widths = bitdepth.channel_widths(channels or (8, 8, 8, 0))
+    return 18 + int(width) * int(height) * (4 if widths[3] else 3)
+
+
 def _save_pillow(image, path, image_format, dpi=None, **kwargs):
     """Save with a dpi pair when the format accepts it, otherwise without."""
     if dpi:
@@ -366,12 +639,15 @@ def _save_pillow(image, path, image_format, dpi=None, **kwargs):
 
 
 def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
-         keep_alpha=True, gif_colors=256, png_compress=6):
+         keep_alpha=True, gif_colors=256, png_compress=6,
+         raw_mode="rgb", raw_depth=8, raw_channels=(8, 8, 8, 0),
+         raw_packing="packed", raw_header="raw", raw_order="RGB"):
     """Write `bitmap` to `path` in the given format. Returns bytes written.
 
     `keep_alpha` flattens transparency onto `matte` when false, `gif_colors`
     caps the adaptive GIF palette and `png_compress` is Pillow's 0-9 deflate
-    level. Formats that cannot store alpha always flatten.
+    level. Formats that cannot store alpha always flatten. The `raw_*` options
+    pick the layout and optional header of the custom-bit-depth format.
     """
     path = str(path)
     key = (key or "png").lower()
@@ -388,6 +664,9 @@ def save(bitmap, path, key="png", matte=MATTE_WHITE, quality=92, ppi=72.0,
         save_ppm(bitmap, path, matte)
     elif key == "hex":
         save_hex_text(bitmap, path)
+    elif key == "raw":
+        save_raw(bitmap, path, raw_mode, raw_depth, raw_channels,
+                 raw_packing, matte, raw_header, ppi, raw_order)
     elif key == "jpg":
         _save_pillow(to_pil(bitmap, matte, flatten_alpha=True), path, "JPEG",
                      dpi=ppi, quality=int(quality), subsampling=0)
@@ -468,8 +747,11 @@ def save_project(path, document, extras=None):
         layers.append({
             "name": layer.name,
             "op": layer.op,
+            "gate": layer.gate,
+            "blend": layer.blend,
             "visible": bool(layer.visible),
             "alpha": int(layer.alpha),
+            "group": layer.group,
             "data": name,
         })
         entries.append((name, bytes(layer.bitmap.data)))
@@ -481,10 +763,12 @@ def save_project(path, document, extras=None):
         "ppi": float(document.ppi),
         "color_mode": document.color_mode,
         "alpha": bool(document.alpha),
+        "working": document.working_layout(),
         "matte": list(document.matte),
         "display_format": document.display_format,
         "active_layer": int(document.layer_index),
         "layers": layers,
+        "groups": [group.to_state() for group in document.groups],
         "selection_active": bool(document.selection.active),
         "selection": "selection.mask" if document.selection.active else None,
         "extras": dict(extras or {}),
@@ -533,11 +817,12 @@ def load_project(path):
                 except KeyError:
                     raise HexError("project is missing layer data for %r"
                                    % (entry.get("name"),))
-                layers.append(Layer(
-                    width, height, entry.get("name", "Layer %d" % (index + 1)),
-                    entry.get("op", "normal"),
-                    entry.get("visible", True), data,
-                    entry.get("alpha", 255)))
+                state = dict(entry)
+                state["data"] = data
+                # Layer.from_state moves older single `op` names into the
+                # right option when a project has no separate blend.
+                layers.append(Layer.from_state(
+                    state, width, height))
             if not layers:
                 raise HexError("project has no layers")
             document = Document(width, height, path=path,
@@ -545,12 +830,29 @@ def load_project(path):
                                 color_mode=header.get("color_mode", "RGB"),
                                 alpha=header.get("alpha", True))
             document.layers = layers
+            document.groups = [LayerGroup.from_state(entry)
+                               for entry in header.get("groups") or []
+                               if isinstance(entry, dict)]
+            known = set(group.name for group in document.groups)
+            for layer in layers:
+                if layer.group and layer.group not in known:
+                    document.groups.append(LayerGroup(layer.group))
+                    known.add(layer.group)
             document.layer_index = clamp(int(header.get("active_layer", 0)), 0,
                                          len(layers) - 1)
             document.display_format = str(header.get("display_format", "png"))
             matte = header.get("matte")
             if isinstance(matte, (list, tuple)) and len(matte) == 3:
                 document.matte = tuple(clamp(int(v), 0, 255) for v in matte)
+            working = header.get("working")
+            if working is not None:
+                if not isinstance(working, dict):
+                    raise HexError("project has an invalid working layout")
+                try:
+                    document.set_working_layout(working, quantize=True)
+                except HexError as exc:
+                    raise HexError("project has an invalid working layout: %s"
+                                   % exc)
             if header.get("selection_active"):
                 try:
                     mask = archive.read(header.get("selection")

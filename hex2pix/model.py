@@ -25,18 +25,45 @@ OP_LABELS = {
 }
 OP_BY_LABEL = {label: op for op, label in OP_LABELS.items()}
 
-# How a layer combines with the layers below it. "normal" is plain
-# source-over, the default: the layer covers what is underneath. The rest
-# combine per channel with the layers below. Unlike the byte operations above
-# there are no bitwise modes here.
-LAYER_OPS = ("normal", "add", "subtract", "multiply", "divide")
+# A layer reaches the stack below through three separate option groups, and
+# they apply in order. `op` is the arithmetic operation, `gate` is the
+# bitwise gate and `blend` is the blend mode; "none" switches a group off.
+LAYER_OPS = ("none", "add", "subtract", "multiply", "divide")
 LAYER_OP_LABELS = {
-    "normal": "Normal",
+    "none": "None",
     "add": "Add",
     "subtract": "Subtract",
     "multiply": "Multiply",
     "divide": "Divide",
 }
+LAYER_OP_BY_LABEL = {label: op for op, label in LAYER_OP_LABELS.items()}
+
+LAYER_GATES = ("none", "and", "or", "xor", "not", "nand", "nor", "xnor")
+LAYER_GATE_LABELS = {
+    "none": "None",
+    "and": "And",
+    "or": "Or",
+    "xor": "Xor",
+    "not": "Not",
+    "nand": "Nand",
+    "nor": "Nor",
+    "xnor": "Xnor",
+}
+LAYER_GATE_BY_LABEL = {label: gate for gate, label
+                       in LAYER_GATE_LABELS.items()}
+
+LAYER_BLENDS = ("none", "screen", "overlay", "darken", "lighten",
+                "difference")
+LAYER_BLEND_LABELS = {
+    "none": "None",
+    "screen": "Screen",
+    "overlay": "Overlay",
+    "darken": "Darken",
+    "lighten": "Lighten",
+    "difference": "Difference",
+}
+LAYER_BLEND_BY_LABEL = {label: blend for blend, label
+                        in LAYER_BLEND_LABELS.items()}
 
 HEX_DIGITS = set("0123456789abcdefABCDEF")
 
@@ -96,10 +123,61 @@ def combine(a, b, op, strength=255, wrap=False):
         raw = bxor8(a, b)
     elif op == "nand":
         raw = bnot8(band8(a, b))
+    elif op == "screen":
+        raw = 255 - (255 - a) * (255 - b) / 255.0
+    elif op == "overlay":
+        if a < 128:
+            raw = 2.0 * a * b / 255.0
+        else:
+            raw = 255 - 2.0 * (255 - a) * (255 - b) / 255.0
+    elif op == "darken":
+        raw = min(a, b)
+    elif op == "lighten":
+        raw = max(a, b)
+    elif op == "difference":
+        raw = abs(a - b)
     else:
         raise HexError("unknown operation: %s" % op)
     raw = raw % 256 if wrap else clamp(raw, 0, 255)
     return clamp(round_half_up(a + (raw - a) * (strength / 255.0)), 0, 255)
+
+
+def gate_value(below, above, gate):
+    """Bitwise gate of two 0..255 channel values."""
+    if gate == "and":
+        return band8(below, above)
+    if gate == "or":
+        return (below | above) & 255
+    if gate == "xor":
+        return bxor8(below, above)
+    if gate == "not":
+        return bnot8(above)
+    if gate == "nand":
+        return bnot8(band8(below, above))
+    if gate == "nor":
+        return bnot8((below | above) & 255)
+    if gate == "xnor":
+        return bnot8(bxor8(below, above))
+    raise HexError("unknown gate: %s" % gate)
+
+
+def combine_layer(below, above, op="none", gate="none", blend="none",
+                  strength=255, wrap=False):
+    """Combine one channel through a layer's three option groups.
+
+    The groups apply in order: the arithmetic operation, then the bitwise
+    gate, then the blend mode, each working on the result so far and the
+    stack below. "none" leaves a group out, and the layer's alpha is the
+    strength of the final mix.
+    """
+    value = above
+    if op not in ("none", "", None):
+        value = combine(below, value, op, 255, wrap)
+    if gate not in ("none", "", None):
+        value = gate_value(below, value, gate)
+    if blend not in ("none", "", None):
+        value = combine(below, value, blend, 255, wrap)
+    return combine(below, value, "normal", strength, wrap)
 
 
 # ------------------------------------------------------------------ hex colors
@@ -139,6 +217,22 @@ def hex_str(r, g, b, a=255):
     if a is None or a >= 255:
         return "%02X%02X%02X" % (r, g, b)
     return "%02X%02X%02X%02X" % (r, g, b, a)
+
+
+def hex_code(color, order="RGB"):
+    """Format an RGBA color in `order` (RGB, BGR and the other permutations).
+
+    Alpha follows the colour bytes, and is only shown when it is not fully
+    opaque, so the code keeps the same length as `hex_str`.
+    """
+    order = str(order or "RGB").upper()
+    if len(order) != 3 or sorted(order) != ["B", "G", "R"]:
+        order = "RGB"
+    values = {"R": color[0], "G": color[1], "B": color[2]}
+    text = "".join("%02X" % values[letter] for letter in order)
+    if len(color) > 3 and color[3] < 255:
+        text += "%02X" % color[3]
+    return text
 
 
 def split_lines(text):
@@ -635,51 +729,282 @@ class RotationDrag(object):
         return self.angle
 
 
-# --------------------------------------------------------------------- layers
-class Layer(object):
-    """One bitmap in a document's layer stack.
+def quad_from_box(box):
+    """The four corners of an (x, y, w, h) box, clockwise from top left."""
+    left, top, width, height = box
+    return [(float(left), float(top)),
+            (float(left + width), float(top)),
+            (float(left + width), float(top + height)),
+            (float(left), float(top + height))]
 
-    `op` is how the layer combines with the layers below it, and its alpha is
-    the strength of that operation. `alpha` is the layer's own opacity, which
-    scales that strength for every pixel. `Document.layers[0]` is the bottom
-    layer.
+
+def box_from_quad(quad):
+    """The integer bounding box of a quad, rounded outwards."""
+    xs = [point[0] for point in quad]
+    ys = [point[1] for point in quad]
+    left = int(math.floor(min(xs)))
+    top = int(math.floor(min(ys)))
+    right = int(math.ceil(max(xs)))
+    bottom = int(math.ceil(max(ys)))
+    return (left, top, max(1, right - left), max(1, bottom - top))
+
+
+def quad_centre(quad):
+    return (sum(point[0] for point in quad) / 4.0,
+            sum(point[1] for point in quad) / 4.0)
+
+
+def quad_translate(quad, dx, dy):
+    return [(x + dx, y + dy) for x, y in quad]
+
+
+def quad_scale(quad, anchor, factor):
+    """Scale every corner around `anchor` by one factor."""
+    ax, ay = anchor
+    return [(ax + (x - ax) * factor, ay + (y - ay) * factor)
+            for x, y in quad]
+
+
+def quad_rotate(quad, centre, degrees):
+    """Turn the quad clockwise around `centre` by `degrees`."""
+    radians = math.radians(float(degrees))
+    cos_a, sin_a = math.cos(radians), math.sin(radians)
+    cx, cy = centre
+    result = []
+    for x, y in quad:
+        dx, dy = x - cx, y - cy
+        result.append((cx + dx * cos_a - dy * sin_a,
+                       cy + dx * sin_a + dy * cos_a))
+    return result
+
+
+def quad_shear(quad, edge, amount):
+    """Slide one edge of the quad along the canvas axes.
+
+    `edge` is 0 for the top, 1 for the right, 2 for the bottom and 3 for the
+    left. Top and bottom edges slide sideways, left and right edges slide up
+    and down, which is the shear a handle on that edge should produce.
+    """
+    result = list(quad)
+    if edge in (0, 2):
+        indices = (0, 1) if edge == 0 else (2, 3)
+        for index in indices:
+            result[index] = (result[index][0] + amount, result[index][1])
+    elif edge in (1, 3):
+        indices = (1, 2) if edge == 1 else (3, 0)
+        for index in indices:
+            result[index] = (result[index][0], result[index][1] + amount)
+    return result
+
+
+def quad_move_corner(quad, index, dx, dy):
+    """Move one corner by a delta, leaving the other three in place."""
+    result = list(quad)
+    index = index % 4
+    result[index] = (result[index][0] + dx, result[index][1] + dy)
+    return result
+
+
+def quad_handles(quad, rotation_gap=24.0):
+    """Corner, edge and rotation handles for a transform box.
+
+    Returns (kind, index, (x, y)) tuples: `corner` handles scale from the
+    opposite corner (or move one corner in perspective mode), `edge` handles
+    shear the edge they sit on, and the single `rotate` handle sits
+    `rotation_gap` units above the middle of the top edge.
+    """
+    handles = []
+    for index, point in enumerate(quad):
+        handles.append(("corner", index, point))
+    for index in range(4):
+        first = quad[index]
+        second = quad[(index + 1) % 4]
+        handles.append(("edge", index,
+                        ((first[0] + second[0]) / 2.0,
+                         (first[1] + second[1]) / 2.0)))
+    top_x = (quad[0][0] + quad[1][0]) / 2.0
+    top_y = (quad[0][1] + quad[1][1]) / 2.0
+    edge_x = quad[1][0] - quad[0][0]
+    edge_y = quad[1][1] - quad[0][1]
+    length = math.hypot(edge_x, edge_y)
+    if length > 0:
+        normal_x, normal_y = -edge_y / length, edge_x / length
+        centre_x, centre_y = quad_centre(quad)
+        if (normal_x * (top_x - centre_x)
+                + normal_y * (top_y - centre_y)) < 0:
+            normal_x, normal_y = -normal_x, -normal_y
+        handles.append(("rotate", -1, (top_x + normal_x * rotation_gap,
+                                       top_y + normal_y * rotation_gap)))
+    return handles
+
+
+def warp_piece(piece, quad, width, height):
+    """Draw the piece into a quadrilateral on a width x height canvas.
+
+    The quad is filled as two triangles with nearest-neighbour samples, so
+    any convex quad works: scaling, shearing, rotation and perspective all go
+    through the same path. Pixels outside the canvas or the quad stay
+    transparent. Returns (left, top, bitmap) for the clipped box to stamp.
+    """
+    if len(quad) != 4:
+        raise HexError("a transform box needs four corners")
+    xs = [point[0] for point in quad]
+    ys = [point[1] for point in quad]
+    left = max(0, int(math.floor(min(xs))))
+    top = max(0, int(math.floor(min(ys))))
+    right = min(width - 1, int(math.ceil(max(xs))) - 1)
+    bottom = min(height - 1, int(math.ceil(max(ys))) - 1)
+    if right < left or bottom < top:
+        return left, top, Bitmap(1, 1)
+    out = Bitmap(right - left + 1, bottom - top + 1)
+    source = piece.data
+    sw, sh = piece.width, piece.height
+    dst = out.data
+    corners = [(0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh)),
+               (0.0, float(sh))]
+    for i0, i1, i2 in ((0, 1, 2), (0, 2, 3)):
+        q0, q1, q2 = quad[i0], quad[i1], quad[i2]
+        s0, s1, s2 = corners[i0], corners[i1], corners[i2]
+        denom = ((q1[1] - q2[1]) * (q0[0] - q2[0])
+                 + (q2[0] - q1[0]) * (q0[1] - q2[1]))
+        if abs(denom) < 1e-9:
+            continue
+        min_x = max(left, int(math.floor(min(q0[0], q1[0], q2[0]))))
+        max_x = min(right, int(math.ceil(max(q0[0], q1[0], q2[0]))) - 1)
+        min_y = max(top, int(math.floor(min(q0[1], q1[1], q2[1]))))
+        max_y = min(bottom, int(math.ceil(max(q0[1], q1[1], q2[1]))) - 1)
+        for y in range(min_y, max_y + 1):
+            py = y + 0.5
+            row = (y - top) * out.width
+            for x in range(min_x, max_x + 1):
+                px = x + 0.5
+                a = ((q1[1] - q2[1]) * (px - q2[0])
+                     + (q2[0] - q1[0]) * (py - q2[1])) / denom
+                b = ((q2[1] - q0[1]) * (px - q2[0])
+                     + (q0[0] - q2[0]) * (py - q2[1])) / denom
+                c = 1.0 - a - b
+                if a < -1e-9 or b < -1e-9 or c < -1e-9:
+                    continue
+                sx = a * s0[0] + b * s1[0] + c * s2[0]
+                sy = a * s0[1] + b * s1[1] + c * s2[1]
+                ix, iy = int(sx), int(sy)
+                if ix < 0 or iy < 0 or ix >= sw or iy >= sh:
+                    continue
+                source_index = (iy * sw + ix) * 4
+                if not source[source_index + 3]:
+                    continue
+                target = (row + (x - left)) * 4
+                dst[target:target + 4] = source[source_index:
+                                                source_index + 4]
+    return left, top, out
+
+
+# --------------------------------------------------------------------- layers
+class LayerGroup(object):
+    """A named set of layers that show, hide and merge together.
+
+    Membership lives on the layers themselves (`Layer.group`), so a group can
+    be reopened from any project without a separate tree structure.
     """
 
-    __slots__ = ("bitmap", "name", "op", "visible", "alpha")
+    __slots__ = ("name", "visible", "alpha")
 
-    def __init__(self, width, height, name="Layer 1", op="normal",
-                 visible=True, data=None, alpha=255):
-        self.bitmap = Bitmap(width, height, data)
+    def __init__(self, name="Group 1", visible=True, alpha=255):
         self.name = str(name)
-        self.op = op if op in LAYER_OPS else "normal"
         self.visible = bool(visible)
         self.alpha = clamp(int(alpha), 0, 255)
 
     def __repr__(self):
-        return "Layer(%r, %s)" % (self.name, self.op)
+        return "LayerGroup(%r)" % self.name
+
+    def copy(self):
+        return LayerGroup(self.name, self.visible, self.alpha)
+
+    def to_state(self):
+        return {"name": self.name, "visible": self.visible,
+                "alpha": self.alpha}
+
+    @classmethod
+    def from_state(cls, state):
+        return cls(state.get("name", "Group"), state.get("visible", True),
+                   state.get("alpha", 255))
+
+
+class Layer(object):
+    """One bitmap in a document's layer stack.
+
+    `op`, `gate` and `blend` are the layer's three separate option groups:
+    the arithmetic operation, the bitwise gate and the blend mode. Each is
+    "none" unless chosen, and they apply in that order to the stack below.
+    `alpha` is the layer's own opacity, which scales the strength of the
+    result for every pixel. `group` names the layer's group, or is empty when
+    it is ungrouped. `Document.layers[0]` is the bottom layer.
+    """
+
+    __slots__ = ("bitmap", "name", "op", "gate", "blend", "visible",
+                 "alpha", "group")
+
+    def __init__(self, width, height, name="Layer 1", op="none",
+                 visible=True, data=None, alpha=255, group="", blend="none",
+                 gate="none"):
+        self.bitmap = Bitmap(width, height, data)
+        self.name = str(name)
+        self.op = op if op in LAYER_OPS else "none"
+        self.gate = gate if gate in LAYER_GATES else "none"
+        self.blend = blend if blend in LAYER_BLENDS else "none"
+        self.visible = bool(visible)
+        self.alpha = clamp(int(alpha), 0, 255)
+        self.group = str(group or "")
+
+    def __repr__(self):
+        return "Layer(%r, %s, %s, %s)" % (self.name, self.op, self.gate,
+                                          self.blend)
 
     def copy(self):
         return Layer(self.bitmap.width, self.bitmap.height, self.name, self.op,
-                     self.visible, bytes(self.bitmap.data), self.alpha)
+                     self.visible, bytes(self.bitmap.data), self.alpha,
+                     self.group, self.blend, self.gate)
 
     def to_state(self):
-        return {"name": self.name, "op": self.op, "visible": self.visible,
-                "alpha": self.alpha, "data": bytes(self.bitmap.data)}
+        return {"name": self.name, "op": self.op, "gate": self.gate,
+                "blend": self.blend, "visible": self.visible,
+                "alpha": self.alpha, "group": self.group,
+                "data": bytes(self.bitmap.data)}
 
     @classmethod
     def from_state(cls, state, width, height):
-        return cls(width, height, state.get("name", "Layer"),
-                   state.get("op", "normal"), state.get("visible", True),
-                   state.get("data"), state.get("alpha", 255))
+        op = state.get("op", "none")
+        gate = state.get("gate", "none")
+        blend = state.get("blend", "none")
+        if "gate" not in state:
+            # Projects from before the three groups held a bitwise gate, or
+            # one of the old blend names, in "op".
+            gate = op if op in LAYER_GATES else "none"
+            if "blend" in state:
+                # Two-group projects: "op" was the gate, "blend" the mode.
+                op = "none"
+            elif op in ("screen", "overlay", "darken", "lighten",
+                        "difference", "normal"):
+                op, blend = "none", op
+            elif op not in LAYER_OPS:
+                op = "none"
+        if blend == "normal":
+            blend = "none"
+        return cls(width, height, state.get("name", "Layer"), op,
+                   state.get("visible", True), state.get("data"),
+                   state.get("alpha", 255), state.get("group", ""), blend,
+                   gate)
 
 
-def composite_layers(layers, rect=None, frame=None):
+def composite_layers(layers, rect=None, frame=None, groups=None):
     """Flatten the visible layers into one Bitmap.
 
     `frame` is the full canvas size and `rect` limits the result to one
     rectangle, which is what the canvas view composites while painting. Each
     layer combines with the stack below it using its own operation, with its
     alpha as the strength, so transparent pixels leave the result unchanged.
+    `groups` maps group names to LayerGroup objects; a hidden group hides its
+    members and a group opacity scales theirs.
     """
     if not layers:
         raise HexError("a document needs at least one layer")
@@ -694,7 +1019,14 @@ def composite_layers(layers, rect=None, frame=None):
             continue
         src = layer.bitmap.data
         op = layer.op
+        gate = layer.gate
+        blend = layer.blend
         opacity = clamp(int(layer.alpha), 0, 255)
+        group = groups.get(layer.group) if groups and layer.group else None
+        if group is not None:
+            if not group.visible:
+                continue
+            opacity = opacity * clamp(int(group.alpha), 0, 255) // 255
         if not opacity:
             continue
         for row in range(h):
@@ -715,9 +1047,12 @@ def composite_layers(layers, rect=None, frame=None):
                     dst[d:d + 3] = src[s:s + 3]
                     dst[d + 3] = above
                     continue
-                dst[d] = combine(dst[d], src[s], op, above)
-                dst[d + 1] = combine(dst[d + 1], src[s + 1], op, above)
-                dst[d + 2] = combine(dst[d + 2], src[s + 2], op, above)
+                dst[d] = combine_layer(dst[d], src[s], op, gate, blend,
+                                       above)
+                dst[d + 1] = combine_layer(dst[d + 1], src[s + 1], op, gate,
+                                           blend, above)
+                dst[d + 2] = combine_layer(dst[d + 2], src[s + 2], op, gate,
+                                           blend, above)
                 dst[d + 3] = below + (255 - below) * above // 255
     return out
 
@@ -1468,6 +1803,7 @@ class Document(object):
                  color_mode="RGB", alpha=True):
         self.layers = [Layer(width, height, data=data)]
         self.layer_index = 0
+        self.groups = []
         self.selection = Selection(width, height)
         self.undo = UndoStack()
         self.path = path
@@ -1479,6 +1815,12 @@ class Document(object):
         self.ppi = float(ppi)
         self.color_mode = color_mode
         self.alpha = bool(alpha)
+        # Working layout for this canvas. When set, every committed edit is
+        # reduced to these channel widths; None leaves 8-bit pixels untouched.
+        # Packing and order travel with the document in a .h2p project.
+        self.working_widths = None
+        self.working_packing = "packed"
+        self.working_order = "RGB"
 
     @property
     def layer_count(self):
@@ -1508,18 +1850,95 @@ class Document(object):
     def mask(self):
         return self.selection.mask_or_full()
 
+    def set_working_widths(self, widths, quantize=True):
+        """Set the canvas working limit, optionally reducing existing pixels."""
+        if widths is None:
+            self.working_widths = None
+            return 0
+        from . import bitdepth
+        self.working_widths = bitdepth.channel_widths(widths)
+        return self.limit_pixels() if quantize else 0
+
+    def working_layout(self):
+        """The saved working layout, or None when no limit is set."""
+        if not self.working_widths:
+            return None
+        return {"raw_channels": tuple(self.working_widths),
+                "raw_packing": self.working_packing,
+                "raw_order": self.working_order}
+
+    def set_working_layout(self, working, quantize=True):
+        """Set widths, packing and order, optionally reducing pixels."""
+        if working is None:
+            self.working_widths = None
+            self.working_packing = "packed"
+            self.working_order = "RGB"
+            return 0
+        if not isinstance(working, dict):
+            raise HexError("working layout must be a mapping")
+        from . import bitdepth
+        widths = bitdepth.channel_widths(working.get("raw_channels"))
+        packing = bitdepth.check_packing(working.get("raw_packing"))
+        order = bitdepth.check_order(working.get("raw_order"))
+        self.working_widths = widths
+        self.working_packing = packing
+        self.working_order = order
+        return self.limit_pixels() if quantize else 0
+
+    def limit_color(self, color):
+        """A colour clamped to this canvas's working widths."""
+        if not self.working_widths:
+            return tuple(color)
+        from . import bitdepth
+        return bitdepth.limit_color(color, self.working_widths)
+
+    def limit_pixels(self, rect=None):
+        """Reduce every layer (or one rectangle) to the working widths."""
+        if not self.working_widths:
+            return 0
+        from . import bitdepth
+        count = 0
+        if rect is None:
+            for layer in self.layers:
+                bitmap = layer.bitmap
+                limited = bitdepth.limit_rgba(bitmap.data, self.working_widths)
+                if limited != bitmap.data:
+                    bitmap.data[:] = limited
+                count += bitmap.width * bitmap.height
+            return count
+        left, top, width, height = [int(value) for value in rect]
+        right = min(self.width, left + width)
+        bottom = min(self.height, top + height)
+        left, top = max(0, left), max(0, top)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return 0
+        for layer in self.layers:
+            bitmap = layer.bitmap
+            for y in range(top, bottom):
+                start = (y * bitmap.width + left) * 4
+                end = start + width * 4
+                limited = bitdepth.limit_rgba(bitmap.data[start:end],
+                                              self.working_widths)
+                if limited != bitmap.data[start:end]:
+                    bitmap.data[start:end] = limited
+            count += width * height
+        return count
+
     def flatten(self, rect=None):
         """Composite the visible layers, or one rectangle, into a Bitmap."""
         if (self.layer_count == 1 and self.layers[0].visible
-                and self.layers[0].alpha >= 255):
+                and self.layers[0].alpha >= 255 and not self.layers[0].group):
             bitmap = self.layers[0].bitmap
             return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
-        return composite_layers(self.layers, rect, (self.width, self.height))
+        return composite_layers(self.layers, rect, (self.width, self.height),
+                                self.group_map())
 
-    def add_layer(self, name=None, op="normal"):
+    def add_layer(self, name=None, op="none", blend="none", gate="none"):
         """Insert an empty layer above the active one and select it."""
         name = name or "Layer %d" % (self.layer_count + 1)
-        layer = Layer(self.width, self.height, name, op)
+        layer = Layer(self.width, self.height, name, op, blend=blend,
+                      gate=gate)
         self.layer_index += 1
         self.layers.insert(self.layer_index, layer)
         return layer
@@ -1538,6 +1957,125 @@ class Document(object):
         index = self.layer_index if index is None else int(index)
         del self.layers[index]
         self.layer_index = min(index, self.layer_count - 1)
+        self.prune_groups()
+        return True
+
+    def prune_groups(self):
+        """Forget group entries that no longer have any members."""
+        names = set(layer.group for layer in self.layers if layer.group)
+        self.groups = [group for group in self.groups if group.name in names]
+
+    # ------------------------------------------------------------ groups
+    def group_map(self):
+        """Group name to LayerGroup, as composite_layers expects it."""
+        return {group.name: group for group in self.groups}
+
+    def group(self, name):
+        for group in self.groups:
+            if group.name == name:
+                return group
+        return None
+
+    def ensure_group(self, name=None):
+        """Return a group, creating it (with a fresh name) when needed."""
+        if name:
+            found = self.group(name)
+            if found is not None:
+                return found
+            group = LayerGroup(str(name))
+            self.groups.append(group)
+            return group
+        number = len(self.groups) + 1
+        name = "Group %d" % number
+        while self.group(name) is not None:
+            number += 1
+            name = "Group %d" % number
+        return self.ensure_group(name)
+
+    def group_layer(self, index=None, name=None):
+        """Put a layer into a group, creating the group when it is new."""
+        index = self.layer_index if index is None else int(index)
+        if index < 0 or index >= self.layer_count:
+            return None
+        group = self.ensure_group(name)
+        self.layers[index].group = group.name
+        return group
+
+    def group_members(self, name):
+        """Indices of the layers in a group, bottom first."""
+        return [index for index, layer in enumerate(self.layers)
+                if layer.group == name]
+
+    def rename_group(self, old, new):
+        """Rename a group and the layer tags that point at it."""
+        group = self.group(old)
+        new = str(new or "").strip()
+        if group is None or not new or new == old or self.group(new):
+            return False
+        group.name = new
+        for layer in self.layers:
+            if layer.group == old:
+                layer.group = new
+        return True
+
+    def rename_layer(self, index=None, name=None):
+        index = self.layer_index if index is None else int(index)
+        name = str(name or "").strip()
+        if index < 0 or index >= self.layer_count or not name:
+            return False
+        self.layers[index].name = name
+        return True
+
+    def remove_group(self, name, merge=False):
+        """Drop a group; its layers stay, ungrouped (or merged into one)."""
+        if merge:
+            return self.merge_group(name)
+        group = self.group(name)
+        if group is None:
+            return 0
+        count = 0
+        for layer in self.layers:
+            if layer.group == name:
+                layer.group = ""
+                count += 1
+        self.groups.remove(group)
+        return count
+
+    # ------------------------------------------------------------- merging
+    def merge_down(self, index=None):
+        """Combine a layer into the one below, using its op and opacity."""
+        index = self.layer_index if index is None else int(index)
+        if index <= 0 or index >= self.layer_count:
+            return False
+        below = self.layers[index - 1]
+        above = self.layers[index]
+        merged = composite_layers([below, above], None,
+                                  (self.width, self.height), self.group_map())
+        below.bitmap = merged
+        # The opacity is baked into the pixels now, so clear it to avoid
+        # scaling the merged result a second time.
+        below.alpha = 255
+        del self.layers[index]
+        self.layer_index = index - 1
+        return True
+
+    def merge_group(self, name):
+        """Flatten a whole group into one layer where its lowest member was."""
+        group = self.group(name)
+        members = self.group_members(name)
+        if group is None or not members:
+            return False
+        layers = [self.layers[index] for index in members]
+        merged = composite_layers(layers, None, (self.width, self.height),
+                                  {name: group})
+        result = Layer(self.width, self.height, group.name,
+                       layers[0].op, True, bytes(merged.data),
+                       blend=layers[0].blend, gate=layers[0].gate)
+        for index in reversed(members):
+            del self.layers[index]
+        self.layers.insert(members[0], result)
+        self.layer_index = clamp(members[0], 0, self.layer_count - 1)
+        self.groups.remove(group)
         return True
 
     def move_layer(self, delta, index=None):
@@ -1550,18 +2088,38 @@ class Document(object):
         self.layer_index = target
         return True
 
-    def reorder_layer(self, target, index=None):
-        """Move a layer to another slot in the stack."""
+    def move_layer_to(self, target, index=None, group=None):
+        """Move a layer to another slot and, when given, into another group.
+
+        `group` of "" takes the layer out of its group and None leaves the
+        membership alone. The active layer stays active even when the move
+        crosses over it.
+        """
         index = self.layer_index if index is None else int(index)
         target = int(target)
-        if (index == target or index < 0 or index >= self.layer_count
+        if (index < 0 or index >= self.layer_count
                 or target < 0 or target >= self.layer_count):
             return False
-        layer = self.layers.pop(index)
-        self.layers.insert(target, layer)
-        if index == self.layer_index:
-            self.layer_index = target
+        layer = self.layers[index]
+        regroup = group is not None and str(group) != layer.group
+        if target == index and not regroup:
+            return False
+        active = self.active_layer
+        if target != index:
+            self.layers.pop(index)
+            self.layers.insert(target, layer)
+            self.layer_index = self.layers.index(active)
+        if regroup:
+            name = str(group or "")
+            if name:
+                self.ensure_group(name)
+            layer.group = name
+            self.prune_groups()
         return True
+
+    def reorder_layer(self, target, index=None):
+        """Move a layer to another slot in the stack."""
+        return self.move_layer_to(target, index)
 
     def transform_all(self, func):
         """Apply a bitmap transform (flip, rotate, resize) to every layer."""
@@ -1578,6 +2136,7 @@ class Document(object):
             "color_mode": self.color_mode,
             "alpha": self.alpha,
             "layers": [layer.to_state() for layer in self.layers],
+            "groups": [group.to_state() for group in self.groups],
             "layer_index": self.layer_index,
         }
 
@@ -1591,15 +2150,27 @@ class Document(object):
         else:
             self.layers = [Layer(width, height, data=state["data"])]
             self.layer_index = 0
+        self.groups = [LayerGroup.from_state(entry)
+                       for entry in state.get("groups") or []]
+        known = set(group.name for group in self.groups)
+        for layer in self.layers:
+            if layer.group and layer.group not in known:
+                self.groups.append(LayerGroup(layer.group))
+                known.add(layer.group)
         self.selection = Selection(width, height)
         self.ppi = state["ppi"]
         self.color_mode = state["color_mode"]
         self.alpha = state["alpha"]
+        # Undo can revive a pre-limit snapshot; the working limit still wins.
+        self.limit_pixels()
 
     def begin(self):
         return self.state()
 
     def commit(self, before):
+        # A working layout is a hard limit on the canvas, so catch any edit
+        # path that writes bytes directly before the state enters history.
+        self.limit_pixels()
         self.dirty = True
         return self.undo.push(before, self.state())
 
@@ -1617,6 +2188,7 @@ class Document(object):
 
     def replace_bitmap(self, bitmap, keep_selection=False):
         self.layers = [Layer(bitmap.width, bitmap.height, data=bitmap.data)]
+        self.groups = []
         self.layer_index = 0
         if not keep_selection:
             self.selection = Selection(bitmap.width, bitmap.height)
