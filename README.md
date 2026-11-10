@@ -14,7 +14,8 @@ keyboard is the primary instrument.
 > **Windows 7 compatibility branch.** This branch, `win7-compat`, keeps the
 > editor identical to `main` but freezes it against **CPython 3.8.20**, the last
 > CPython release with Windows 7 support, so the packaged executable runs on
-> 64-bit Windows 7 SP1 and newer. `main` remains the 3.10 release line. See
+> Windows 7 SP1 and newer through WoW64 as well. `main` remains the 3.10 release
+> line. See
 > [Windows 7 compatibility](#windows-7-compatibility).
 
 
@@ -57,7 +58,7 @@ This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
 
 **You do not need Python, pip or any other runtime installed.** The release
 executable is a self-contained Windows program: PyInstaller bundles CPython
-3.8.20 (64-bit), Tcl/Tk and Pillow together with the hex2pix code, so it runs on a
+3.8.20 (32-bit), Tcl/Tk and Pillow together with the hex2pix code, so it runs on a
 machine that has never had Python on it. There is no installer and nothing to
 add to `PATH` — it is an ordinary windowed `.exe`.
 
@@ -68,13 +69,13 @@ Download from the
 | --- | --- | --- |
 | `hex2pix.exe` | ~18 MB | the usual choice: one file, no console window |
 | `hex2pix-portable.zip` | ~18 MB | antivirus blocks the single file (see below) |
-| [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat) | ~13 MB | 64-bit Windows 7 SP1 and newer: the CPython 3.8.20 `hex2pix.exe` (see [below](#windows-7-compatibility)); the same release also carries `hex2pix-portable.zip` |
+| [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat) | ~11 MB | Windows 7 SP1 and newer: the 32-bit CPython 3.8.20 `hex2pix.exe`, which also runs on 64-bit Windows (see [below](#windows-7-compatibility)); the same release also carries `hex2pix-portable.zip` |
 
 Put the executable (or the unzipped folder) anywhere you can write — Desktop,
 `D:\Tools`, a USB stick — and double-click it. No administrator rights are
 needed.
 
-- **Requirements:** 64-bit Windows 7 SP1 or newer on this branch.
+- **Requirements:** Windows 7 SP1 or newer, 32-bit or 64-bit. This branch ships a 32-bit executable.
 - **First start takes a few seconds:** the single file unpacks its bundled
   runtime into `%TEMP%\_MEIxxxxxx` on each start and removes it on exit.
 - **SmartScreen:** the download is not code-signed, so Windows may show
@@ -91,42 +92,53 @@ Python is only needed to run or build from source; see
 `main` freezes CPython 3.10, and CPython has required Windows 8.1 or newer from
 3.10 onward (3.12 and newer need Windows 10). This branch freezes **CPython
 3.8.20** instead, the last CPython release that supports Windows 7, so the same
-editor starts on 64-bit Windows 7 SP1 and on every later Windows.
+editor starts on Windows 7 SP1 and on every later Windows, 32-bit or 64-bit.
 
 The Python source is unchanged: everything under `hex2pix/` is identical to
 `main`, because it already runs on 3.8. Only the frozen toolchain differs, so the
-executable carries `python38.dll` and Tcl/Tk 8.6 rather than `python310.dll`.
+executable carries the 32-bit `python38.dll` and Tcl/Tk 8.6 rather than
+`python310.dll`. The runtime is R-YaTian's [Windows XP build of CPython
+3.8.20](https://github.com/R-YaTian/CPython3.8.20WinXP), whose interpreter and
+DLL declare a Windows 5.1 subsystem.
 
-Verified on this branch with CPython 3.8.20 (64-bit, Tcl/Tk 8.6, MSC v.1929):
+PyInstaller 6's bootloader still declares a Windows 6.0 subsystem, so these
+executables start on Windows Vista/7 and newer, not on XP. The
+[`retro-compat` branch](https://github.com/Shagg097/hex2pixbeta/tree/retro-compat)
+fills that gap with cx_Freeze, whose launcher declares 5.1.
+
+Verified on this branch with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 429 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 443 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
 | `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
-| Interpreter inside both builds | `python38.dll`, no `python310.dll` |
+| Interpreter inside both builds | 32-bit `python38.dll`, no `python310.dll` |
+| PE header of both executables | 32-bit (`0x14C`), subsystem 6.0 |
 
 ### Building it
 
 Python 3.8.11 and later were security-only releases, so python.org publishes no
-Windows installer for 3.8.20. Use a stand-alone build that includes Tcl/Tk, such as
-the one CI downloads in `.github/workflows/win7-build.yml`:
+Windows installer for 3.8.20. This branch uses the 32-bit Windows XP build from
+[R-YaTian/CPython3.8.20WinXP](https://github.com/R-YaTian/CPython3.8.20WinXP),
+which includes Tcl/Tk. It is a WiX Burn installer, so it can install quietly
+into the checkout without touching PATH, shortcuts or the launcher:
 
-```bash
-curl -sSL -o pbs38.tar.gz \
-  "https://github.com/astral-sh/python-build-standalone/releases/download/20240909/cpython-3.8.20%2B20240909-x86_64-pc-windows-msvc-install_only.tar.gz"
-mkdir -p .py38 && tar -xzf pbs38.tar.gz -C .py38 && rm pbs38.tar.gz
-.py38/python/python.exe -c "import tkinter; print('tkinter ok')"
+```bat
+curl -L -o py38xp.exe "https://github.com/R-YaTian/CPython3.8.20WinXP/releases/download/v3.8.20_final/python-3.8.20-full.exe"
+py38xp.exe /quiet InstallAllUsers=0 TargetDir="%CD%\.py38" Include_doc=0 Include_test=0 Include_launcher=0 Include_pip=1 Include_tcltk=1 PrependPath=0 Shortcuts=0 AssociateFiles=0
+del py38xp.exe
+.py38\python.exe -c "import tkinter; print('tkinter ok')"
 ```
 
 Then install the pinned requirements into it and call the specs directly, because
 `packaging\build_exe.cmd` builds with whichever interpreter `py -3` resolves to:
 
 ```bat
-.py38\python\python.exe -m pip install -r requirements.txt
-.py38\python\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
-.py38\python\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
+.py38\python.exe -m pip install -r requirements.txt
+.py38\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix.spec
+.py38\python.exe -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\hex2pix_onedir.spec
 ```
 
 ### What this branch costs
@@ -142,7 +154,10 @@ Then install the pinned requirements into it and call the specs directly, becaus
   `.github/workflows/release.yml`; this branch is checked by
   `.github/workflows/win7-build.yml` instead, which publishes this build in the
   [Windows 7 release](https://github.com/Shagg097/hex2pixbeta/releases/tag/win7-compat)
-  and keeps each run's files as an `hex2pix-py38-win7` artifact for 90 days.
+  and keeps each run's files as an `hex2pix-py38-win7-x86` artifact for 90 days.
+- **Windows XP is out of reach here.** PyInstaller's bootloader needs Windows
+  Vista/7 or newer. The `retro-compat` branch carries the same 32-bit CPython
+  runtime but freezes it with cx_Freeze, whose launcher targets XP.
 
 ## Quick start
 
@@ -460,6 +475,8 @@ visible layer), trim transparent edges, scale 1–32× with nearest or bilinear
 sampling, set the PPI stored in the file, keep or drop transparency against a
 matte, and tune JPEG quality, GIF palette size and PNG compression. The docker
 shows the active project file and the resulting pixel size before you write.
+**Raw bits...** opens a dialog for headerless 1–32 bpp output: indexed or
+RGB(A), preset or per-channel widths, and packed or byte-aligned packing.
 
 **File > Open…** recognizes `.h2p` automatically. Once a document is a `.h2p`,
 `Ctrl+S` saves the project instead of flattening it to an image.
@@ -479,11 +496,33 @@ Reading goes through Pillow: PNG, BMP, GIF, TGA, ICO, TIFF, WEBP, JPEG and PPM.
 | WEBP | Yes | Lossless |
 | JPEG | No | Flattened, adjustable quality |
 | PPM | No | Binary `P6` |
+| Raw pixel bits | Optional | Headerless 1–32 bpp; indexed or RGB(A), packed or byte-aligned |
 | Hex text | n/a | `RRGGBBAA` rows; `.` for transparent |
 
 BMP and PPM are written by hand rather than through Pillow, so the 24-bit BMP
 really is 24 bits per pixel and the loader can reopen hex2pix output with its
 alpha intact.
+
+### Raw bits
+
+**Raw pixel bits** writes a headerless stream: the values only, with no size,
+palette or row padding. **Raw bits...** in the Export docker chooses between
+**Indexed** (1–8 bits per pixel on an adaptive palette) and **RGB(A)** (0–16
+bits per channel, adding up to 32). Channels are written most significant bit
+first in R, G, B, A order and keep the top bits of each 8-bit value.
+
+**Packed** runs the pixels together bit by bit. 12-bit 4:4:4 therefore puts two
+pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`), and 6-bit 2:2:2 puts
+four in three (`rrggbbrr ggbbrrgg bbrrggbb`). **Aligned** starts each pixel on
+a byte boundary and zero-fills the high bits instead: 12 bits becomes
+`0000rrrr ggggbbbb` (two bytes) and 6 bits becomes `00rrggbb` (one byte). The
+last byte of a packed stream is zero-padded, rows run top to bottom and pixels
+left to right, and the export hint shows the exact byte count.
+
+Presets cover 1:1:1 (3 bpp), 2:2:2 (6), 3:3:2 (8), 4:4:4 (12), 5:5:5 (15),
+5:6:5 (16), 6:6:6 (18), 8:8:8 (24), 10:10:10 (30) and 8:8:8:8 (32); any other
+split can be typed into the R/G/B/A fields. Indexed output uses the same kind
+of adaptive palette as GIF, so a 1 bpp export is a two-colour mask.
 
 ## Start page and recent documents
 
@@ -616,7 +655,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **429 unit tests** covering the model, canvas geometry,
+The first command runs **443 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -652,7 +691,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              429 unit tests
+│  └─ tests/              443 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 

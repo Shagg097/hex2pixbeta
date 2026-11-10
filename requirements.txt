@@ -1,6 +1,7 @@
 # Runtime dependency of the editor.
 # 10.4.0 is the last Pillow release that supports Python 3.8, the interpreter
-# this branch freezes so the executable still runs on Windows 7.
+# this branch freezes so the executable still runs on Windows 7. The build is
+# 32-bit; Pillow publishes a cp38 win32 wheel.
 Pillow==10.4.0
 
 # Build-time only: produces dist\hex2pix.exe through packaging\build_exe.cmd and
