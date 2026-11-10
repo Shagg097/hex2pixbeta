@@ -189,10 +189,12 @@ selection mask, so each one can be confined to a region:
   colours repeat) and **Noise** jitters each channel by **Amount** percent
   while keeping the pixel's alpha.
 - **Text** (Shift+X) stamps the **Text** option in the foreground colour with
-  its top-left corner at the click point, drawn in a built-in 5x7 font at
-  whole-pixel **Scale** with blank **Spacing** columns between glyphs. Unknown
-  characters fall back to `?`, and the result is ordinary pixels that the hex
-  panels and byte tools can edit afterwards.
+  its top-left corner at the click point. The default is the built-in 5x7 font
+  with whole-pixel **Scale** and blank **Spacing** columns; unknown characters
+  fall back to `?`. The **Font** menu lists every usable family installed on
+  the operating system, with **Size**, **Bold** and **Italic** for those faces.
+  **Load...** adds a specific TTF, OTF, TTC, FON, Type 1, BDF or PCF file. The
+  result is ordinary pixels that the hex panels and byte tools can edit.
 
 ## Spray can, curves and contours
 
@@ -412,7 +414,7 @@ state the tool uses:
 | Structure fill | Grid size, Mirror tiles |
 | Blur | Size, Tip, Strength, Smear, Mirror |
 | Shuffle | Size, Tip, Mode (Shuffle, Scatter, Noise), Amount, Blur |
-| Text | the text, Scale, Spacing |
+| Text | text, Font (installed OS families or Load...), Size, Bold, Italic; built-in 5x7 uses Scale and Spacing |
 | Spray can | Size, Tip, Flow %, Blur, Multicolor |
 | Curve | Width, Tip, Bend %, Vectors (1-8), Side (left, right, alternate) |
 | Contour | Width, Side (outside or inside), Connect (4 or 8 edges) |
@@ -580,7 +582,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 450 tests over the model, the canvas, formats, colours,
+The first command runs 457 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand

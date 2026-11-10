@@ -21,7 +21,7 @@ from tkinter import (colorchooser, filedialog, font as tkfont, messagebox,
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
-from . import __version__, bitdepth, dither, filters, formats, icons
+from . import __version__, bitdepth, dither, filters, formats, icons, textfont
 from .integrations import (GITHUB_REPOSITORY, SettingsStore, UpdateError,
                            apply_update, check_for_update, download_update,
                            is_folder_build)
@@ -30,14 +30,15 @@ from .palette import (MAX_PALETTE_COLORS, PALETTE_FILETYPES, PALETTES,
                       format_palette, make_palette, parse_palette,
                       preset_colors, quantize_bitmap)
 from .pattern import PatternSpec, apply_pattern, block_from_grid
-from .bitmapfont import text_size
+from .bitmapfont import text_points, text_size
 from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
                       smear_area, spray_area, shuffle_area, shuffle_stroke,
                       spray_stroke)
 from .shapes import (brush_offsets, custom_brush, custom_brush_from_text,
                      custom_brush_text, gradient_fill, line_points,
                      mirror_points, paint_curve, paint_dab, paint_mask,
-                     paint_shape, paint_stroke, set_custom_brush, shape_color,
+                     paint_points, paint_shape, paint_stroke, set_custom_brush,
+                     shape_color,
                      stamp_pattern, stamp_text)
 from .canvas import (ANCHOR_CODES, ANCHOR_LABELS, MAX_SIDE, UNITS, CanvasSpec,
                      apply_spec_to_document, physical_size, px_per_unit,
@@ -2852,6 +2853,16 @@ class hex2pixApp(tk.Tk):
         self.shuffle_amount_var = tk.IntVar(value=40)
         self.shuffle_blur_var = tk.IntVar(value=0)
         self.text_value = tk.StringVar(value="HEX")
+        self.text_font_var = tk.StringVar(
+            value=str(self.settings.get("text_font", textfont.BUILTIN_FONT)
+                      or textfont.BUILTIN_FONT))
+        self.text_font_file = str(self.settings.get("text_font_file", "") or "")
+        self.text_font_size_var = tk.IntVar(
+            value=_bounded(self.settings.get("text_size", 16), 4, 256, 16))
+        self.text_bold_var = tk.BooleanVar(
+            value=bool(self.settings.get("text_bold", False)))
+        self.text_italic_var = tk.BooleanVar(
+            value=bool(self.settings.get("text_italic", False)))
         self.text_scale_var = tk.IntVar(value=2)
         self.text_spacing_var = tk.IntVar(value=1)
         self.spray_size_var = tk.IntVar(value=8)
@@ -3125,11 +3136,79 @@ class hex2pixApp(tk.Tk):
     def _options_text(self):
         self._option_label("Text")
         self._option_entry(self.text_value, 16)
-        self._option_label("Scale")
-        self._option_spin(self.text_scale_var, 1, 8, width=3)
-        self._option_label("Spacing")
-        self._option_spin(self.text_spacing_var, 0, 8, width=3)
+        self._option_label("Font")
+        self._option_combo(self.text_font_var, self._text_font_choices(), 22,
+                           command=self._text_font_changed)
+        self._option_button("Load...", self.load_text_font, width=6)
+        if self._text_is_builtin():
+            self._option_label("Scale")
+            self._option_spin(self.text_scale_var, 1, 8, width=3)
+            self._option_label("Spacing")
+            self._option_spin(self.text_spacing_var, 0, 8, width=3)
+        else:
+            self._option_label("Size")
+            self._option_spin(self.text_font_size_var, 4, 256, width=4,
+                              command=self._save_text_style)
+            self._option_check("Bold", self.text_bold_var,
+                               self._save_text_style, padx=(6, 0))
+            self._option_check("Italic", self.text_italic_var,
+                               self._save_text_style)
         self._option_label("Click to stamp in the foreground color", (16, 2))
+
+    def _text_font_choices(self):
+        choices = [textfont.BUILTIN_FONT]
+        choices.extend(textfont.family_names())
+        if self.text_font_file:
+            label = self._custom_font_label()
+            if label not in choices:
+                choices.append(label)
+        current = self.text_font_var.get()
+        if current and current not in choices:
+            choices.append(current)
+        return tuple(choices)
+
+    def _custom_font_label(self):
+        faces = textfont.faces_from_file(self.text_font_file)
+        family = faces[0].family if faces else ""
+        return textfont.custom_label(self.text_font_file, family)
+
+    def _text_is_builtin(self):
+        return self.text_font_var.get() == textfont.BUILTIN_FONT
+
+    def _text_is_custom(self):
+        return self.text_font_var.get().startswith(textfont.CUSTOM_PREFIX)
+
+    def _text_font_changed(self):
+        value = self.text_font_var.get()
+        if (not self._text_is_custom()
+                and value != textfont.BUILTIN_FONT):
+            self.text_font_file = ""
+            self.settings.set("text_font_file", "")
+        self.settings.set("text_font", value)
+        self.after_idle(self._refresh_tool_options)
+
+    def _save_text_style(self):
+        self.settings.set("text_size", str(self.text_font_size()))
+        self.settings.set("text_bold", bool(self.text_bold_var.get()))
+        self.settings.set("text_italic", bool(self.text_italic_var.get()))
+
+    def load_text_font(self):
+        path = filedialog.askopenfilename(
+            parent=self, title="Load a font", filetypes=textfont.FONT_FILETYPES)
+        if not path:
+            return
+        faces = textfont.faces_from_file(path)
+        if not faces:
+            messagebox.showerror(
+                "Font", "No readable font face was found in that file.",
+                parent=self)
+            return
+        self.text_font_file = path
+        value = textfont.custom_label(path, faces[0].family)
+        self.text_font_var.set(value)
+        self.settings.set("text_font_file", path)
+        self.settings.set("text_font", value)
+        self._refresh_tool_options()
 
     def _options_spray(self):
         self._option_label("Size")
@@ -4068,10 +4147,35 @@ class hex2pixApp(tk.Tk):
         text = self.text_value.get()
         if not text:
             return 0
-        painted = stamp_text(self.doc.bitmap, self.doc.mask(), x, y, text,
-                             self.fg, self.text_scale(), self.text_spacing(),
-                             self.symmetry)
-        width, height = text_size(text, self.text_scale(), self.text_spacing())
+        points = None
+        width = height = 0
+        if self._text_is_builtin():
+            points = text_points(text, self.text_scale(), self.text_spacing())
+            width, height = text_size(text, self.text_scale(),
+                                      self.text_spacing())
+        else:
+            file_path = self.text_font_file if self._text_is_custom() else ""
+            family = self.text_font_var.get()
+            if self._text_is_custom():
+                faces = textfont.faces_from_file(file_path)
+                family = faces[0].family if faces else ""
+            rendered = textfont.render_text(
+                text, family, self.text_font_size(), self.text_bold(),
+                self.text_italic(), file_path)
+            if rendered is None:
+                self.status.set("Font unavailable; using Pixel 5x7")
+                points = text_points(text, self.text_scale(),
+                                     self.text_spacing())
+                width, height = text_size(text, self.text_scale(),
+                                          self.text_spacing())
+            else:
+                points = rendered.points
+                width, height = rendered.width, rendered.height
+        if not points:
+            return 0
+        painted = paint_points(
+            self.doc.bitmap, self.doc.mask(),
+            [(x + dx, y + dy) for dx, dy in points], self.fg, self.symmetry)
         self._mark_dirty(x, y, x + max(0, width - 1), y + max(0, height - 1))
         self.refresh_bytes()
         return painted
@@ -5363,6 +5467,15 @@ class hex2pixApp(tk.Tk):
 
     def text_spacing(self):
         return _bounded(self.text_spacing_var.get(), 0, 8, 1)
+
+    def text_font_size(self):
+        return _bounded(self.text_font_size_var.get(), 4, 256, 16)
+
+    def text_bold(self):
+        return bool(self.text_bold_var.get())
+
+    def text_italic(self):
+        return bool(self.text_italic_var.get())
 
     def spray_size(self):
         return _bounded(self.spray_size_var.get(), 1, 64, 8)
@@ -7636,7 +7749,7 @@ def run_selftest(out_path=None):
                         test_filters,
                         test_formats, test_icons, test_integrations,
                         test_macro, test_model, test_palette, test_pattern,
-                        test_project, test_shapes)
+                        test_project, test_shapes, test_textfont)
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([
@@ -7656,6 +7769,7 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_integrations),
         loader.loadTestsFromModule(test_editor_features),
         loader.loadTestsFromModule(test_brush_tips),
+        loader.loadTestsFromModule(test_textfont),
     ])
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)
