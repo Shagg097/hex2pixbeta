@@ -5,9 +5,10 @@ formats want fewer bits: 1-bit masks, 2:2:2 colour, 4:4:4 colour across two
 bytes, and so on. These helpers turn channel values into fixed-width samples
 and run them into a byte stream.
 
-Channels are concatenated from most to least significant in R, G, B, A order,
-and each channel keeps the top `n` bits of its 8-bit value (a channel wider
-than 8 bits is shifted up, leaving zero low bits).
+Channels are concatenated from most to least significant in the order you
+choose (RGB by default, or BGR and the other permutations), and each channel
+keeps the top `n` bits of its 8-bit value (a channel wider than 8 bits is
+shifted up, leaving zero low bits).
 
 Two layouts are available:
 
@@ -33,6 +34,10 @@ MAX_INDEX_BITS = 8
 
 RAW_MODES = ("Indexed", "RGB(A)")
 RAW_PACKINGS = ("Packed", "Aligned")
+
+# Channel order inside a sample, most significant first. Alpha, when it has a
+# width, goes at the end of the RGBA variants.
+CHANNEL_ORDERS = ("RGB", "RBG", "GRB", "GBR", "BRG", "BGR")
 
 # Header wrappers for the custom-bit-depth stream. "raw" is headerless; the
 # BMP variants differ only in the size of their info header, and TGA writes a
@@ -146,6 +151,41 @@ CHANNEL_PRESETS = (
     ("8:8:8:8 (32 bpp)", (8, 8, 8, 8)),
 )
 
+# Named byte layouts: label, (r, g, b, a) widths, packing. The label spells
+# out the bytes so a 4:4:4 image can be recognised as either the padded
+# 16-bit form or the 12-bit packed stream.
+BIT_LAYOUTS = (
+    ("xxxxrrrr ggggbbbb - 4:4:4 padded, 12 bpp (2 bytes)", (4, 4, 4, 0),
+     "aligned"),
+    ("rrrrgggg bbbbrrrr ggggbbbb - 4:4:4 packed, 12 bpp", (4, 4, 4, 0),
+     "packed"),
+    ("rrrrgggg bbbbaaaa - 4:4:4:4, 16 bpp (2 bytes)", (4, 4, 4, 4),
+     "aligned"),
+    ("rrrrrrrr gggggggg bbbbbbbb aaaaaaaa - 8:8:8:8, 32 bpp (4 bytes)",
+     (8, 8, 8, 8), "aligned"),
+    ("rrrgggbb - 3:3:2, 8 bpp (1 byte)", (3, 3, 2, 0), "aligned"),
+    ("rrrrrggg gggbbbbb - 5:6:5, 16 bpp (2 bytes)", (5, 6, 5, 0),
+     "aligned"),
+)
+
+
+def layout_label(widths, packing="packed"):
+    """The named byte layout matching `widths` and `packing`, or Custom."""
+    widths = tuple(int(value) for value in widths)
+    packing = check_packing(packing)
+    for label, preset, preset_packing in BIT_LAYOUTS:
+        if preset == widths and preset_packing == packing:
+            return label
+    return "Custom"
+
+
+def layout_for(label):
+    """(widths, packing) for a named layout label, or None."""
+    for name, widths, packing in BIT_LAYOUTS:
+        if name == label:
+            return widths, packing
+    return None
+
 
 def check_packing(packing):
     """Return the canonical packing name or raise HexError."""
@@ -153,6 +193,23 @@ def check_packing(packing):
     if key not in ("packed", "aligned"):
         raise HexError("bit packing must be packed or aligned")
     return key
+
+
+def check_order(order):
+    """Return a canonical channel order such as RGB, BGR or RGBA."""
+    text = str(order or "RGB").upper()
+    if len(text) not in (3, 4) or sorted(text) not in (["B", "G", "R"],
+                                                       ["A", "B", "G", "R"]):
+        raise HexError("channel order must use R, G and B once each")
+    return text
+
+
+def order_label(order):
+    """Best-effort channel order for UI values without raising."""
+    try:
+        return check_order(order)
+    except HexError:
+        return "RGB"
 
 
 def channel_widths(channels):
@@ -187,29 +244,38 @@ def channel_value(value, bits):
     return value << (bits - 8)
 
 
-def sample_rgb(rgb, widths):
-    """One integer per RGB triple, channels packed R then G then B."""
-    red, green, blue = [int(value) for value in widths[:3]]
+def sample_rgb(rgb, widths, order="RGB"):
+    """One integer per RGB triple, channels packed most significant first."""
+    order = check_order(order)[:3]
+    widths = [int(value) for value in widths[:3]]
+    plan = [(widths["RGB".index(letter)], "RGB".index(letter))
+            for letter in order]
     samples = []
     append = samples.append
     for index in range(0, len(rgb), 3):
-        value = channel_value(rgb[index], red)
-        value = (value << green) | channel_value(rgb[index + 1], green)
-        value = (value << blue) | channel_value(rgb[index + 2], blue)
+        value = 0
+        for width, channel in plan:
+            value = (value << width) | channel_value(rgb[index + channel],
+                                                     width)
         append(value)
     return samples
 
 
-def sample_rgba(rgba, widths):
-    """One integer per RGBA quad, channels packed R, G, B then A."""
-    red, green, blue, alpha = [int(value) for value in widths]
+def sample_rgba(rgba, widths, order="RGBA"):
+    """One integer per RGBA quad, channels packed most significant first."""
+    order = check_order(order)
+    if "A" not in order:
+        order += "A"
+    widths = [int(value) for value in widths]
+    plan = [(widths["RGBA".index(letter)], "RGBA".index(letter))
+            for letter in order]
     samples = []
     append = samples.append
     for index in range(0, len(rgba), 4):
-        value = channel_value(rgba[index], red)
-        value = (value << green) | channel_value(rgba[index + 1], green)
-        value = (value << blue) | channel_value(rgba[index + 2], blue)
-        value = (value << alpha) | channel_value(rgba[index + 3], alpha)
+        value = 0
+        for width, channel in plan:
+            value = (value << width) | channel_value(rgba[index + channel],
+                                                     width)
         append(value)
     return samples
 
@@ -281,6 +347,97 @@ def unpack_samples(data, bits, count=None, packing="packed"):
         out.append((accumulator >> held) & mask)
         accumulator &= (1 << held) - 1
     return out
+
+
+def quantize_rgba(rgba, widths):
+    """Reduce RGBA bytes to the channel widths, keeping the top bits.
+
+    A zero colour width clears that channel and a zero alpha width makes the
+    pixels opaque. Channels narrower than 8 bits are truncated with their low
+    bits zeroed, which is the value the packers read.
+    """
+    widths = [int(value) for value in widths]
+    if len(widths) != 4:
+        raise HexError("give red, green, blue and alpha widths")
+    out = bytearray(rgba)
+    for index in range(0, len(out) - 3, 4):
+        for channel in range(3):
+            bits = widths[channel]
+            if bits <= 0:
+                out[index + channel] = 0
+            elif bits < 8:
+                out[index + channel] = (
+                    (out[index + channel] >> (8 - bits)) << (8 - bits))
+        bits = widths[3]
+        if bits <= 0:
+            out[index + 3] = 255
+        elif bits < 8:
+            out[index + 3] = ((out[index + 3] >> (8 - bits))
+                              << (8 - bits))
+    return bytes(out)
+
+
+def _limit_table(bits):
+    """A byte translation table that keeps the top `bits` of each value."""
+    if bits <= 0:
+        return bytes(256)
+    if bits >= 8:
+        return bytes(range(256))
+    shift = 8 - bits
+    return bytes((value >> shift) << shift for value in range(256))
+
+
+def limit_color(color, widths):
+    """One RGBA colour reduced to the working channel widths.
+
+    Unlike `quantize_rgba`, a zero alpha width leaves alpha alone. The working
+    layout is a drawing limit, not an export matte, so transparent pixels and
+    the eraser must keep working when the layout has no alpha channel.
+    """
+    widths = [int(value) for value in widths]
+    if len(widths) != 4:
+        raise HexError("give red, green, blue and alpha widths")
+    out = []
+    for channel in range(3):
+        bits = widths[channel]
+        value = int(color[channel])
+        if bits <= 0:
+            out.append(0)
+        elif bits < 8:
+            out.append((value >> (8 - bits)) << (8 - bits))
+        else:
+            out.append(value)
+    bits = widths[3]
+    value = int(color[3])
+    if bits <= 0:
+        out.append(value)
+    elif bits < 8:
+        out.append((value >> (8 - bits)) << (8 - bits))
+    else:
+        out.append(value)
+    return tuple(out)
+
+
+def limit_rgba(rgba, widths):
+    """Reduce an RGBA byte stream to the working widths, in place semantics.
+
+    RGB channels with no bits become zero. Alpha is only touched when the
+    layout gives it a width, so the eraser still clears pixels under a 4:4:4
+    layout. Byte translation keeps a whole-canvas limit fast.
+    """
+    widths = [int(value) for value in widths]
+    if len(widths) != 4:
+        raise HexError("give red, green, blue and alpha widths")
+    out = bytearray(rgba)
+    for channel in range(3):
+        bits = widths[channel]
+        if bits >= 8:
+            continue
+        out[channel::4] = out[channel::4].translate(_limit_table(bits))
+    bits = widths[3]
+    if 0 < bits < 8:
+        out[3::4] = out[3::4].translate(_limit_table(bits))
+    return bytes(out)
 
 
 def quantize_rgb(rgb, width, height, depth):

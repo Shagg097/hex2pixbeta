@@ -8,10 +8,14 @@ from hex2pix.model import (
     Bitmap, Document, HexError, Selection, apply_hue, apply_map, apply_op,
     apply_ramp, blit, block_from_bitmap, clean_path, clear_region, combine,
     flip_horizontal,
-    flip_vertical, flood_fill, format_dump, hex_str, hue_shift, invert_colors,
+    flip_vertical, flood_fill, format_dump, hex_code, hex_str, hue_shift,
+    invert_colors,
     paint_brush, paint_line, parse_block, parse_hex, parse_hex_map, pick_related,
     RotationDrag, extract_selection, piece_mask, place_block, rotate90,
     rotate_piece, rotate_ramp, scale_box,
+    box_from_quad, quad_centre, quad_from_box, quad_handles,
+    quad_move_corner, quad_rotate, quad_scale, quad_shear, quad_translate,
+    warp_piece,
     selected_bytes, selection_ellipse_mask, selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block, unique_colors,
     fill_holes,
@@ -39,6 +43,9 @@ class HexColorTests(unittest.TestCase):
         self.assertEqual(hex_str(255, 0, 0), "FF0000")
         self.assertEqual(hex_str(255, 0, 0, 0), "FF000000")
         self.assertEqual(hex_str(1, 2, 3, 254), "010203FE")
+        self.assertEqual(hex_code((1, 2, 3, 255), "BGR"), "030201")
+        self.assertEqual(hex_code((1, 2, 3, 4), "BGR"), "03020104")
+        self.assertEqual(hex_code((1, 2, 3, 255), "RGX"), "010203")
 
     def test_combine_reference_values(self):
         self.assertEqual(combine(250, 20, "add", 255, True), 14)
@@ -1031,6 +1038,112 @@ class RotationDragTests(unittest.TestCase):
             self.assertGreaterEqual(angle, 0)
             self.assertLess(angle, 360)
             self.assertEqual(angle % 5, 0)
+
+
+class QuadGeometryTests(unittest.TestCase):
+    def test_box_round_trip(self):
+        self.assertEqual(quad_from_box((2, 3, 4, 2)),
+                         [(2.0, 3.0), (6.0, 3.0), (6.0, 5.0), (2.0, 5.0)])
+        self.assertEqual(box_from_quad(quad_from_box((2, 3, 4, 2))),
+                         (2, 3, 4, 2))
+
+    def test_translate_moves_every_corner(self):
+        quad = quad_from_box((0, 0, 2, 2))
+        moved = quad_translate(quad, 3, -1)
+        self.assertEqual(moved[0], (3.0, -1.0))
+        self.assertEqual(moved[2], (5.0, 1.0))
+
+    def test_scale_around_anchor_keeps_it_fixed(self):
+        quad = quad_from_box((2, 2, 4, 4))
+        scaled = quad_scale(quad, (2.0, 2.0), 2.0)
+        self.assertEqual(scaled[0], (2.0, 2.0))
+        self.assertEqual(scaled[2], (10.0, 10.0))
+
+    def test_rotation_turns_clockwise(self):
+        quad = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)]
+        turned = quad_rotate(quad, (1.0, 0.0), 90)
+        self.assertAlmostEqual(turned[0][0], 1.0)
+        self.assertAlmostEqual(turned[0][1], 0.0)
+        self.assertAlmostEqual(turned[1][0], 1.0)
+        self.assertAlmostEqual(turned[1][1], 1.0)
+
+    def test_shear_moves_only_the_chosen_edge(self):
+        quad = quad_from_box((0, 0, 10, 10))
+        top = quad_shear(quad, 0, 3)
+        self.assertEqual(top[0], (3.0, 0.0))
+        self.assertEqual(top[1], (13.0, 0.0))
+        self.assertEqual(top[2], (10.0, 10.0))
+        right = quad_shear(quad, 1, 4)
+        self.assertEqual(right[1], (10.0, 4.0))
+        self.assertEqual(right[2], (10.0, 14.0))
+        self.assertEqual(right[0], (0.0, 0.0))
+
+    def test_move_one_corner_leaves_the_rest(self):
+        quad = quad_from_box((0, 0, 4, 4))
+        moved = quad_move_corner(quad, 2, -1, 2)
+        self.assertEqual(moved[2], (3.0, 6.0))
+        self.assertEqual(moved[0], quad[0])
+
+    def test_handles_cover_corners_edges_and_rotation(self):
+        handles = quad_handles(quad_from_box((0, 0, 10, 10)), 24.0)
+        self.assertEqual(len(handles), 9)
+        self.assertEqual(handles[0], ("corner", 0, (0.0, 0.0)))
+        self.assertEqual(handles[4], ("edge", 0, (5.0, 0.0)))
+        self.assertEqual(handles[8], ("rotate", -1, (5.0, -24.0)))
+
+
+class WarpPieceTests(unittest.TestCase):
+    def piece(self):
+        bitmap = Bitmap(2, 2)
+        bitmap.set_rgba(0, 0, RED)
+        bitmap.set_rgba(1, 0, GREEN)
+        bitmap.set_rgba(0, 1, BLUE)
+        bitmap.set_rgba(1, 1, (255, 255, 255, 255))
+        return bitmap
+
+    def test_identity_box_keeps_every_pixel(self):
+        piece = self.piece()
+        left, top, warped = warp_piece(piece, quad_from_box((1, 1, 2, 2)),
+                                       8, 8)
+        self.assertEqual((left, top), (1, 1))
+        self.assertEqual((warped.width, warped.height), (2, 2))
+        for y in range(2):
+            for x in range(2):
+                self.assertEqual(warped.rgba(x, y), piece.rgba(x, y))
+
+    def test_double_scale_repeats_pixels(self):
+        piece = self.piece()
+        _, _, warped = warp_piece(piece, quad_from_box((0, 0, 4, 4)), 8, 8)
+        self.assertEqual(warped.rgba(0, 0), RED)
+        self.assertEqual(warped.rgba(1, 1), RED)
+        self.assertEqual(warped.rgba(2, 0), GREEN)
+        self.assertEqual(warped.rgba(3, 1), GREEN)
+        self.assertEqual(warped.rgba(0, 2), BLUE)
+        self.assertEqual(warped.rgba(3, 3), (255, 255, 255, 255))
+
+    def test_clipped_quad_returns_the_visible_box(self):
+        _, _, warped = warp_piece(self.piece(),
+                                  quad_from_box((-2, -2, 4, 4)), 8, 8)
+        self.assertEqual((warped.width, warped.height), (2, 2))
+        self.assertEqual(warped.rgba(0, 0), (255, 255, 255, 255))
+
+    def test_transparent_source_pixels_stay_transparent(self):
+        piece = Bitmap(1, 1)
+        _, _, warped = warp_piece(piece, quad_from_box((0, 0, 2, 2)), 4, 4)
+        self.assertEqual(warped.rgba(0, 0), (0, 0, 0, 0))
+
+    def test_perspective_quad_tilts_the_piece(self):
+        piece = Bitmap(2, 1)
+        piece.set_rgba(0, 0, RED)
+        piece.set_rgba(1, 0, GREEN)
+        quad = [(0.0, 0.0), (4.0, 0.0), (2.0, 4.0), (1.0, 4.0)]
+        left, top, warped = warp_piece(piece, quad, 8, 8)
+        self.assertEqual((left, top), (0, 0))
+        self.assertGreater(warped.height, 1)
+        colours = set(warped.rgba(x, y) for y in range(warped.height)
+                      for x in range(warped.width))
+        self.assertIn(RED, colours)
+        self.assertIn(GREEN, colours)
 
 
 if __name__ == "__main__":

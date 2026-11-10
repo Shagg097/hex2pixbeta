@@ -277,6 +277,18 @@ class RawBitDepthTests(unittest.TestCase):
     def test_packed_tail_is_zero_padded(self):
         self.assertEqual(bitdepth.pack_samples([1], 3, "packed"), b"\x20")
 
+    def test_named_bit_layouts_spell_out_the_bytes(self):
+        padded = bitdepth.layout_label((4, 4, 4, 0), "aligned")
+        packed = bitdepth.layout_label((4, 4, 4, 0), "packed")
+        self.assertIn("xxxxrrrr ggggbbbb", padded)
+        self.assertIn("rrrrgggg bbbbrrrr ggggbbbb", packed)
+        self.assertEqual(bitdepth.layout_for(padded),
+                         ((4, 4, 4, 0), "aligned"))
+        self.assertEqual(bitdepth.layout_for(packed),
+                         ((4, 4, 4, 0), "packed"))
+        self.assertEqual(bitdepth.layout_label((5, 5, 5, 5), "aligned"),
+                         "Custom")
+
     def test_12_bpp_packed_layout(self):
         bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
                              (0xAB, 0xCD, 0xEF, 255))
@@ -308,6 +320,64 @@ class RawBitDepthTests(unittest.TestCase):
         data = self.save_bytes(bitmap, raw_channels=(2, 2, 2, 0),
                                raw_packing="aligned")
         self.assertEqual(data, b"\x03\x15\x2a\x3f")
+
+    def test_bgr_order_reverses_the_packed_sample(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
+                             (0xAB, 0xCD, 0xEF, 255))
+        data = self.save_bytes(bitmap, raw_channels=(4, 4, 4, 0),
+                               raw_packing="packed", raw_order="BGR")
+        self.assertEqual(data, b"\x53\x1e\xca")
+
+    def test_bgr_order_aligned_puts_blue_up_front(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255),
+                             (0xAB, 0xCD, 0xEF, 255))
+        data = self.save_bytes(bitmap, raw_channels=(4, 4, 4, 0),
+                               raw_packing="aligned", raw_order="BGR")
+        self.assertEqual(data, b"\x05\x31\x0e\xca")
+
+    def test_6_bpp_bgr_order_layout(self):
+        bitmap = self.bitmap((0, 0, 0xC0, 255), (0x40, 0x40, 0x40, 255),
+                             (0x80, 0x80, 0x80, 255),
+                             (0xFF, 0xFF, 0xFF, 255))
+        data = self.save_bytes(bitmap, raw_channels=(2, 2, 2, 0),
+                               raw_packing="packed", raw_order="BGR")
+        self.assertEqual(data, b"\xc1\x5a\xbf")
+
+    def test_alpha_follows_the_chosen_order(self):
+        rgba = bytes((0xC0, 0x80, 0x40, 0xFF))
+        self.assertEqual(
+            bitdepth.sample_rgba(rgba, (2, 2, 2, 2), "BGR"),
+            [0b01101111])
+
+    def test_channel_order_is_validated(self):
+        self.assertEqual(bitdepth.check_order("bgr"), "BGR")
+        self.assertEqual(bitdepth.check_order("rgba"), "RGBA")
+        self.assertEqual(bitdepth.order_label("RB"), "RGB")
+        for name in ("RB", "RRG", "RGBAX"):
+            with self.assertRaises(bitdepth.HexError):
+                bitdepth.check_order(name)
+
+    def test_quantize_rgba_keeps_the_top_bits(self):
+        rgba = bytes((0x12, 0x34, 0x56, 0xFF))
+        self.assertEqual(bitdepth.quantize_rgba(rgba, (4, 4, 4, 0)),
+                         b"\x10\x30\x50\xff")
+        self.assertEqual(bitdepth.quantize_rgba(rgba, (2, 2, 2, 0)),
+                         b"\x00\x00\x40\xff")
+
+    def test_limit_rgba_preserves_alpha_without_alpha_bits(self):
+        rgba = bytes((0x12, 0x34, 0x56, 0x78))
+        self.assertEqual(bitdepth.limit_rgba(rgba, (4, 4, 4, 0)),
+                         b"\x10\x30\x50\x78")
+        self.assertEqual(bitdepth.limit_rgba(rgba, (4, 4, 4, 4)),
+                         b"\x10\x30\x50\x70")
+        self.assertEqual(bitdepth.limit_rgba(rgba, (0, 4, 4, 0)),
+                         b"\x00\x30\x50\x78")
+
+    def test_limit_color_matches_the_byte_limit(self):
+        color = (0x12, 0x34, 0x56, 0x78)
+        self.assertEqual(bitdepth.limit_color(color, (4, 4, 4, 0)),
+                         (0x10, 0x30, 0x50, 0x78))
+        self.assertEqual(bitdepth.limit_color(color, (8, 8, 8, 8)), color)
 
     def test_32_bpp_rgba_keeps_every_byte(self):
         data = self.save_bytes(self.bitmap((0x12, 0x34, 0x56, 0x78)),
@@ -358,6 +428,39 @@ class RawBitDepthTests(unittest.TestCase):
         offset = struct.unpack_from("<I", data, 10)[0]
         self.assertEqual(offset, 66)
         self.assertEqual(data[offset:], b"\xaa\x11\x7d\xae")
+
+    def test_bmp_16_bit_masks_follow_the_order(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255))
+        target = self.path("bgr.bmp")
+        formats.save(bitmap, target, "raw", raw_mode="rgb",
+                     raw_channels=(5, 6, 5, 0), raw_packing="packed",
+                     raw_header="bmp", raw_order="BGR")
+        with open(target, "rb") as handle:
+            data = handle.read()
+        self.assertEqual(struct.unpack_from("<III", data, 54),
+                         (0x001F, 0x07E0, 0xF800))
+        offset = struct.unpack_from("<I", data, 10)[0]
+        self.assertEqual(data[offset:offset + 2], b"\xa2\x51")
+
+    def test_bmp_24_bit_and_tga_ignore_the_order(self):
+        bitmap = self.bitmap((0x12, 0x34, 0x56, 255))
+        for header, suffix in (("bmp", ".bmp"), ("tga", ".tga")):
+            payloads = []
+            for order in ("RGB", "BGR"):
+                target = self.path("%s-%s%s" % (header, order, suffix))
+                formats.save(bitmap, target, "raw", raw_mode="rgb",
+                             raw_channels=(8, 8, 8, 0),
+                             raw_packing="packed", raw_header=header,
+                             raw_order=order)
+                with open(target, "rb") as handle:
+                    data = handle.read()
+                if header == "bmp":
+                    offset = struct.unpack_from("<I", data, 10)[0]
+                    payloads.append(data[offset:])
+                else:
+                    payloads.append(data[18:])
+            self.assertEqual(payloads[0], payloads[1], header)
+            self.assertEqual(payloads[0][:3], b"\x56\x34\x12", header)
 
     def test_bmp_v4_and_v5_headers_are_selectable(self):
         bitmap = self.bitmap((0x12, 0x34, 0x56, 255))

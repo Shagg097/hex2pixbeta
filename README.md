@@ -16,6 +16,11 @@ keyboard is the primary instrument.
 > portable build runs from Windows XP SP3 / Server 2003 through Windows 11.
 > `main` remains the 3.10 release line. See
 > [Retro Windows compatibility](#retro-windows-compatibility).
+>
+> **XP download:** run the `hex2pix.exe` inside the extracted
+> `hex2pix-retro` folder. The repository-root `hex2pix.exe` is the 64-bit
+> Python 3.10/PyInstaller build and fails on XP with
+> `K32EnumProcessModules`.
 
 
 ![hex2pix editor showing a pixel-art night scene, tool palette, color wheel and layer stack](docs/hex2pix-pixel-view.png)
@@ -38,9 +43,9 @@ keyboard is the primary instrument.
 - **Projects, layers and formats** — layered `.h2p` projects plus an Export
   docker that saves the project and writes images with scale, trim, matte,
   resolution and per-format options.
-- **Packaged Windows build** — `hex2pix.exe` needs no Python installation,
-  and a portable folder ZIP covers machines whose antivirus blocks the
-  single file's temporary unpacking.
+- **XP-compatible packaged build** — the `hex2pix-retro` folder ZIP needs no
+  Python installation and runs from Windows XP SP3 / Server 2003 onward. The
+  repository-root `hex2pix.exe` is the separate 3.10 main-line build.
 - **Optional desktop extras** — automatic update checks in the packaged
   Windows build.
 
@@ -108,7 +113,7 @@ Verified with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 472 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 542 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/cxfreeze_setup.py` to `dist\hex2pix-retro\` | built, `--selftest` gives `RESULT: PASS`, `manual=True` |
 | Launcher PE header | 32-bit (`0x14C`), subsystem 5.1 |
@@ -273,14 +278,18 @@ Right-click inside a selection for Delete, Split to new layer, Copy to new
 layer, Copy to clipboard and Copy to pattern. Tolerance lives in the left
 panel; `0` means an exact byte match.
 
-**Move / Scale** turns a selection into a floating piece. Drag inside it to
-move, `Shift`+drag to scale from the opposite corner, or `Ctrl`+drag to rotate
-in 15° steps. Scaling keeps the piece's proportions and holds the opposite
-corner still, so a drag can neither squash the artwork nor flip it, and
-rotation only starts once the pointer leaves the middle, so grabbing the
-centre cannot spin the piece wildly. Press `Enter` to drop it at the cursor
-and `Escape` to put it back. The selection follows the pixels, and the whole
-operation is one undo step.
+**Move / Scale** turns a selection into a floating piece and draws a node box
+around it. Drag inside the box to move it; the four corner nodes scale from
+the opposite corner, the four edge nodes shear that edge, and the handle above
+the box rotates in 15° steps. Right-click inside the selection and tick
+**Perspective nodes** to drag each corner separately and warp the piece into a
+perspective quad. `Shift`+drag still scales and `Ctrl`+drag still rotates from
+anywhere. Scaling keeps the piece's proportions and holds the opposite corner
+still, so a drag can neither squash the artwork nor flip it, and rotation only
+starts once the pointer leaves the middle, so grabbing the centre cannot spin
+the piece wildly. Press `Enter` to drop it at the cursor and `Escape` to put
+it back. The selection follows the pixels, and the whole operation is one undo
+step.
 
 Polygon and lasso paths are filled solid, including enclosed pockets, so a
 self-crossing outline cannot leave holes in the mask.
@@ -309,15 +318,18 @@ used from that folder, and hovering it lists what is inside.
 | Contour | Draw an inside or outside ring around a selection or opaque artwork |
 | Blur | Soften with an adjustable neighborhood from 1×1 to 17×17; Amount sets its radius, strength controls the mix, smear drags colour along the stroke, and the tip picks the footprint |
 | Shuffle | Mix, scatter or add channel noise under the brush; blur softens the mixed result, and the tip picks the footprint |
-| Text | Stamp the built-in 5×7 font or any installed OS font; load TTF/OTF/TTC/FON/Type 1/BDF/PCF files, with size and bold/italic |
+| Text | Stamp the built-in 5×7 font or any installed OS font; load TTF/OTF/TTC/FON/Type 1/BDF/PCF files, with size, bold, italic and underline; symbol fonts such as Wingdings and Webdings draw their picture glyphs |
 | Line pattern | Fill selected lines with consecutive pattern rows; `Shift` staggers them |
 | Structure fill | Build mirrored super-tiles from the pattern and repeat them over a selection |
 
 The **Text** tool reads the font folders installed on the machine (including
 per-user Windows fonts and the font registry) the first time it is opened. The
 font menu lists every family that Pillow/FreeType can load; **Load...** adds a
-specific TTF, OTF, TTC, FON, Type 1, BDF or PCF file. System fonts use Size and
-Bold/Italic, while the built-in 5×7 font keeps Scale and Spacing. Text is
+specific TTF, OTF, TTC, FON, Type 1, BDF or PCF file. System fonts use Size,
+Bold, Italic and Underline, while the built-in 5×7 font keeps Scale and
+Spacing. Symbol fonts such as Wingdings and Webdings are drawn through Windows
+GDI, because FreeType would otherwise show their ASCII codes as empty boxes;
+the same fallback rescues legacy bitmap fonts. Text is
 rasterized to hard-edged document pixels, so it remains editable by the hex and
 byte tools.
 
@@ -353,7 +365,7 @@ not require the mouse.
 
 ### Dithering and filters
 
-The **Dither** tab reduces a selection or the active layer to the foreground and
+The **Filters** tab reduces a selection or the active layer to the foreground and
 background colors:
 
 | Mode | Result |
@@ -370,8 +382,11 @@ use the same settings. Dithering is defined over one axis, so it applies to
 two-colour linear gradients; radial and palette ramps stay smooth.
 
 The filters are **Grayscale**, **Posterize**, **Threshold**, **Brightness**,
-**Contrast**, **Saturation**, **Hue shift**, **Noise**, **Sepia** and **Find
-edges**. Each is one undo step.
+**Contrast**, **Saturation**, **Hue shift**, **Noise**, **Sepia**, **Find
+edges**, **Invert**, **Solarize**, **Gamma**, **Auto levels**, **Blur**,
+**Sharpen** and **Pixelate**. **Strength** mixes every filter back into the
+pixels it started from, so lower values apply a partial effect and 0% changes
+nothing. Each is one undo step, and the tab scrolls when the window is short.
 
 ## Palettes and color
 
@@ -403,6 +418,10 @@ In hex view every visible cell is drawn as its own code:
 - Fully transparent pixels read `......`.
 - Selected cells get a tint.
 - Very dark codes are lightened just enough to stay legible.
+
+**Hex order** above the canvas (also under **View > Hex code order**) puts the
+channels in RGB, RBG, GRB, GBR, BRG or BGR order. It changes both the codes on
+screen and the hex you type in hex view; alpha still follows the colour bytes.
 
 Only visible cells are drawn, so large canvases stay responsive. Tools,
 selections and the cursor behave the same in both views.
@@ -483,9 +502,14 @@ into one layer. A group's name, visibility and opacity are saved in the `.h2p` p
 - **RGB** or **Grayscale** at 8-bit integer precision.
 - An optional alpha channel.
 - A transparent, white, black, foreground or background fill.
+- **Working bits** — layout, bits per pixel, R/G/B/A widths, packing and
+  channel order. This is a hard drawing limit: every pixel placed on the
+  canvas is reduced to those channel widths. It starts at 8:8:8:8.
 
-**Image > Canvas properties…** edits the same settings on an open image. When
-the pixel size changes, choose:
+**Image > Canvas properties…** edits the same settings, including Working
+bits, on an open image. Changing the working widths reduces existing pixels in
+every layer too, so the canvas obeys the new limit immediately. When the pixel
+size changes, choose:
 
 - **Pad/crop** — preserve every pixel and add or remove canvas around it using
   a nine-way anchor.
@@ -516,9 +540,12 @@ matte, and tune JPEG quality, GIF palette size and PNG compression. The docker
 shows the active project file and the resulting pixel size before you write.
 **Variable bits per pixel** switches the panel to custom-depth output: choose
 Raw (none), BMP, BMP V4, BMP V5 or TGA; Indexed or RGB(A); a **Bits/pixel**
-value, refined with a channel preset or the per-channel widths; and packed or
-byte-aligned packing. BMP and TGA headers wrap the stream, and indexed modes
-carry a colour table.
+value, refined with a channel preset or the per-channel widths; packed or
+byte-aligned packing; and an **Order** for the channels (RGB, BGR and the
+other permutations). BMP and TGA headers wrap the stream, and indexed modes
+carry a colour table. A separate **Working bits (hard limit)** block holds the
+editor's own depth, channels, layout, packing and order, with a live byte
+preview and **Apply depth to layer**.
 
 **File > Open…** recognizes `.h2p` automatically. Once a document is a `.h2p`,
 `Ctrl+S` saves the project instead of flattening it to an image.
@@ -555,9 +582,15 @@ container the format defines, so every wrapped file reopens in an ordinary
 viewer: totals up to 16 bits become 16-bit 5:5:5 or 5:6:5 pixels, larger
 totals become 24 or 32 bits, and indexed depths move to the next colour-table
 depth. **Raw (none)** keeps the exact custom stream. Choose **Indexed** (1–8 bits per pixel on an adaptive palette) or
-**RGB(A)** (0–16 bits per channel, adding up to 32). Channels are written most
-significant bit first in R, G, B, A order and keep the top bits of each 8-bit
-value.
+**RGB(A)** (0–16 bits per channel, adding up to 32). **Order** picks the
+channel sequence inside each sample — RGB, RBG, GRB, GBR, BRG or BGR — with
+alpha appended when it has a width, and each channel keeps the top bits of its
+8-bit value. The default RGB order reproduces the layouts below; **BGR** turns
+12-bit 4:4:4 into `0000bbbb ggggrrrr` and reverses the packed stream to match.
+A 16-bit BMP keeps the chosen order through its BI_BITFIELDS colour masks;
+24/32-bit BMP and TGA fix their bytes to BGR(A), and indexed output is palette
+indices, so **Order** is ignored there. The line under **Order** in the panel
+says which case applies.
 
 **Packed** runs the pixels together bit by bit. 12-bit 4:4:4 therefore puts two
 pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`), and 6-bit 2:2:2 puts
@@ -567,12 +600,29 @@ a byte boundary and zero-fills the high bits instead: 12 bits becomes
 last byte of a packed stream is zero-padded, rows run top to bottom and pixels
 left to right, and the export hint shows the exact byte count.
 
+The **Layout** list names the common byte patterns directly: **4:4:4 padded
+12 bpp** (`xxxxrrrr ggggbbbb` in two bytes), **4:4:4 packed 12 bpp** (two
+pixels in `rrrrgggg bbbbrrrr ggggbbbb`), **4:4:4:4 16 bpp**, **3:3:2 8 bpp**
+and **5:6:5 16 bpp**. Choosing a layout sets the R/G/B/A widths and the
+packing together; changing either afterwards turns the list back to Custom.
+
 **Bits/pixel** takes any total from 1 to 32 and spreads it over the channels,
 giving a spare bit to green first, so 8 bpp comes out as 3:3:2 and 16 bpp as
 5:6:5. The common totals also have presets: 1:1:1 (3 bpp), 2:2:2 (6), 3:3:2 (8),
 4:4:4 (12), 5:5:5 (15), 5:6:5 (16), 6:6:6 (18), 8:8:8 (24), 10:10:10 (30) and
 8:8:8:8 (32); any other split can be typed into the R/G/B/A fields. Indexed output uses the same kind
 of adaptive palette as GIF, so a 1 bpp export is a two-colour mask.
+
+**Working bits (hard limit)** sits below the export controls and is
+independent of them: its **Bits/pixel**, **R/G/B/A** channel widths,
+**Layout**, **Packing** and **Order** drive the live preview. The channel
+widths are a hard limit: every pixel placed on the canvas is truncated to
+them (top bits kept, the rest zeroed), and every committed edit re-applies the
+limit. A zero alpha width leaves alpha alone, so the eraser keeps working on a
+4:4:4 layout. **Apply depth to layer** snaps the active layer or selection to
+the same widths. Each canvas keeps its own limit, including packing and order,
+and switching tabs restores that canvas's Working bits controls. The layout is
+saved in its `.h2p` project; the export controls still decide what is written.
 
 ## Start page and recent documents
 
@@ -632,11 +682,11 @@ The editor starts in dark mode. **View > Dark mode** switches the entire window
 — menus, dockers, tool cards, fields, text panels, the color wheel and the start
 page — to the light palette and back.
 
-![hex2pix light theme with the Dither and filter panel open](docs/hex2pix-light-theme.png)
+![hex2pix light theme with the Filters panel open](docs/hex2pix-light-theme.png)
 
 The same View menu ends with one checkbutton per right-side docker
 (**Block**, **Layers**, **Bytes**, **Dump**, **Export**, **Pattern**,
-**Dither**), so any tab can be hidden and restored without losing its contents
+**Filters**), so any tab can be hidden and restored without losing its contents
 or tab order. The left tool rail scrolls independently when the window is short,
 and the tool-options bar scrolls horizontally when the active tool has more
 controls than fit.
@@ -684,7 +734,7 @@ The in-app **Manual** link opens the complete [hex2pix manual](hex2pix/README.md
 
 ## Build the executable
 
-From the repository root:
+From the repository root on the `main` line:
 
 ```bash
 packaging\build_exe.cmd
@@ -697,6 +747,9 @@ and the icon from the repository root:
 py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix.spec
 py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix_onedir.spec
 ```
+
+Do not run these PyInstaller commands on `retro-compat`: they produce the
+64-bit Python 3.10 executable that XP cannot load.
 
 On `retro-compat`, build the XP-compatible portable folder with cx_Freeze
 instead; `build_exe.cmd` uses whichever `py -3` resolves to, which is the 3.10
@@ -713,11 +766,11 @@ Python installation required on the target machine. The cx_Freeze result is
 ## Tests
 
 ```bash
-py -3 -m unittest discover -s hex2pix/tests -t .
-py -3 run_hex2pix.py --selftest
+python38-32\python.exe -m unittest discover -s hex2pix/tests -t .
+python38-32\python.exe run_hex2pix.py --selftest
 ```
 
-The first command runs **472 unit tests** covering the model, canvas geometry,
+The first command runs **542 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -728,7 +781,7 @@ shape/mouse helpers. It writes `hex2pix-selftest.txt`.
 The frozen build supports the same check:
 
 ```bash
-dist\hex2pix.exe --selftest
+dist\hex2pix-retro\hex2pix.exe --selftest
 ```
 
 ## Repository layout
@@ -753,7 +806,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              472 unit tests
+│  └─ tests/              542 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 

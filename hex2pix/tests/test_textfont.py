@@ -85,6 +85,29 @@ class FontCatalogTest(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertTrue(rendered.points)
 
+    def test_symbol_fonts_use_their_own_glyphs(self):
+        if textfont.face_for("Wingdings") is None:
+            self.skipTest("Wingdings is not installed")
+        first = textfont.render_text("A", "Wingdings", 20)
+        second = textfont.render_text("B", "Wingdings", 20)
+        self.assertTrue(first.points)
+        self.assertTrue(second.points)
+        self.assertNotEqual((first.width, first.height, first.points),
+                            (second.width, second.height, second.points))
+
+    def test_notdef_rectangle_detection(self):
+        from PIL import Image, ImageDraw
+        solid = Image.new("L", (10, 12), 0)
+        ImageDraw.Draw(solid).rectangle([1, 1, 8, 10], fill=255)
+        self.assertTrue(textfont._mask_is_notdef(solid))
+        hollow = Image.new("L", (10, 12), 0)
+        ImageDraw.Draw(hollow).rectangle([1, 1, 8, 10], outline=255)
+        self.assertTrue(textfont._mask_is_notdef(hollow))
+        letter = Image.new("L", (10, 12), 0)
+        ImageDraw.Draw(letter).line([(2, 10), (5, 1), (8, 10)], fill=255,
+                                    width=2)
+        self.assertFalse(textfont._mask_is_notdef(letter))
+
     def test_empty_text_has_no_ink(self):
         face = next((item for item in self.faces if item.kind == "truetype"),
                     None)

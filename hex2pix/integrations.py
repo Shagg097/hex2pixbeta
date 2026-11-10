@@ -38,6 +38,9 @@ DEFAULT_SETTINGS = {
     "text_size": "16",
     "text_bold": False,
     "text_italic": False,
+    "text_underline": False,
+    "text_bold": False,
+    "text_italic": False,
 }
 
 

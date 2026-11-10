@@ -81,6 +81,24 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(header["groups"][0]["name"], "Ink")
         self.assertEqual(header["layers"][1]["group"], "Ink")
 
+    def test_working_layout_is_saved(self):
+        document = self.document()
+        document.set_working_layout({"raw_channels": (8, 8, 8, 8),
+                                     "raw_packing": "aligned",
+                                     "raw_order": "BGR"}, quantize=False)
+        formats.save_project(self.path, document)
+        with zipfile.ZipFile(self.path) as archive:
+            header = json.loads(archive.read("project.json").decode("utf-8"))
+        self.assertEqual(header["working"],
+                         {"raw_channels": [8, 8, 8, 8],
+                          "raw_packing": "aligned",
+                          "raw_order": "BGR"})
+        loaded = formats.load_project(self.path).document
+        self.assertEqual(loaded.working_layout(),
+                         {"raw_channels": (8, 8, 8, 8),
+                          "raw_packing": "aligned",
+                          "raw_order": "BGR"})
+
     def test_selection_is_saved(self):
         formats.save_project(self.path, self.document())
         loaded = formats.load_project(self.path).document

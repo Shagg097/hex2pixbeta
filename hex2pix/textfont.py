@@ -370,6 +370,181 @@ def open_face(face, size):
         return _open_truetype(face.path, actual, face.index), actual
 
 
+@lru_cache(maxsize=128)
+def _font_charset(family, bold=False, italic=False):
+    """The Windows charset a family reports, or None when it cannot tell."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    class TextMetric(ctypes.Structure):
+        _fields_ = [
+            ("tmHeight", wintypes.LONG), ("tmAscent", wintypes.LONG),
+            ("tmDescent", wintypes.LONG),
+            ("tmInternalLeading", wintypes.LONG),
+            ("tmExternalLeading", wintypes.LONG),
+            ("tmAveCharWidth", wintypes.LONG),
+            ("tmMaxCharWidth", wintypes.LONG), ("tmWeight", wintypes.LONG),
+            ("tmOverhang", wintypes.LONG),
+            ("tmDigitizedAspectX", wintypes.LONG),
+            ("tmDigitizedAspectY", wintypes.LONG),
+            ("tmFirstChar", wintypes.WCHAR), ("tmLastChar", wintypes.WCHAR),
+            ("tmDefaultChar", wintypes.WCHAR),
+            ("tmBreakChar", wintypes.WCHAR),
+            ("tmItalic", wintypes.BYTE), ("tmUnderlined", wintypes.BYTE),
+            ("tmStruckOut", wintypes.BYTE),
+            ("tmPitchAndFamily", wintypes.BYTE),
+            ("tmCharSet", wintypes.BYTE),
+        ]
+
+    gdi32 = ctypes.windll.gdi32
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateFontW.restype = wintypes.HANDLE
+    gdi32.CreateFontW.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, ctypes.c_wchar_p]
+    gdi32.GetTextMetricsW.argtypes = [wintypes.HDC,
+                                      ctypes.POINTER(TextMetric)]
+    gdi32.SelectObject.restype = wintypes.HANDLE
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+    gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+
+    dc = font = old = None
+    try:
+        dc = gdi32.CreateCompatibleDC(None)
+        if not dc:
+            return None
+        font = gdi32.CreateFontW(
+            -12, 0, 0, 0, 700 if bold else 400, 1 if italic else 0,
+            0, 0, 0, 0, 0, 0, 0, str(family))
+        if not font:
+            return None
+        old = gdi32.SelectObject(dc, font)
+        metric = TextMetric()
+        if not gdi32.GetTextMetricsW(dc, ctypes.byref(metric)):
+            return None
+        return int(metric.tmCharSet)
+    except (AttributeError, OSError, ValueError):
+        return None
+    finally:
+        if dc and old:
+            gdi32.SelectObject(dc, old)
+        if font:
+            gdi32.DeleteObject(font)
+        if dc:
+            gdi32.DeleteDC(dc)
+
+
+def _glyph_image(font, char):
+    """One character rendered like render_text does, cropped to its box."""
+    try:
+        box = font.getbbox(char)
+    except (AttributeError, OSError, ValueError):
+        return None
+    if not box:
+        return None
+    left, top, right, bottom = [int(round(value)) for value in box]
+    width, height = right - left, bottom - top
+    if width <= 0 or height <= 0:
+        return None
+    image = Image.new("L", (width, height), 0)
+    try:
+        ImageDraw.Draw(image).text((-left, -top), char, font=font, fill=255)
+    except (OSError, ValueError):
+        return None
+    if image.getbbox() is None:
+        return None
+    return image
+
+
+def _mask_is_notdef(mask):
+    """True when a glyph is a plain filled or outlined rectangle.
+
+    FreeType draws .notdef for symbol-font ASCII as a solid bar in some fonts
+    and a hollow box in others; either shape means the character was not
+    really mapped.
+    """
+    box = mask.getbbox()
+    if box is None:
+        return False
+    mask = mask.crop(box)
+    width, height = [int(value) for value in mask.size]
+    if width < 3 or height < 3:
+        return False
+    data = mask.tobytes()
+    if len(data) != width * height:
+        return False
+    inset = 2 if min(width, height) >= 5 else 1
+    solid = True
+    outer = True
+    inner = False
+    for y in range(height):
+        row = data[y * width:(y + 1) * width]
+        for x in range(width):
+            ink = bool(row[x])
+            if not ink:
+                solid = False
+            if x in (0, width - 1) or y in (0, height - 1):
+                if not ink:
+                    outer = False
+            elif (x >= inset and x < width - inset
+                  and y >= inset and y < height - inset):
+                if ink:
+                    inner = True
+    return solid or (outer and not inner)
+
+
+_UNDEFINED_GLYPH = "\U0010FFFD"
+
+
+def _glyph_crop(font, char):
+    """One rendered character cropped to its ink, or None when it is blank."""
+    image = _glyph_image(font, char)
+    if image is None:
+        return None
+    box = image.getbbox()
+    if box is None:
+        return None
+    return image.crop(box)
+
+
+def _glyphs_are_notdef(font, text):
+    """True when distinct characters all draw the same hollow notdef box.
+
+    Symbol fonts such as Wingdings and Webdings map ASCII to a private-use
+    range that FreeType does not follow, so it draws .notdef for each letter.
+    """
+    chars = []
+    for char in str(text or ""):
+        if char not in chars:
+            chars.append(char)
+        if len(chars) == 3:
+            break
+    images = [_glyph_crop(font, char) for char in chars]
+    images = [image for image in images if image is not None]
+    if not images:
+        return False
+    reference = _glyph_crop(font, _UNDEFINED_GLYPH)
+    if reference is not None:
+        signature = (reference.size, reference.tobytes())
+        if all((image.size, image.tobytes()) == signature
+               for image in images):
+            return True
+    if len(images) == 1:
+        return _mask_is_notdef(images[0])
+    if all(_mask_is_notdef(image) for image in images):
+        return True
+    first = (images[0].size, images[0].tobytes())
+    return all((image.size, image.tobytes()) == first for image in images[1:])
+
+
 def _gdi_render(text, family, size, bold=False, italic=False):
     """Render a Windows font family through GDI, including legacy FON aliases."""
     if sys.platform != "win32" or not text:
@@ -534,6 +709,16 @@ def render_text(text, family, size, bold=False, italic=False, file_path=""):
     data = image.tobytes()
     points = tuple((index % width, index // width)
                    for index, value in enumerate(data) if value)
+    # FreeType cannot follow a symbol font's ASCII mapping and draws the
+    # .notdef box instead; GDI can, and also rescues legacy faces whose only
+    # glyphs FreeType cannot draw. Prefer its result when the signs are there.
+    if sys.platform == "win32" and not file_path:
+        charset = _font_charset(face.family, bold, italic)
+        if (charset == 2 or not points
+                or _glyphs_are_notdef(font, text)):
+            fallback = _gdi_render(text, face.family, size, bold, italic)
+            if fallback is not None and fallback.points:
+                return fallback
     if not points:
         return RenderedText((), 0, 0)
     return RenderedText(points, width, height)

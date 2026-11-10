@@ -5,31 +5,33 @@ blocks, and select *bytes of pixel data* with art-program selection tools
 (rectangle, ellipse, polygon, lasso, wand, similar). Mouse input is there for
 drawing and selecting; the keyboard is the primary instrument.
 
-Ships as a single Windows executable, `hex2pix.exe`, built from the Python
-package in this folder. That executable is self-contained — CPython 3.10,
-Tcl/Tk and Pillow are bundled inside it — so **the released build runs on
-Windows without Python installed**. Python is only needed for the source
-checkout below.
+On the `retro-compat` branch, the release is a portable `hex2pix-retro`
+folder built with 32-bit CPython 3.8.20 and cx_Freeze. It runs on Windows XP
+SP3 / Server 2003 through Windows 11 and needs no Python installation. The
+repository-root `hex2pix.exe` is the separate 64-bit Python 3.10 PyInstaller
+build and fails on XP with `K32EnumProcessModules`.
 
 ## Run
+
+Run `hex2pix.exe` from inside the extracted folder:
 
 ```
 hex2pix.exe                  # home page: presets, recent files
 hex2pix.exe art.bmp          # open a file straight in the editor
 ```
 
-The release also includes `hex2pix-portable.zip`: the same program as a folder,
-with the runtime in `_internal\`, for machines whose antivirus blocks the
-single file's `%TEMP%` unpacking. Both need 64-bit Windows 10 or 11; neither
-needs an installer, administrator rights or Python.
+The runtime stays beside the executable, so nothing is unpacked into
+`%TEMP%`. Windows XP SP3 also needs the Visual C++ 2015-2019 Redistributable
+16.7 (x86) for the Universal CRT.
 
 From source, without building (this path does need Python):
 
 ```
-py -3 run_hex2pix.py
+python38-32\python.exe run_hex2pix.py
 ```
 
-Requires Python 3.10+ with tkinter (standard on Windows) and Pillow.
+Requires Python 3.8+ with tkinter (standard on Windows) and Pillow; this
+branch is verified on 32-bit CPython 3.8.20.
 
 ## Home
 
@@ -72,11 +74,16 @@ that release to be installable.
 switch, a **keep ratio** lock, resolution in **ppi**, a live physical-size
 readout, the color model (RGB or Grayscale at 8-bit integer precision) and an
 **alpha channel** toggle. New canvases can be filled with transparency, white,
-black, or the current foreground or background color.
+black, or the current foreground or background color. The same dialog sets the
+canvas's **Working bits** — layout, bits per pixel, R/G/B/A widths, packing and
+channel order — and adopts them as the editor's hard drawing limit after
+creation. Every pixel placed on the canvas is reduced to those channel widths;
+the default limit is 8:8:8:8.
 
 **Image > Canvas properties...** reopens the same dialog on the open image, so
-size, resolution, color model and alpha stay editable at any point. When the
-pixel size changes you choose how:
+size, resolution, color model, alpha and Working bits stay editable at any
+point. Changing the working widths also reduces existing pixels in every
+layer. When the pixel size changes you choose how:
 
 * **pad/crop** leaves every pixel untouched and adds or removes canvas around
   it, positioned by a nine-way anchor;
@@ -99,7 +106,9 @@ view, where every pixel is drawn as its own hex code in its own color. Opaque
 pixels read `RRGGBB`; partly transparent pixels read `RRGGBBAA`; fully
 transparent pixels show `......`. Selected pixels get a tinted cell so byte
 selections stay visible there too, and codes too dark to read are lightened
-just enough to be legible.
+just enough to be legible. **Hex order** above the canvas (also under **View >
+Hex code order**) switches the displayed and typed channel order between RGB,
+RBG, GRB, GBR, BRG and BGR; alpha stays after the colour bytes.
 
 Only the visible cells are drawn, so the hex grid stays responsive on large
 canvases instead of being flattened into one enormous picture.
@@ -118,7 +127,7 @@ The editor starts in **dark mode**. **View > Dark mode** switches the whole
 window -- menus, dockers, tool cards, fields, text panels, the colour wheel
 and the start page -- to the light palette and back. The same View menu ends
 with one checkbutton per right-side docker (**Block**, **Layers**, **Bytes**,
-**Dump**, **Export**, **Pattern**, **Dither**), so any tab can be hidden and
+**Dump**, **Export**, **Pattern**, **Filters**), so any tab can be hidden and
 brought back without losing its contents or its place in the tab order.
 
 ## Keyboard selection
@@ -195,9 +204,12 @@ selection mask, so each one can be confined to a region:
   its top-left corner at the click point. The default is the built-in 5x7 font
   with whole-pixel **Scale** and blank **Spacing** columns; unknown characters
   fall back to `?`. The **Font** menu lists every usable family installed on
-  the operating system, with **Size**, **Bold** and **Italic** for those faces.
-  **Load...** adds a specific TTF, OTF, TTC, FON, Type 1, BDF or PCF file. The
-  result is ordinary pixels that the hex panels and byte tools can edit.
+  the operating system, with **Size**, **Bold**, **Italic** and **Underline**
+  for those faces. **Load...** adds a specific TTF, OTF, TTC, FON, Type 1, BDF
+  or PCF file. Symbol fonts such as Wingdings and Webdings are drawn through
+  Windows GDI so their picture glyphs appear instead of empty boxes; the same
+  fallback rescues legacy bitmap fonts. The result is ordinary pixels that the
+  hex panels and byte tools can edit.
 
 ## Spray can, curves and contours
 
@@ -226,7 +238,7 @@ selection mask, so each one can be confined to a region:
 
 ## Dithering and art filters
 
-The **Dither** tab reduces the selection (or the whole canvas) to the two
+The **Filters** tab reduces the selection (or the whole canvas) to the two
 current colours, which is how a small palette gets its shading, and it also
 holds the bare-necessity filters. Every control works on the selection when
 there is one, and the whole active layer when there is not.
@@ -250,12 +262,17 @@ The filters are **Grayscale** (perceived luminance), **Posterize** (2-32
 levels), **Threshold** (black-and-white cut-off), **Brightness** and
 **Contrast** (tone), **Saturation** (drain to grey or push the channels
 apart), **Hue shift** (rotate every hue), **Noise** (stable per-pixel grain),
-**Sepia** (warm brown ramp) and **Find edges** (Sobel edge strength as grey).
-Each is one undo step.
+**Sepia** (warm brown ramp), **Find edges** (Sobel edge strength as grey),
+**Invert**, **Solarize** (invert above a level), **Gamma** (10-300%, bends the
+midtones), **Auto levels** (stretch each channel to full range), **Blur** (box
+blur, 1-16 px radius), **Sharpen** (unsharp mask, 0-100%) and **Pixelate**
+(2-32 px blocks). **Strength** mixes every filter back into the pixels it
+started from, so 50% is a half-strength effect and 0% changes nothing. Each is
+one undo step, and the tab scrolls when the window is short.
 
 The Gradient tool's **Dither** option runs the same modes over a gradient
 fill, so an FG-to-BG ramp becomes a dithered band instead of a smooth blend.
-It reads Bias, Strength, Scale and Serpentine from the Dither tab, and Pattern
+It reads Bias, Strength, Scale and Serpentine from the Filters tab, and Pattern
 reads the Pattern tab block. Dithering is defined over one axis, so it applies
 to two-colour linear gradients; **Radial**, **Whole palette** and non-clamped
 spreads stay smooth.
@@ -290,10 +307,11 @@ Aseprite-style drawing aids on top of the brush:
   `.pal` files, capped at 256 colours. **Map to palette** (or **Map +
   dither**, also under Image) recolours the layer or selection to the palette,
   diffusing the error Floyd-Steinberg style when dithering.
-- **Colour wheel** above the hex field: click the hue ring or the
-  saturation/value square for the foreground, right-click either for the
-  background; the hex and alpha fields follow along. GIF export already
-  writes a 256-colour adaptive palette.
+- **Colour wheel** above the hex field: the hue ring sits beside the
+  saturation/lightness square. Click either for the foreground, right-click
+  the ring for the background; the Saturation and Lightness slider bars and
+  the Alpha slider follow along. GIF export already writes a 256-colour
+  adaptive palette.
 - Only the visible part of the canvas is drawn, so painting stays responsive on
   large sprites. The canvas is centred when it is smaller than the workspace;
   use the zoom buttons, **Zoom to fit**, the mouse wheel (which zooms around
@@ -342,18 +360,23 @@ intersect. A right-drag that starts outside the selection subtracts;
 **Delete**, **Split to new layer**, **Copy to new layer**, **Copy to
 clipboard** and **Copy to pattern**.
 
-The **Move / Scale** tool turns a selection into a floating piece: drag inside
-it to move those pixels (the original area is cleared), hold **Shift** while
-dragging to scale them from the corner opposite the one you grabbed, hold
-**Ctrl** to rotate them around their centre in 15° steps (nearest-neighbour
-sampling, so quarter turns are exact), or press `Enter` to drop the piece with
-its corner on the cursor. `Escape` puts the piece back untouched. Scaling is
-uniform and anchored: one factor drives both axes, the opposite corner stays
-put, and the drag starts from whatever size the piece already has, so it
-cannot squash the artwork or collapse on the first pixel of movement. A
-rotation grab inside the middle three pixels holds the current angle until
-the pointer leaves that dead zone, so a click near the centre cannot spin the
-piece. The selection follows the pixels, and the whole drag is one undo step.
+The **Move / Scale** tool turns a selection into a floating piece and draws a
+node box around it: four corner nodes scale from the opposite corner, four
+edge nodes shear that edge, and the round handle above the box rotates around
+the centre in 15° steps (nearest-neighbour sampling, so quarter turns are
+exact). Dragging inside the box moves the pixels, holding **Shift** scales from
+anywhere and holding **Ctrl** rotates from anywhere. Right-click inside the
+selection while the tool is active and tick **Perspective nodes** to drag each
+corner on its own and warp the piece into a perspective quad; the mode also
+has a checkbox in the tool options bar. `Enter` drops the piece with its
+corner on the cursor and `Escape` puts it back untouched. Scaling is uniform
+and anchored: one factor drives both axes, the opposite corner stays put, and
+the drag starts from whatever size the piece already has, so it cannot squash
+the artwork or collapse on the first pixel of movement. A rotation grab inside
+the middle three pixels holds the current angle until the pointer leaves that
+dead zone, so a click near the centre cannot spin the piece. The node box is
+drawn in both pixel and hex view. The selection follows the pixels, and the
+whole drag is one undo step.
 
 The **Dump** tab shows the selected bytes as `offset  RRGGBBAA` rows, with the
 selection's pixel count and byte count. **Copy dump** puts that text on the
@@ -448,19 +471,19 @@ state the tool uses:
 | Fill | Tolerance |
 | Line | Width, Tip, Background |
 | Rectangle, Ellipse, Triangle, Diamond, Star, Arrow | Fill, Background, Width, Tip |
-| Gradient | Radial, Whole palette, reverse the direction (BG to FG), Spread (Clamp, Repeat, Reflect), Dither mode (two-colour linear gradients; Bias/Strength/Scale from the Dither tab) |
+| Gradient | Radial, Whole palette, reverse the direction (BG to FG), Spread (Clamp, Repeat, Reflect), Dither mode (two-colour linear gradients; Bias/Strength/Scale from the Filters tab) |
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
 | Blur | Size, Tip, Strength, Smear, Mirror |
 | Shuffle | Size, Tip, Mode (Shuffle, Scatter, Noise), Amount, Blur |
-| Text | text, Font (installed OS families or Load...), Size, Bold, Italic; built-in 5x7 uses Scale and Spacing |
+| Text | text, Font (installed OS families or Load...), Size, Bold, Italic, Underline; built-in 5x7 uses Scale and Spacing; symbol fonts such as Wingdings and Webdings render through GDI |
 | Spray can | Size, Tip, Flow %, Blur, Multicolor |
 | Curve | Width, Tip, Bend %, Vectors (1-8), Side (left, right, alternate) |
 | Contour | Width, Side (outside or inside), Connect (4 or 8 edges) |
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
 | Lasso | selection mode and Smooth path |
 | Wand, Similar | Tolerance, Ignore alpha |
-| Move / Scale | Rotate snap in degrees |
+| Move / Scale | Rotate snap in degrees, Perspective nodes |
 | Hand | zoom out, zoom in and Zoom to fit |
 
 Brush size, tip, mirror and tolerance also stay in the left column.
@@ -482,9 +505,10 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
 * Left press/drag paints with the active tool. For paint tools the right
   button erases; with a selection tool it subtracts; on controls it keeps the
   control's own secondary action.
-* **Move / Scale**: left drag inside a selection moves it; **Shift**+drag
-  scales it while keeping its proportions; **Ctrl**+drag rotates it around
-  its centre.
+* **Move / Scale**: left drag inside a selection moves it; the corner nodes
+  scale, the edge nodes shear and the top handle rotates. **Shift**+drag
+  scales from anywhere while keeping the proportions and **Ctrl**+drag
+  rotates. Right-click for **Perspective nodes**.
 * **Shift** while dragging **Line** snaps to horizontal, vertical or 45°;
   with **Rectangle** and **Ellipse** it draws a square or circle.
 * Selection tools: **Shift** adds, **Ctrl** subtracts, **Alt** intersects and
@@ -537,9 +561,10 @@ back the
 same stack instead of a flattened picture.
 
 The header also carries the canvas size, resolution, colour model and alpha
-flag, the active layer, and the editor state: palette and its name, the Pattern
-tab block, mirror setting, foreground and background colours, and hex/image
-view.
+flag, the active layer, its Working bits layout (widths, packing and channel
+order), and the editor state: palette and its name, the Pattern tab block,
+mirror setting, foreground and background colours, and hex/image view. Each
+tab keeps its own Working bits layout, restored when that tab is shown again.
 
 **File > Open project...** (or **Open...**, which recognises `.h2p`) restores
 all of it in one step. Once the document path is a `.h2p`, **Ctrl+S** saves the
@@ -554,8 +579,13 @@ file per visible layer), trim, scale, sampling, PPI, transparency or matte,
 JPEG quality, GIF colours and PNG level, then **Export image** writes the file
 from the same panel. **Variable bits per pixel** switches the panel to custom
 depth output, with a header choice (Raw, BMP, BMP V4, BMP V5 or TGA), indexed or
-RGB(A) colour, a **Bits/pixel** value with presets and per-channel widths, and
-packed or byte-aligned packing.
+RGB(A) colour, a **Bits/pixel** value with presets and per-channel widths,
+packed or byte-aligned packing, and a channel **Order** (RGB, BGR and so on).
+The **Working bits (hard limit)** block below sets the editor's own bits,
+channels, layout, packing and order, previews the resulting bytes and can
+apply the depth to the active layer. The channel widths limit every pixel the
+editor places; packing and order affect the preview and export. It follows the
+active canvas, and its layout is saved in that canvas's `.h2p` project.
 
 ## File formats
 
@@ -594,7 +624,11 @@ The **Header** choice is **Raw (none)** for values only, **BMP**, **BMP V4** or
 **BMP V5** for a BMP file header, or **TGA** for a TGA 2.0 header; indexed
 output gets a colour table. Colour is **Indexed** (1–8 bpp, adaptive palette)
 or **RGB(A)**, where **Bits/pixel** splits the depth over the channels and the
-R/G/B/A fields can override it. **Packed** runs pixels together MSB first,
+R/G/B/A fields can override it. **Order** chooses the channel sequence in each
+sample (RGB, BGR and the other permutations; alpha trails the chosen order).
+A 16-bit BMP keeps that order through its BI_BITFIELDS masks, while 24/32-bit
+BMP and TGA store BGR(A) and ignore it; the panel notes which case applies.
+**Packed** runs pixels together MSB first,
 so 12-bit 4:4:4 is two pixels in three bytes (`rrrrgggg bbbbrrrr ggggbbbb`)
 and 6-bit 2:2:2 is four in three (`rrggbbrr ggbbrrgg bbrrggbb`); **Aligned**
 gives each pixel its own bytes with zero high bits (`0000rrrr ggggbbbb` and
@@ -604,47 +638,45 @@ ordinary viewer: totals up to 16 bits become 16-bit 5:5:5 or 5:6:5 pixels,
 larger totals become 24 or 32 bits, and indexed depths move to the next
 colour-table depth.
 
+The **Layout** list names the byte patterns directly — 4:4:4 padded 12 bpp
+(`xxxxrrrr ggggbbbb` in two bytes), 4:4:4 packed 12 bpp (two pixels in
+`rrrrgggg bbbbrrrr ggggbbbb`), 4:4:4:4, 3:3:2 and 5:6:5 — and sets the
+channel widths and packing together.
+
+**Working bits (hard limit)** is the editor's own layout, separate from the
+export settings: its bits, per-channel widths, layout, packing and order drive
+a live preview of the active layer. The channel widths are enforced on every
+pixel placed on the canvas and re-applied on every commit; a zero alpha width
+leaves alpha untouched, so transparency still works. **Apply depth to layer**
+quantises the layer or selection to the same widths, keeping the top bits.
+
 ## Build the executable
 
-```
-packaging\build_exe.cmd
-```
-
-or call the specs directly from the repository root:
-
-```
-py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix.spec
-py -3 -m PyInstaller --noconfirm --clean packaging\hex2pix_onedir.spec
-```
-
-`dist\hex2pix.exe` is a single self-contained file; no Python install is
-needed on the target machine. `packaging\build_exe.cmd` also writes
-`dist\hex2pix-portable.zip`: the same program as a folder that keeps its
-runtime DLLs beside the executable, which fixes a start-up failure of the
-single file that reads `Failed to load Python DLL`.
-
-On the `retro-compat` branch, `packaging\cxfreeze_setup.py` builds the
-XP-compatible portable folder instead:
+Build the XP-compatible portable folder with cx_Freeze:
 
 ```
 python38-32\python.exe packaging\cxfreeze_setup.py build_exe --build-exe dist\hex2pix-retro --silent
 ```
 
+`dist\hex2pix-retro\hex2pix.exe` is the frozen program; keep its runtime
+beside it. Do not use `packaging\build_exe.cmd` on this branch: it builds the
+64-bit Python 3.10 PyInstaller executable, which XP cannot load.
+
 ## Tests
 
 ```
-py -3 -m unittest discover -s hex2pix/tests -t .
-py -3 run_hex2pix.py --selftest
+python38-32\python.exe -m unittest discover -s hex2pix/tests -t .
+python38-32\python.exe run_hex2pix.py --selftest
 ```
 
-The first command runs 472 tests over the model, the canvas, formats, colours,
+The first command runs the unit suite over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand
 selections, canvas resizing, undo, home/recent navigation, pattern fills,
 fullscreen, dark/light theming, all docker toggles and the shape/mouse helpers;
 it writes `hex2pix-selftest.txt`. The same command is available in the frozen
-executable: `hex2pix.exe --selftest`.
+executable: `dist\hex2pix-retro\hex2pix.exe --selftest`.
 
 ## Limits
 

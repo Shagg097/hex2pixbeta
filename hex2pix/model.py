@@ -219,6 +219,22 @@ def hex_str(r, g, b, a=255):
     return "%02X%02X%02X%02X" % (r, g, b, a)
 
 
+def hex_code(color, order="RGB"):
+    """Format an RGBA color in `order` (RGB, BGR and the other permutations).
+
+    Alpha follows the colour bytes, and is only shown when it is not fully
+    opaque, so the code keeps the same length as `hex_str`.
+    """
+    order = str(order or "RGB").upper()
+    if len(order) != 3 or sorted(order) != ["B", "G", "R"]:
+        order = "RGB"
+    values = {"R": color[0], "G": color[1], "B": color[2]}
+    text = "".join("%02X" % values[letter] for letter in order)
+    if len(color) > 3 and color[3] < 255:
+        text += "%02X" % color[3]
+    return text
+
+
 def split_lines(text):
     """Split text into lines, treating ';' and '|' as line breaks too."""
     s = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -711,6 +727,176 @@ class RotationDrag(object):
         turned = (direction - self.grab_angle) % 360.0
         self.angle = (self.base + round(turned / snap) * snap) % 360.0
         return self.angle
+
+
+def quad_from_box(box):
+    """The four corners of an (x, y, w, h) box, clockwise from top left."""
+    left, top, width, height = box
+    return [(float(left), float(top)),
+            (float(left + width), float(top)),
+            (float(left + width), float(top + height)),
+            (float(left), float(top + height))]
+
+
+def box_from_quad(quad):
+    """The integer bounding box of a quad, rounded outwards."""
+    xs = [point[0] for point in quad]
+    ys = [point[1] for point in quad]
+    left = int(math.floor(min(xs)))
+    top = int(math.floor(min(ys)))
+    right = int(math.ceil(max(xs)))
+    bottom = int(math.ceil(max(ys)))
+    return (left, top, max(1, right - left), max(1, bottom - top))
+
+
+def quad_centre(quad):
+    return (sum(point[0] for point in quad) / 4.0,
+            sum(point[1] for point in quad) / 4.0)
+
+
+def quad_translate(quad, dx, dy):
+    return [(x + dx, y + dy) for x, y in quad]
+
+
+def quad_scale(quad, anchor, factor):
+    """Scale every corner around `anchor` by one factor."""
+    ax, ay = anchor
+    return [(ax + (x - ax) * factor, ay + (y - ay) * factor)
+            for x, y in quad]
+
+
+def quad_rotate(quad, centre, degrees):
+    """Turn the quad clockwise around `centre` by `degrees`."""
+    radians = math.radians(float(degrees))
+    cos_a, sin_a = math.cos(radians), math.sin(radians)
+    cx, cy = centre
+    result = []
+    for x, y in quad:
+        dx, dy = x - cx, y - cy
+        result.append((cx + dx * cos_a - dy * sin_a,
+                       cy + dx * sin_a + dy * cos_a))
+    return result
+
+
+def quad_shear(quad, edge, amount):
+    """Slide one edge of the quad along the canvas axes.
+
+    `edge` is 0 for the top, 1 for the right, 2 for the bottom and 3 for the
+    left. Top and bottom edges slide sideways, left and right edges slide up
+    and down, which is the shear a handle on that edge should produce.
+    """
+    result = list(quad)
+    if edge in (0, 2):
+        indices = (0, 1) if edge == 0 else (2, 3)
+        for index in indices:
+            result[index] = (result[index][0] + amount, result[index][1])
+    elif edge in (1, 3):
+        indices = (1, 2) if edge == 1 else (3, 0)
+        for index in indices:
+            result[index] = (result[index][0], result[index][1] + amount)
+    return result
+
+
+def quad_move_corner(quad, index, dx, dy):
+    """Move one corner by a delta, leaving the other three in place."""
+    result = list(quad)
+    index = index % 4
+    result[index] = (result[index][0] + dx, result[index][1] + dy)
+    return result
+
+
+def quad_handles(quad, rotation_gap=24.0):
+    """Corner, edge and rotation handles for a transform box.
+
+    Returns (kind, index, (x, y)) tuples: `corner` handles scale from the
+    opposite corner (or move one corner in perspective mode), `edge` handles
+    shear the edge they sit on, and the single `rotate` handle sits
+    `rotation_gap` units above the middle of the top edge.
+    """
+    handles = []
+    for index, point in enumerate(quad):
+        handles.append(("corner", index, point))
+    for index in range(4):
+        first = quad[index]
+        second = quad[(index + 1) % 4]
+        handles.append(("edge", index,
+                        ((first[0] + second[0]) / 2.0,
+                         (first[1] + second[1]) / 2.0)))
+    top_x = (quad[0][0] + quad[1][0]) / 2.0
+    top_y = (quad[0][1] + quad[1][1]) / 2.0
+    edge_x = quad[1][0] - quad[0][0]
+    edge_y = quad[1][1] - quad[0][1]
+    length = math.hypot(edge_x, edge_y)
+    if length > 0:
+        normal_x, normal_y = -edge_y / length, edge_x / length
+        centre_x, centre_y = quad_centre(quad)
+        if (normal_x * (top_x - centre_x)
+                + normal_y * (top_y - centre_y)) < 0:
+            normal_x, normal_y = -normal_x, -normal_y
+        handles.append(("rotate", -1, (top_x + normal_x * rotation_gap,
+                                       top_y + normal_y * rotation_gap)))
+    return handles
+
+
+def warp_piece(piece, quad, width, height):
+    """Draw the piece into a quadrilateral on a width x height canvas.
+
+    The quad is filled as two triangles with nearest-neighbour samples, so
+    any convex quad works: scaling, shearing, rotation and perspective all go
+    through the same path. Pixels outside the canvas or the quad stay
+    transparent. Returns (left, top, bitmap) for the clipped box to stamp.
+    """
+    if len(quad) != 4:
+        raise HexError("a transform box needs four corners")
+    xs = [point[0] for point in quad]
+    ys = [point[1] for point in quad]
+    left = max(0, int(math.floor(min(xs))))
+    top = max(0, int(math.floor(min(ys))))
+    right = min(width - 1, int(math.ceil(max(xs))) - 1)
+    bottom = min(height - 1, int(math.ceil(max(ys))) - 1)
+    if right < left or bottom < top:
+        return left, top, Bitmap(1, 1)
+    out = Bitmap(right - left + 1, bottom - top + 1)
+    source = piece.data
+    sw, sh = piece.width, piece.height
+    dst = out.data
+    corners = [(0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh)),
+               (0.0, float(sh))]
+    for i0, i1, i2 in ((0, 1, 2), (0, 2, 3)):
+        q0, q1, q2 = quad[i0], quad[i1], quad[i2]
+        s0, s1, s2 = corners[i0], corners[i1], corners[i2]
+        denom = ((q1[1] - q2[1]) * (q0[0] - q2[0])
+                 + (q2[0] - q1[0]) * (q0[1] - q2[1]))
+        if abs(denom) < 1e-9:
+            continue
+        min_x = max(left, int(math.floor(min(q0[0], q1[0], q2[0]))))
+        max_x = min(right, int(math.ceil(max(q0[0], q1[0], q2[0]))) - 1)
+        min_y = max(top, int(math.floor(min(q0[1], q1[1], q2[1]))))
+        max_y = min(bottom, int(math.ceil(max(q0[1], q1[1], q2[1]))) - 1)
+        for y in range(min_y, max_y + 1):
+            py = y + 0.5
+            row = (y - top) * out.width
+            for x in range(min_x, max_x + 1):
+                px = x + 0.5
+                a = ((q1[1] - q2[1]) * (px - q2[0])
+                     + (q2[0] - q1[0]) * (py - q2[1])) / denom
+                b = ((q2[1] - q0[1]) * (px - q2[0])
+                     + (q0[0] - q2[0]) * (py - q2[1])) / denom
+                c = 1.0 - a - b
+                if a < -1e-9 or b < -1e-9 or c < -1e-9:
+                    continue
+                sx = a * s0[0] + b * s1[0] + c * s2[0]
+                sy = a * s0[1] + b * s1[1] + c * s2[1]
+                ix, iy = int(sx), int(sy)
+                if ix < 0 or iy < 0 or ix >= sw or iy >= sh:
+                    continue
+                source_index = (iy * sw + ix) * 4
+                if not source[source_index + 3]:
+                    continue
+                target = (row + (x - left)) * 4
+                dst[target:target + 4] = source[source_index:
+                                                source_index + 4]
+    return left, top, out
 
 
 # --------------------------------------------------------------------- layers
@@ -1629,6 +1815,12 @@ class Document(object):
         self.ppi = float(ppi)
         self.color_mode = color_mode
         self.alpha = bool(alpha)
+        # Working layout for this canvas. When set, every committed edit is
+        # reduced to these channel widths; None leaves 8-bit pixels untouched.
+        # Packing and order travel with the document in a .h2p project.
+        self.working_widths = None
+        self.working_packing = "packed"
+        self.working_order = "RGB"
 
     @property
     def layer_count(self):
@@ -1657,6 +1849,81 @@ class Document(object):
 
     def mask(self):
         return self.selection.mask_or_full()
+
+    def set_working_widths(self, widths, quantize=True):
+        """Set the canvas working limit, optionally reducing existing pixels."""
+        if widths is None:
+            self.working_widths = None
+            return 0
+        from . import bitdepth
+        self.working_widths = bitdepth.channel_widths(widths)
+        return self.limit_pixels() if quantize else 0
+
+    def working_layout(self):
+        """The saved working layout, or None when no limit is set."""
+        if not self.working_widths:
+            return None
+        return {"raw_channels": tuple(self.working_widths),
+                "raw_packing": self.working_packing,
+                "raw_order": self.working_order}
+
+    def set_working_layout(self, working, quantize=True):
+        """Set widths, packing and order, optionally reducing pixels."""
+        if working is None:
+            self.working_widths = None
+            self.working_packing = "packed"
+            self.working_order = "RGB"
+            return 0
+        if not isinstance(working, dict):
+            raise HexError("working layout must be a mapping")
+        from . import bitdepth
+        widths = bitdepth.channel_widths(working.get("raw_channels"))
+        packing = bitdepth.check_packing(working.get("raw_packing"))
+        order = bitdepth.check_order(working.get("raw_order"))
+        self.working_widths = widths
+        self.working_packing = packing
+        self.working_order = order
+        return self.limit_pixels() if quantize else 0
+
+    def limit_color(self, color):
+        """A colour clamped to this canvas's working widths."""
+        if not self.working_widths:
+            return tuple(color)
+        from . import bitdepth
+        return bitdepth.limit_color(color, self.working_widths)
+
+    def limit_pixels(self, rect=None):
+        """Reduce every layer (or one rectangle) to the working widths."""
+        if not self.working_widths:
+            return 0
+        from . import bitdepth
+        count = 0
+        if rect is None:
+            for layer in self.layers:
+                bitmap = layer.bitmap
+                limited = bitdepth.limit_rgba(bitmap.data, self.working_widths)
+                if limited != bitmap.data:
+                    bitmap.data[:] = limited
+                count += bitmap.width * bitmap.height
+            return count
+        left, top, width, height = [int(value) for value in rect]
+        right = min(self.width, left + width)
+        bottom = min(self.height, top + height)
+        left, top = max(0, left), max(0, top)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return 0
+        for layer in self.layers:
+            bitmap = layer.bitmap
+            for y in range(top, bottom):
+                start = (y * bitmap.width + left) * 4
+                end = start + width * 4
+                limited = bitdepth.limit_rgba(bitmap.data[start:end],
+                                              self.working_widths)
+                if limited != bitmap.data[start:end]:
+                    bitmap.data[start:end] = limited
+            count += width * height
+        return count
 
     def flatten(self, rect=None):
         """Composite the visible layers, or one rectangle, into a Bitmap."""
@@ -1894,11 +2161,16 @@ class Document(object):
         self.ppi = state["ppi"]
         self.color_mode = state["color_mode"]
         self.alpha = state["alpha"]
+        # Undo can revive a pre-limit snapshot; the working limit still wins.
+        self.limit_pixels()
 
     def begin(self):
         return self.state()
 
     def commit(self, before):
+        # A working layout is a hard limit on the canvas, so catch any edit
+        # path that writes bytes directly before the state enters history.
+        self.limit_pixels()
         self.dirty = True
         return self.undo.push(before, self.state())
 
