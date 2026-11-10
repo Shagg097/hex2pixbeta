@@ -7347,23 +7347,28 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------ keys
     def on_key(self, event):
+        key = event.keysym
+        if key == "F11":
+            self.toggle_fullscreen()
+            return "break"
+        if key == "Escape" and self.fullscreen:
+            self.set_fullscreen(False)
         focus = self.focus_get()
         if not self._dispatching and isinstance(
                 focus, (tk.Text, tk.Entry, ttk.Entry, ttk.Combobox,
                         tk.Spinbox, ttk.Spinbox)):
-            if event.keysym == "Escape":
+            if key == "Escape":
                 self.view.focus_set()
             return None
         if self.home_visible:
             return None
         if self.playing and not self._dispatching:
-            if event.keysym == "Escape":
+            if key == "Escape":
                 self.stop_playback()
             return "break"
 
         control = bool(event.state & 0x0004)
         shift = bool(event.state & 0x0001)
-        key = event.keysym
         char = (event.char or "").lower()
 
         if not self.playing and self.recorder.recording:
@@ -7395,10 +7400,6 @@ class hex2pixApp(tk.Tk):
         if key == "F5":
             self.play_macro()
             return "break"
-        if key == "F11":
-            self.toggle_fullscreen()
-            return "break"
-
         if control:
             if key == "Tab":
                 self.next_tab(-1 if shift else 1)
@@ -7435,8 +7436,6 @@ class hex2pixApp(tk.Tk):
             self.refresh_status()
             return "break"
         if key == "Escape":
-            if self.fullscreen:
-                self.set_fullscreen(False)
             self.cancel_shape()
             self.cancel_gradient()
             self.cancel_transform()
@@ -8151,6 +8150,21 @@ def run_selftest(out_path=None):
         app.set_fullscreen(False)
         app.update_idletasks()
         fullscreen_ok = fullscreen_ok and not app.fullscreen
+        probe = tk.Entry(app)
+        probe.place(x=1, y=1)
+        probe.focus_set()
+        app.update_idletasks()
+        app.set_fullscreen(True)
+        app.update_idletasks()
+        app.on_key(_KeyEvent("F11", ""))
+        entry_fullscreen_ok = not app.fullscreen
+        app.set_fullscreen(True)
+        app.update_idletasks()
+        app.on_key(_KeyEvent("Escape", ""))
+        entry_fullscreen_ok = entry_fullscreen_ok and not app.fullscreen
+        probe.destroy()
+        app.view.focus_set()
+        fullscreen_ok = fullscreen_ok and entry_fullscreen_ok
         app._update_left_scrollregion()
         left_box = app.left_canvas.bbox("all")
         left_scroll_ok = bool(left_box) and (left_box[3]
