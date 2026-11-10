@@ -335,7 +335,10 @@ outline crosses itself cannot leave holes inside the selection.
 
 Tolerance (left panel) loosens the color comparison; `0` means exact bytes.
 Hold **Shift** while selecting to add, **Ctrl** to subtract, **Alt** to
-intersect. Right-drag a selection tool subtracts.
+intersect. A right-drag that starts outside the selection subtracts;
+`Ctrl`+drag subtracts anywhere. Right-click inside a selection for
+**Delete**, **Split to new layer**, **Copy to new layer**, **Copy to
+clipboard** and **Copy to pattern**.
 
 The **Move / Scale** tool turns a selection into a floating piece: drag inside
 it to move those pixels (the original area is cleared), hold **Shift** while

@@ -3778,6 +3778,12 @@ class hex2pixApp(tk.Tk):
         x, y = self.clamped(event)
         free_x, free_y = self.pixel_at(event)
         self.cursor = (x, y)
+        if (secondary and self.doc.selection.active
+                and self.doc.selection.get(free_x, free_y)):
+            self.show_selection_menu(event)
+            self.request_redraw()
+            self.refresh_status()
+            return
         self.sel_mode = "subtract" if secondary else self.mode_from_event(event)
         tool = self.tool
         if tool in PAINT_TOOLS:
@@ -5086,16 +5092,15 @@ class hex2pixApp(tk.Tk):
         self.pattern_at(x, y, self.pattern_mode.get())
 
     def pattern_from_selection(self):
-        bounds = self.doc.selection.bounds()
-        if bounds is None:
-            self.report_error("Select an area first, then take it as a pattern.")
+        selected = self._selection_piece()
+        if selected is None:
             return
-        left, top, width, height = bounds
+        (left, top, width, height), piece = selected
         size = max(1, min(16, max(width, height)))
         self.set_pattern_size(size)
         for y in range(min(size, height)):
             for x in range(min(size, width)):
-                color = self.doc.bitmap.rgba(left + x, top + y)
+                color = piece.rgba(x, y)
                 self.pattern_cells[y][x] = color if color[3] else None
         self.pattern_size_var.set(size)
         self.draw_pattern_grid()
@@ -6702,6 +6707,71 @@ class hex2pixApp(tk.Tk):
         self.doc.commit(before)
         self.refresh_bytes()
         self.redraw()
+
+    def _selection_piece(self):
+        """The selected pixels as a bounds-sized bitmap."""
+        bounds = self.doc.selection.bounds()
+        if bounds is None:
+            self.report_error("Select an area first.")
+            return None
+        piece = extract_selection(self.doc.bitmap,
+                                  self.doc.selection.mask, bounds)
+        return bounds, piece
+
+    def _selection_to_layer(self, cut, name):
+        selected = self._selection_piece()
+        if selected is None:
+            return
+        (left, top, _width, _height), piece = selected
+        before = self.doc.begin()
+        if cut:
+            clear_region(self.doc.bitmap, self.doc.selection.mask)
+        self.doc.add_layer(name)
+        stamp_bitmap(self.doc.active_layer.bitmap, piece, (left, top))
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def split_selection_to_layer(self):
+        self._selection_to_layer(True, "Selection")
+
+    def copy_selection_to_layer(self):
+        self._selection_to_layer(False, "Selection copy")
+
+    def copy_selection_to_clipboard(self):
+        selected = self._selection_piece()
+        if selected is None:
+            return
+        (left, top, width, height), piece = selected
+        self.clipboard_clear()
+        self.clipboard_append(block_from_bitmap(piece))
+        self.export_info.set("copied selection text (%dx%d) from %d,%d"
+                             % (width, height, left, top))
+
+    def _selection_menu_widget(self):
+        menu = getattr(self, "_selection_menu", None)
+        if menu is not None:
+            return menu
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Delete", command=self.clear_selection)
+        menu.add_separator()
+        menu.add_command(label="Split to new layer",
+                         command=self.split_selection_to_layer)
+        menu.add_command(label="Copy to new layer",
+                         command=self.copy_selection_to_layer)
+        menu.add_separator()
+        menu.add_command(label="Copy to clipboard",
+                         command=self.copy_selection_to_clipboard)
+        menu.add_command(label="Copy to pattern",
+                         command=self.pattern_from_selection)
+        self._selection_menu = menu
+        return menu
+
+    def show_selection_menu(self, event):
+        menu = self._selection_menu_widget()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def invert_colors_action(self):
         before = self.doc.begin()
