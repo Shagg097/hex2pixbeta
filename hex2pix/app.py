@@ -2846,6 +2846,8 @@ class hex2pixApp(tk.Tk):
         self.rotate_snap = int(ROTATE_SNAP)
         self.rotate_snap_var = tk.IntVar(value=int(ROTATE_SNAP))
         self.blur_size_var = tk.IntVar(value=4)
+        self.blur_amount_var = tk.DoubleVar(value=1.0)
+        self.blur_amount_text = tk.StringVar(value="1")
         self.blur_strength_var = tk.IntVar(value=60)
         self.blur_smear_var = tk.IntVar(value=0)
         self.shuffle_size_var = tk.IntVar(value=4)
@@ -3103,6 +3105,12 @@ class hex2pixApp(tk.Tk):
     def _options_blur(self):
         self._option_label("Size")
         self._option_spin(self.blur_size_var, 1, 64)
+        self._option_label("Amount")
+        ttk.Scale(self.tool_options, from_=0, to=8, length=80,
+                  variable=self.blur_amount_var,
+                  command=self.blur_amount_changed).pack(side="left")
+        ttk.Label(self.tool_options, textvariable=self.blur_amount_text,
+                  width=2).pack(side="left", padx=(2, 0))
         self._option_label("Tip")
         self._option_combo(self.brush_shape_var, BRUSH_TIPS, 8,
                            command=self.tip_chosen)
@@ -3869,7 +3877,8 @@ class hex2pixApp(tk.Tk):
                             previous[0], previous[1], x, y,
                             self.blur_radius(), self.blur_strength(),
                             self.brush_shape(), self.symmetry,
-                            self.blur_source, self.blur_smear())
+                            self.blur_source, self.blur_smear(),
+                            amount=self.blur_amount())
                 half = self.blur_radius() // 2 + 1
             else:
                 shuffle_stroke(self.doc.bitmap, self.doc.mask(),
@@ -4115,7 +4124,7 @@ class hex2pixApp(tk.Tk):
         painted = blur_area(self.doc.bitmap, self.doc.mask(), x, y,
                             self.blur_radius(), self.blur_strength(),
                             self.brush_shape(), self.symmetry,
-                            self.blur_source)
+                            self.blur_source, amount=self.blur_amount())
         smear = self.blur_smear()
         if smear and self.blur_last is not None:
             # Smear drags colour along the stroke, so it needs the pixel the
@@ -5453,6 +5462,18 @@ class hex2pixApp(tk.Tk):
 
     def blur_strength(self):
         return _bounded(self.blur_strength_var.get(), 0, 100, 60)
+
+    def blur_amount(self):
+        try:
+            value = int(round(float(self.blur_amount_var.get())))
+        except (tk.TclError, TypeError, ValueError):
+            return 1
+        return max(0, min(8, value))
+
+    def blur_amount_changed(self, value=None):
+        text = getattr(self, "blur_amount_text", None)
+        if text is not None:
+            text.set("%d" % self.blur_amount())
 
     def shuffle_radius(self):
         return _bounded(self.shuffle_size_var.get(), 1, 64, 4)

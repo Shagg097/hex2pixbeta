@@ -110,7 +110,7 @@ Verified on this branch with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 460 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 462 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
 | `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
@@ -304,7 +304,7 @@ used from that folder, and hovering it lists what is inside.
 | Rectangle / Ellipse / Triangle / Diamond / Star / Arrow | Outline or filled preset shapes; `Shift` constrains to a square or circle, and **Background** paints with the BG color so the shape cuts into the artwork |
 | Gradient | Interpolate foreground to background (linear or radial), or step through the whole palette; Spread clamps, repeats or reflects; optional dithering |
 | Contour | Draw an inside or outside ring around a selection or opaque artwork |
-| Blur | Soften with a 3×3 neighborhood; strength controls the mix, smear drags colour along the stroke, and the tip picks the footprint |
+| Blur | Soften with an adjustable neighborhood from 1×1 to 17×17; Amount sets its radius, strength controls the mix, smear drags colour along the stroke, and the tip picks the footprint |
 | Shuffle | Mix, scatter or add channel noise under the brush; blur softens the mixed result, and the tip picks the footprint |
 | Text | Stamp the built-in 5×7 font or any installed OS font; load TTF/OTF/TTC/FON/Type 1/BDF/PCF files, with size and bold/italic |
 | Line pattern | Fill selected lines with consecutive pattern rows; `Shift` staggers them |
@@ -669,7 +669,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **460 unit tests** covering the model, canvas geometry,
+The first command runs **462 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -705,7 +705,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              460 unit tests
+│  └─ tests/              462 unit tests
 └─ docs/                   screenshots, artwork; logo source in logo/
 ```
 
