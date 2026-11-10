@@ -439,6 +439,24 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(self.stacked("multiply"), (78, 39, 19, 255))
         self.assertEqual(self.stacked("divide"), (255, 255, 127, 255))
 
+    def test_layer_gate_and_blend_operations(self):
+        self.assertEqual(combine(200, 100, "xor"), 172)
+        self.assertEqual(combine(200, 100, "nand"), 191)
+        self.assertEqual(combine(10, 200, "screen"), 202)
+        self.assertEqual(combine(100, 200, "overlay"), 157)
+        self.assertEqual(combine(10, 200, "darken"), 10)
+        self.assertEqual(combine(10, 200, "lighten"), 200)
+        self.assertEqual(combine(10, 200, "difference"), 190)
+        self.assertEqual(self.stacked("nand"), (191, 155, 223, 255))
+        self.assertEqual(self.stacked("xor"), (172, 0, 86, 255))
+        self.assertEqual(self.stacked("screen"), (222, 161, 130, 255))
+        self.assertEqual(self.stacked("overlay"), (188, 78, 39, 255))
+        self.assertEqual(self.stacked("darken"), (100, 100, 50, 255))
+        self.assertEqual(self.stacked("lighten"), (200, 100, 100, 255))
+        self.assertEqual(self.stacked("difference"), (100, 0, 50, 255))
+        for op in model.LAYER_OPS:
+            self.assertIn(op, model.LAYER_OP_LABELS)
+
     def test_layer_alpha_is_the_strength(self):
         document = Document(1, 1)
         document.bitmap.set_rgba(0, 0, (100, 100, 100, 255))
@@ -537,6 +555,107 @@ class LayerTests(unittest.TestCase):
         document.move_layer(-1)
         self.assertEqual(document.active_layer.op, "subtract")
         self.assertEqual(document.flatten().rgba(0, 0), (200, 100, 50, 255))
+
+
+class LayerGroupTests(unittest.TestCase):
+    def document(self):
+        document = Document(1, 1)
+        document.bitmap.set_rgba(0, 0, (10, 20, 30, 255))
+        document.layers[0].name = "base"
+        document.add_layer("ink")
+        document.bitmap.set_rgba(0, 0, (200, 100, 50, 255))
+        return document
+
+    def test_group_and_members(self):
+        document = self.document()
+        group = document.group_layer()
+        self.assertEqual(group.name, "Group 1")
+        self.assertEqual(document.active_layer.group, "Group 1")
+        self.assertEqual(document.group_members("Group 1"), [1])
+        document.group_layer(index=0, name="Group 1")
+        self.assertEqual(document.group_members("Group 1"), [0, 1])
+        document.group_layer(index=1, name="Ink")
+        self.assertEqual([l.group for l in document.layers],
+                         ["Group 1", "Ink"])
+        self.assertEqual([g.name for g in document.groups],
+                         ["Group 1", "Ink"])
+        self.assertEqual(document.ensure_group("Group 1").name, "Group 1")
+
+    def test_group_visibility_and_alpha(self):
+        document = self.document()
+        document.group_layer()
+        group = document.group("Group 1")
+        group.visible = False
+        self.assertEqual(document.flatten().rgba(0, 0), (10, 20, 30, 255))
+        group.visible = True
+        group.alpha = 128
+        self.assertEqual(document.flatten().rgba(0, 0), (105, 60, 40, 255))
+
+    def test_rename_group_renames_members(self):
+        document = self.document()
+        document.group_layer()
+        self.assertTrue(document.rename_group("Group 1", "Sky"))
+        self.assertEqual(document.group("Sky").name, "Sky")
+        self.assertEqual(document.active_layer.group, "Sky")
+        document.group_layer(index=0, name="Base")
+        self.assertFalse(document.rename_group("Sky", "Base"))
+        self.assertFalse(document.rename_group("Sky", ""))
+        self.assertFalse(document.rename_group("Nope", "Mist"))
+
+    def test_rename_layer(self):
+        document = self.document()
+        self.assertTrue(document.rename_layer(1, "Shade"))
+        self.assertEqual(document.layers[1].name, "Shade")
+        self.assertFalse(document.rename_layer(1, "  "))
+
+    def test_remove_group_keeps_layers(self):
+        document = self.document()
+        document.group_layer()
+        self.assertEqual(document.remove_group("Group 1"), 1)
+        self.assertEqual(document.layer_count, 2)
+        self.assertFalse(document.groups)
+        self.assertEqual(document.active_layer.group, "")
+
+    def test_remove_layer_prunes_the_group(self):
+        document = self.document()
+        document.group_layer()
+        self.assertTrue(document.remove_layer())
+        self.assertFalse(document.groups)
+
+    def test_merge_down_uses_the_layer_operation(self):
+        document = self.document()
+        document.active_layer.op = "add"
+        self.assertTrue(document.merge_down())
+        self.assertEqual(document.layer_count, 1)
+        self.assertEqual(document.flatten().rgba(0, 0), (210, 120, 80, 255))
+        self.assertFalse(document.merge_down())
+
+    def test_merge_group(self):
+        document = self.document()
+        document.group_layer()
+        document.add_layer()
+        document.layers[2].group = "Group 1"
+        document.bitmap.set_rgba(0, 0, (0, 255, 0, 255))
+        before = document.begin()
+        self.assertTrue(document.merge_group("Group 1"))
+        self.assertEqual(document.layer_count, 2)
+        self.assertEqual(document.active_layer.name, "Group 1")
+        self.assertEqual(document.active_layer.bitmap.rgba(0, 0),
+                         (0, 255, 0, 255))
+        self.assertIsNone(document.group("Group 1"))
+        document.commit(before)
+        document.undo_last()
+        self.assertEqual(document.layer_count, 3)
+        self.assertIsNotNone(document.group("Group 1"))
+
+    def test_groups_survive_undo(self):
+        document = self.document()
+        before = document.begin()
+        document.group_layer()
+        document.commit(before)
+        document.undo_last()
+        self.assertFalse(document.groups)
+        self.assertEqual(document.active_layer.group, "")
 
 
 class HoleFillTests(unittest.TestCase):

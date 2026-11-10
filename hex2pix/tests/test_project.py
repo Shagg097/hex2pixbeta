@@ -26,6 +26,8 @@ class ProjectTest(unittest.TestCase):
         document.bitmap.set_rgba(2, 1, (0, 255, 0, 128))
         layer = document.add_layer("Ink", op="multiply")
         layer.alpha = 128
+        layer.group = "Ink"
+        document.ensure_group("Ink").alpha = 200
         layer.bitmap.set_rgba(1, 0, (0, 0, 255, 255))
         document.layers[0].visible = False
         document.selection.restore(b"\x00\xff\x00\x00\x00\xff")
@@ -49,6 +51,12 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(loaded.layers[1].name, "Ink")
         self.assertEqual(loaded.layers[1].op, "multiply")
         self.assertEqual(loaded.layers[1].alpha, 128)
+        self.assertEqual(loaded.layers[1].group, "Ink")
+        self.assertEqual(loaded.layers[0].group, "")
+        group = loaded.group("Ink")
+        self.assertIsNotNone(group)
+        self.assertEqual(group.alpha, 200)
+        self.assertTrue(group.visible)
         self.assertFalse(loaded.layers[0].visible)
         self.assertEqual(loaded.layers[0].bitmap.rgba(0, 0), (255, 0, 0, 255))
         self.assertEqual(loaded.layers[1].bitmap.rgba(1, 0),
@@ -67,6 +75,8 @@ class ProjectTest(unittest.TestCase):
         self.assertEqual(header["format"], formats.PROJECT_FORMAT)
         self.assertEqual(header["version"], formats.PROJECT_VERSION)
         self.assertEqual(len(header["layers"]), 2)
+        self.assertEqual(header["groups"][0]["name"], "Ink")
+        self.assertEqual(header["layers"][1]["group"], "Ink")
 
     def test_selection_is_saved(self):
         formats.save_project(self.path, self.document())

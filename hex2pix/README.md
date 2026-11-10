@@ -369,6 +369,13 @@ Each layer combines with the layers below it using its operation:
 | Subtract | `below - above`, clamped |
 | Multiply | `below * above / 255` |
 | Divide | `below * 255 / above` |
+| Xor | `below XOR above`, per byte |
+| Nand | `NOT (below AND above)`, per byte |
+| Screen | `255 - (255-below)(255-above)/255` |
+| Overlay | multiplies dark areas, screens light ones |
+| Darken | the darker of the two |
+| Lighten | the lighter of the two |
+| Difference | `abs(below - above)` |
 
 A pixel's alpha is the strength of the operation, so transparent pixels leave
 the stack below alone and a partly transparent layer mixes the result. Where
@@ -389,6 +396,15 @@ layer, dragging a row restacks it, double-clicking shows or hides it, and
 `Alt+Up` / `Alt+Down` restack the active layer, and `Alt+N`, `Alt+C` and
 `Alt+Delete` add, copy and remove layers from the keyboard. `Escape`
 deselects instantly.
+
+**Group** puts the active layer in a new group and the **Group** picker moves
+it into an existing group (or out with *none*). A group appears as a header row
+above its members: double-click the header to hide or show the whole group,
+**Fold / unfold group** collapses it, and **Ungroup** releases the layers.
+**Rename** (or `F2`) edits layer and group names. **Merge down** combines the
+active layer into the one below using its operation and opacity, and **Merge
+group** flattens a group into one layer. Group names, visibility and opacity
+are saved in the `.h2p` project.
 
 ## Tool palette
 
@@ -485,6 +501,9 @@ and `]` zoom out and in. Double-click the middle button (or double-click with
 | Ctrl+E | save and export docker |
 | Ctrl+Shift+N | new layer |
 | Alt+N / Alt+C / Alt+Delete | new / copy / delete the active layer |
+| Alt+G | group the active layer |
+| F2 | rename the selected layer or group |
+| Ctrl+M | merge the active layer down |
 | Alt+Up / Alt+Down | restack the active layer |
 
 Tool letters are on `Shift` so that `A-F` can stay available for hex digits.
@@ -593,7 +612,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs 462 tests over the model, the canvas, formats, colours,
+The first command runs 472 tests over the model, the canvas, formats, colours,
 palettes, patterns, dithering, macros and update checks. The second runs those
 plus a headless GUI pass that builds the window and exercises painting, erasing,
 byte and wand

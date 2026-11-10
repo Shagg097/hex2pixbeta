@@ -17,7 +17,7 @@ from PIL import Image
 
 from . import bitdepth
 from .model import (MATTE_WHITE, SKIP, Bitmap, Document, HexError, Layer,
-                    block_from_bitmap, clamp, parse_block)
+                    LayerGroup, block_from_bitmap, clamp, parse_block)
 
 FORMATS = (
     {"key": "png", "label": "PNG (8-bit RGBA)", "ext": ".png", "alpha": True},
@@ -656,6 +656,7 @@ def save_project(path, document, extras=None):
             "op": layer.op,
             "visible": bool(layer.visible),
             "alpha": int(layer.alpha),
+            "group": layer.group,
             "data": name,
         })
         entries.append((name, bytes(layer.bitmap.data)))
@@ -671,6 +672,7 @@ def save_project(path, document, extras=None):
         "display_format": document.display_format,
         "active_layer": int(document.layer_index),
         "layers": layers,
+        "groups": [group.to_state() for group in document.groups],
         "selection_active": bool(document.selection.active),
         "selection": "selection.mask" if document.selection.active else None,
         "extras": dict(extras or {}),
@@ -723,7 +725,7 @@ def load_project(path):
                     width, height, entry.get("name", "Layer %d" % (index + 1)),
                     entry.get("op", "normal"),
                     entry.get("visible", True), data,
-                    entry.get("alpha", 255)))
+                    entry.get("alpha", 255), entry.get("group", "")))
             if not layers:
                 raise HexError("project has no layers")
             document = Document(width, height, path=path,
@@ -731,6 +733,14 @@ def load_project(path):
                                 color_mode=header.get("color_mode", "RGB"),
                                 alpha=header.get("alpha", True))
             document.layers = layers
+            document.groups = [LayerGroup.from_state(entry)
+                               for entry in header.get("groups") or []
+                               if isinstance(entry, dict)]
+            known = set(group.name for group in document.groups)
+            for layer in layers:
+                if layer.group and layer.group not in known:
+                    document.groups.append(LayerGroup(layer.group))
+                    known.add(layer.group)
             document.layer_index = clamp(int(header.get("active_layer", 0)), 0,
                                          len(layers) - 1)
             document.display_format = str(header.get("display_format", "png"))
