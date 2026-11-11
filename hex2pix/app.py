@@ -1350,6 +1350,7 @@ class hex2pixApp(tk.Tk):
         self.transform_handle_kind = None
         self.transform_handle_index = None
         self.transform_perspective = False
+        self.transform_smooth = False
         self.layer_alpha_before = None
         self.layer_alpha_dirty = False
         self._layer_alpha_syncing = False
@@ -3212,6 +3213,7 @@ class hex2pixApp(tk.Tk):
         self.rotate_snap = int(ROTATE_SNAP)
         self.rotate_snap_var = tk.IntVar(value=int(ROTATE_SNAP))
         self.transform_perspective_var = tk.BooleanVar(value=False)
+        self.transform_smooth_var = tk.BooleanVar(value=False)
         self.blur_size_var = tk.IntVar(value=4)
         self.blur_amount_var = tk.DoubleVar(value=1.0)
         self.blur_amount_text = tk.StringVar(value="1")
@@ -3675,6 +3677,8 @@ class hex2pixApp(tk.Tk):
         self._option_label("deg")
         self._option_check("Perspective nodes", self.transform_perspective_var,
                            self.apply_transform_perspective, padx=(10, 0))
+        self._option_check("Smooth edges", self.transform_smooth_var,
+                           self.apply_transform_smooth, padx=(10, 0))
         self._option_label("Corner scales, edge shears, top rotates", (14, 2))
 
     def _options_hand(self):
@@ -3704,6 +3708,16 @@ class hex2pixApp(tk.Tk):
     def apply_transform_perspective(self):
         self.transform_perspective = bool(self.transform_perspective_var.get())
         self.request_redraw()
+
+    def apply_transform_smooth(self):
+        self.transform_smooth = bool(self.transform_smooth_var.get())
+        quad = getattr(self, "transform_quad", None)
+        if (self.transform_base is not None
+                and self.transform_piece is not None
+                and quad is not None):
+            self._render_transform_quad(quad)
+        else:
+            self.request_redraw()
 
     # --------------------------------------------------------------- rendering
     def checker(self, width, height):
@@ -5000,7 +5014,6 @@ class hex2pixApp(tk.Tk):
         if mode is None:
             mode = self.transform_mode or "move"
         start = self.transform_start_quad
-        piece = self.transform_piece
         grab_x, grab_y = self.transform_grab
         if mode == "scale":
             index = self.transform_corner
@@ -5032,12 +5045,17 @@ class hex2pixApp(tk.Tk):
             quad = quad_move_corner(start, index, x - grab_x, y - grab_y)
         else:
             quad = quad_translate(start, x - grab_x, y - grab_y)
+        self._render_transform_quad(quad)
+
+    def _render_transform_quad(self, quad):
+        """Sample the live piece into `quad` and refresh its preview."""
         self.doc.bitmap = self.transform_base.copy()
         clear_region(self.doc.bitmap, self.transform_mask)
         # Every mode uses the same sampler. In particular, moving a piece
         # that was already rotated must not stamp the unrotated source back.
-        left, top, warped = warp_piece(piece, quad, self.doc.width,
-                                       self.doc.height)
+        left, top, warped = warp_piece(
+            self.transform_piece, quad, self.doc.width, self.doc.height,
+            smooth=bool(getattr(self, "transform_smooth", True)))
         origin = (left, top)
         stamp_bitmap(self.doc.bitmap, warped, origin)
         self.doc.limit_pixels()
