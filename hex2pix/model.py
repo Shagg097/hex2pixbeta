@@ -893,6 +893,222 @@ def _quad_homography(quad, source):
     return [rows[index][8] for index in range(8)]
 
 
+def _opaque_neighbor_count(bitmap, x, y, ignore=None):
+    """How many surrounding pixels are opaque, optionally skipping one."""
+    width, height = bitmap.width, bitmap.height
+    data = bitmap.data
+    count = 0
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if not dx and not dy:
+                continue
+            nx, ny = x + dx, y + dy
+            if (nx, ny) == ignore:
+                continue
+            if 0 <= nx < width and 0 <= ny < height:
+                if data[(ny * width + nx) * 4 + 3]:
+                    count += 1
+    return count
+
+
+def _point_in_quad(quad, x, y, epsilon=1e-9):
+    """Whether a point lies inside a convex quad, including its edges."""
+    positive = negative = False
+    for index in range(4):
+        ax, ay = quad[index]
+        bx, by = quad[(index + 1) % 4]
+        cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+        if cross > epsilon:
+            positive = True
+        elif cross < -epsilon:
+            negative = True
+        if positive and negative:
+            return False
+    return True
+
+
+def _warp_rotated(out, piece, homography, left, top, factor=4):
+    """Fill a rotated bitmap by supersampling each destination pixel.
+
+    Nearest-neighbour sampling at the pixel centre leaves a staircase on a
+    rotated edge: each destination pixel is either fully in or fully out. A
+    factor x factor grid decides coverage and colour by majority instead.
+    The result still uses only source colours, so it cannot introduce blended
+    or random colours, while the boundary no longer jumps by whole pixels.
+    """
+    h0, h1, h2, h3, h4, h5, h6, h7 = homography
+    sw, sh = piece.width, piece.height
+    source = piece.data
+    dst = out.data
+    samples = factor * factor
+    needed = (samples + 1) // 2
+    for y in range(out.height):
+        py = top + y + 0.5
+        row = y * out.width
+        for x in range(out.width):
+            px = left + x + 0.5
+            target = (row + x) * 4
+            # An affine map takes the whole destination pixel to the convex
+            # hull of its four corners. If all four corners land on source
+            # pixels of the same colour, the whole pixel has that colour and
+            # no supersampling is needed. This keeps large interiors fast.
+            corner_colour = None
+            uniform = True
+            for corner_y in (-0.5, 0.5):
+                if not uniform:
+                    break
+                for corner_x in (-0.5, 0.5):
+                    sample_x = px + corner_x
+                    sample_y = py + corner_y
+                    divisor = h6 * sample_x + h7 * sample_y + 1.0
+                    if abs(divisor) < 1e-12:
+                        uniform = False
+                        break
+                    sx = (h0 * sample_x + h1 * sample_y + h2) / divisor
+                    sy = (h3 * sample_x + h4 * sample_y + h5) / divisor
+                    if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                        uniform = False
+                        break
+                    source_index = (int(sy) * sw + int(sx)) * 4
+                    colour = bytes(source[source_index:source_index + 4])
+                    if corner_colour is None:
+                        corner_colour = colour
+                    elif colour != corner_colour:
+                        uniform = False
+                        break
+            if uniform:
+                if corner_colour[3]:
+                    dst[target:target + 4] = corner_colour
+                continue
+            counts = {}
+            opaque = 0
+            for sy_index in range(factor):
+                sample_y = py + (sy_index + 0.5) / factor - 0.5
+                for sx_index in range(factor):
+                    sample_x = px + (sx_index + 0.5) / factor - 0.5
+                    divisor = h6 * sample_x + h7 * sample_y + 1.0
+                    if abs(divisor) < 1e-12:
+                        continue
+                    sx = (h0 * sample_x + h1 * sample_y + h2) / divisor
+                    sy = (h3 * sample_x + h4 * sample_y + h5) / divisor
+                    if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                        continue
+                    source_index = (int(sy) * sw + int(sx)) * 4
+                    if not source[source_index + 3]:
+                        continue
+                    colour = bytes(source[source_index:source_index + 4])
+                    counts[colour] = counts.get(colour, 0) + 1
+                    opaque += 1
+            if opaque < needed:
+                continue
+            colour = max(counts.items(), key=lambda item: (item[1],
+                                                          item[0]))[0]
+            dst[target:target + 4] = colour
+
+
+def _restore_isolated_dots(out, piece, quad, left, top):
+    """Put deliberate single-pixel dots back after supersampling.
+
+    A one-pixel source dot can cover less than half of every destination
+    pixel once it is rotated, so the majority pass would drop it. Isolated
+    source pixels are content, not sampling noise, so map their centre
+    forward and stamp them where the result is still empty.
+    """
+    sw, sh = piece.width, piece.height
+    source = piece.data
+    dst = out.data
+    forward = _quad_homography(
+        [(0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh)),
+         (0.0, float(sh))], quad)
+    if forward is None:
+        return
+    f0, f1, f2, f3, f4, f5, f6, f7 = forward
+    for sy in range(sh):
+        for sx in range(sw):
+            source_index = (sy * sw + sx) * 4
+            if not source[source_index + 3]:
+                continue
+            if _opaque_neighbor_count(piece, sx, sy):
+                continue
+            px = sx + 0.5
+            py = sy + 0.5
+            divisor = f6 * px + f7 * py + 1.0
+            if abs(divisor) < 1e-12:
+                continue
+            dx = (f0 * px + f1 * py + f2) / divisor
+            dy = (f3 * px + f4 * py + f5) / divisor
+            tx = int(math.floor(dx))
+            ty = int(math.floor(dy))
+            if tx < left or tx >= left + out.width:
+                continue
+            if ty < top or ty >= top + out.height:
+                continue
+            target = ((ty - top) * out.width + (tx - left)) * 4
+            if dst[target + 3]:
+                continue
+            dst[target:target + 4] = source[source_index:source_index + 4]
+
+
+def _reconnect_broken_specks(out, piece, quad, homography, left, top):
+    """Nudge isolated rotated pixels back against their neighbours.
+
+    A source pixel connected only diagonally can map to a destination pixel
+    with no neighbours at all. That looks like a stray speck even though the
+    source pixel is real. Move such a pixel one cell to an empty neighbour
+    that touches another pixel, keeping its colour and the pixel count. An
+    intentionally isolated single-pixel dot is left alone.
+    """
+    h0, h1, h2, h3, h4, h5, h6, h7 = homography
+    sw, sh = piece.width, piece.height
+    source = piece.data
+    isolated = []
+    for y in range(out.height):
+        for x in range(out.width):
+            if not out.rgba(x, y)[3]:
+                continue
+            if _opaque_neighbor_count(out, x, y):
+                continue
+            px = left + x + 0.5
+            py = top + y + 0.5
+            divisor = h6 * px + h7 * py + 1.0
+            if abs(divisor) < 1e-12:
+                continue
+            sx = (h0 * px + h1 * py + h2) / divisor
+            sy = (h3 * px + h4 * py + h5) / divisor
+            if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                continue
+            source_index = (int(sy) * sw + int(sx)) * 4
+            if not source[source_index + 3]:
+                continue
+            if not _opaque_neighbor_count(piece, int(sx), int(sy)):
+                # The source was a deliberate lone dot; do not move it.
+                continue
+            isolated.append((x, y))
+    for x, y in isolated:
+        if not out.rgba(x, y)[3] or _opaque_neighbor_count(out, x, y):
+            continue
+        colour = out.rgba(x, y)
+        best = None
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not dx and not dy:
+                    continue
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < out.width and 0 <= ny < out.height):
+                    continue
+                if out.rgba(nx, ny)[3]:
+                    continue
+                if not _point_in_quad(quad, left + nx + 0.5, top + ny + 0.5):
+                    continue
+                count = _opaque_neighbor_count(out, nx, ny,
+                                               ignore=(x, y))
+                if count and (best is None or count > best[0]):
+                    best = (count, nx, ny)
+        if best is not None:
+            out.set_rgba(best[1], best[2], colour)
+            out.set_rgba(x, y, (0, 0, 0, 0))
+
+
 def warp_piece(piece, quad, width, height):
     """Draw the piece into a quadrilateral on a width x height canvas.
 
@@ -932,36 +1148,51 @@ def warp_piece(piece, quad, width, height):
     # would add pixels outside the transform box.
     projective = abs(h6) > 1e-9 or abs(h7) > 1e-9
     epsilon = 1e-9
-    for y in range(top, bottom + 1):
-        py = y + 0.5
-        row = (y - top) * out.width
-        for x in range(left, right + 1):
-            px = x + 0.5
-            divisor = h6 * px + h7 * py + 1.0
-            if abs(divisor) < 1e-12:
-                continue
-            sx = (h0 * px + h1 * py + h2) / divisor
-            sy = (h3 * px + h4 * py + h5) / divisor
-            if projective:
-                # A destination pixel whose centre lands on the source edge
-                # maps to sx == sw or sy == sh. That is the last source
-                # pixel, so clamp the overshoot instead of dropping the
-                # outermost row/column.
-                if (sx < -epsilon or sy < -epsilon
-                        or sx > sw + epsilon or sy > sh + epsilon):
+    rotated = not projective and abs(h1) > 1e-9 and abs(h3) > 1e-9
+    if rotated:
+        # Majority supersampling removes the staircase along an arbitrary
+        # rotation while keeping only source colours. Quarter turns and
+        # integer scaling still land on whole source pixels, so they remain
+        # exact.
+        _warp_rotated(out, piece, homography, left, top)
+        _restore_isolated_dots(out, piece, quad, left, top)
+    else:
+        for y in range(top, bottom + 1):
+            py = y + 0.5
+            row = (y - top) * out.width
+            for x in range(left, right + 1):
+                px = x + 0.5
+                divisor = h6 * px + h7 * py + 1.0
+                if abs(divisor) < 1e-12:
                     continue
-                ix = max(0, min(sw - 1, int(sx)))
-                iy = max(0, min(sh - 1, int(sy)))
-            else:
-                if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                sx = (h0 * px + h1 * py + h2) / divisor
+                sy = (h3 * px + h4 * py + h5) / divisor
+                if projective:
+                    # A destination pixel whose centre lands on the source
+                    # edge maps to sx == sw or sy == sh. That is the last
+                    # source pixel, so clamp the overshoot instead of
+                    # dropping the outermost row/column.
+                    if (sx < -epsilon or sy < -epsilon
+                            or sx > sw + epsilon or sy > sh + epsilon):
+                        continue
+                    ix = max(0, min(sw - 1, int(sx)))
+                    iy = max(0, min(sh - 1, int(sy)))
+                else:
+                    if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                        continue
+                    ix, iy = int(sx), int(sy)
+                source_index = (iy * sw + ix) * 4
+                if not source[source_index + 3]:
                     continue
-                ix, iy = int(sx), int(sy)
-            source_index = (iy * sw + ix) * 4
-            if not source[source_index + 3]:
-                continue
-            target = (row + (x - left)) * 4
-            dst[target:target + 4] = source[source_index:
-                                            source_index + 4]
+                target = (row + (x - left)) * 4
+                dst[target:target + 4] = source[source_index:
+                                                source_index + 4]
+    # A quarter turn or another affine rotation can split a diagonal source
+    # connection into a lone destination speck. Reattach those pixels only
+    # for genuine rotations; translation, scaling and shearing keep their
+    # exact sampling and perspective keeps its pinch-fill behaviour.
+    if rotated:
+        _reconnect_broken_specks(out, piece, quad, homography, left, top)
     # Perspective can make one corner of the source smaller than a destination
     # pixel. Inverse sampling alone would then never visit that source pixel,
     # leaving a hole in the warped piece. Fill a destination pixel that the
