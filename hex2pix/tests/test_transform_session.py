@@ -3,7 +3,7 @@
 import unittest
 
 from hex2pix.app import hex2pixApp
-from hex2pix.model import Document, selection_rect_mask
+from hex2pix.model import Document, quad_from_box, selection_rect_mask
 
 
 RED = (255, 0, 0, 255)
@@ -50,6 +50,32 @@ class _TransformHarness(hex2pixApp):
 
 
 class TransformSessionTests(unittest.TestCase):
+    def test_box_refits_the_selection_when_no_session_is_live(self):
+        document = Document(8, 8)
+        document.selection.apply_mask(
+            selection_rect_mask(8, 8, 2, 3, 5, 6), "replace")
+        app = _TransformHarness(document)
+        app.transform_quad = [(0.0, 0.0), (8.0, 0.0),
+                              (8.0, 8.0), (0.0, 8.0)]
+
+        self.assertEqual(app.transform_display_quad(),
+                         quad_from_box((2, 3, 4, 4)))
+
+        app.transform_base = document.bitmap.copy()
+        self.assertEqual(app.transform_display_quad(), app.transform_quad)
+
+    def test_auto_selection_fits_the_artwork_not_the_canvas(self):
+        document = Document(10, 10)
+        document.bitmap.set_rgba(3, 2, RED)
+        document.bitmap.set_rgba(6, 5, RED)
+        app = _TransformHarness(document)
+
+        hex2pixApp.begin_transform(app, 3, 2, "move")
+
+        self.assertEqual(document.selection.bounds(), (3, 2, 4, 4))
+        self.assertEqual(app.transform_origin_box, (3, 2, 4, 4))
+        self.assertEqual(app.transform_quad, quad_from_box((3, 2, 4, 4)))
+
     def test_second_drag_keeps_source_pixels_and_current_nodes(self):
         document = Document(8, 8)
         for y in range(1, 3):
