@@ -10,7 +10,8 @@ from hex2pix.model import (
     flip_horizontal,
     flip_vertical, flood_fill, format_dump, hex_code, hex_str, hue_shift,
     invert_colors,
-    paint_brush, paint_line, parse_block, parse_hex, parse_hex_map, pick_related,
+    opaque_bounds, paint_brush, paint_line, parse_block, parse_hex,
+    parse_hex_map, pick_related,
     RotationDrag, extract_selection, piece_mask, place_block, rotate90,
     rotate_piece, rotate_ramp, scale_box,
     box_from_quad, quad_centre, quad_from_box, quad_handles,
@@ -1102,6 +1103,17 @@ class QuadGeometryTests(unittest.TestCase):
         self.assertEqual(handles[8], ("rotate", -1, (5.0, -24.0)))
 
 
+class OpaqueBoundsTests(unittest.TestCase):
+    def test_transparent_margins_are_excluded(self):
+        bitmap = Bitmap(6, 5)
+        bitmap.set_rgba(2, 1, RED)
+        bitmap.set_rgba(4, 3, GREEN)
+        self.assertEqual(opaque_bounds(bitmap), (2, 1, 3, 3))
+
+    def test_empty_bitmap_has_no_bounds(self):
+        self.assertIsNone(opaque_bounds(Bitmap(4, 4)))
+
+
 class WarpPieceTests(unittest.TestCase):
     def piece(self):
         bitmap = Bitmap(2, 2)
@@ -1175,6 +1187,51 @@ class WarpPieceTests(unittest.TestCase):
         self.assertEqual(warped.rgba(3, 0), GREEN)
         self.assertEqual(warped.rgba(1, 3), BLUE)
         self.assertEqual(warped.rgba(2, 3), (255, 255, 255, 255))
+
+    def test_affine_transforms_do_not_grow_a_fringe(self):
+        piece = Bitmap(4, 4)
+        for y in range(4):
+            for x in range(4):
+                piece.set_rgba(x, y, RED)
+        quads = [
+            quad_from_box((0, 0, 8, 8)),
+            quad_rotate(quad_from_box((0, 0, 4, 4)), (2.0, 2.0), 30),
+            quad_shear(quad_from_box((0, 0, 4, 4)), 0, 2),
+        ]
+
+        for quad in quads:
+            left, top, warped = warp_piece(piece, quad, 20, 20)
+
+            def inside(x, y):
+                signs = []
+                for index in range(4):
+                    ax, ay = quad[index]
+                    bx, by = quad[(index + 1) % 4]
+                    signs.append((bx - ax) * (y - ay)
+                                 - (by - ay) * (x - ax))
+                return (all(value >= -1e-9 for value in signs)
+                        or all(value <= 1e-9 for value in signs))
+
+            for y in range(warped.height):
+                for x in range(warped.width):
+                    if warped.rgba(x, y)[3]:
+                        self.assertTrue(inside(left + x + 0.5,
+                                               top + y + 0.5))
+
+    def test_perspective_pinch_keeps_the_last_source_pixel(self):
+        piece = Bitmap(2, 2)
+        colours = [(50, 20, 0, 255), (110, 20, 0, 255),
+                   (50, 80, 0, 255), (110, 80, 0, 255)]
+        for y in range(2):
+            for x in range(2):
+                piece.set_rgba(x, y, colours[y * 2 + x])
+        # The bottom-right corner is pinched enough that inverse sampling
+        # alone never lands on that source pixel.
+        quad = [(0.0, 4.0), (13.0, 2.0), (8.0, 10.0), (5.0, 13.0)]
+        _, _, warped = warp_piece(piece, quad, 16, 16)
+        seen = set(warped.rgba(x, y) for y in range(warped.height)
+                   for x in range(warped.width) if warped.rgba(x, y)[3])
+        self.assertEqual(seen, set(colours))
 
 
 if __name__ == "__main__":
