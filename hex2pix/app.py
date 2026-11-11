@@ -51,7 +51,8 @@ from .model import (
     apply_ramp, block_from_bitmap, clear_region, extract_selection,
     flip_horizontal, flip_vertical, flood_fill, format_dump, hex_code, hex_str,
     clean_path, invert_colors, paint_brush, paint_line, parse_block,
-    parse_hex, parse_hex_map, pick_related, piece_mask, place_block, rotate90,
+    opaque_bounds, parse_hex, parse_hex_map, pick_related, piece_mask,
+    place_block, rotate90,
     box_from_quad, quad_centre, quad_from_box, quad_handles,
     quad_move_corner, quad_rotate, quad_scale, quad_shear, quad_translate,
     warp_piece,
@@ -4151,8 +4152,14 @@ class hex2pixApp(tk.Tk):
         return image
 
     def transform_display_quad(self):
-        """The quad the node box shows: the live drag, or the selection."""
-        if self.transform_quad is not None:
+        """The quad the node box shows: the live drag, or the selection.
+
+        A transform session keeps its quad across separate node drags. Once
+        the session has ended, the selection is authoritative, so a stale
+        quad from an earlier document or selection cannot leave the node box
+        sitting somewhere other than the selected pixels.
+        """
+        if self.transform_base is not None and self.transform_quad is not None:
             return list(self.transform_quad)
         bounds = self.doc.selection.bounds()
         return quad_from_box(bounds) if bounds else None
@@ -4628,6 +4635,27 @@ class hex2pixApp(tk.Tk):
         self.zoom_fit()
 
     # ------------------------------------------------------------------- tools
+    def ensure_transform_selection(self):
+        """Selection bounds for a transform, fitting an auto-selection to art.
+
+        With nothing selected, the layer is selected automatically. That
+        automatic selection covers the opaque artwork rather than the whole
+        canvas, so the node box fits the image instead of empty margins.
+        """
+        bounds = self.doc.selection.bounds()
+        if bounds:
+            return bounds
+        bounds = opaque_bounds(self.doc.bitmap)
+        if bounds:
+            left, top, width, height = bounds
+            mask = selection_rect_mask(self.doc.width, self.doc.height,
+                                       left, top, left + width - 1,
+                                       top + height - 1)
+            self.doc.selection.apply_mask(mask, "replace")
+        else:
+            self.doc.selection.select_all()
+        return self.doc.selection.bounds()
+
     def set_tool(self, name):
         if name == "jumble":       # the tool's name before it became Shuffle
             name = "shuffle"
@@ -4642,9 +4670,13 @@ class hex2pixApp(tk.Tk):
         self.stop_spray()
         self.tool = name
         self.tool_var.set(name)
-        if name == "transform" and not self.doc.selection.bounds():
-            # Move / Scale works on the whole layer until a selection exists.
-            self.doc.selection.select_all()
+        if name == "transform" and self.transform_base is None:
+            # The box follows the current selection, not a stale session.
+            self.transform_quad = None
+            self.transform_start_quad = None
+            self.transform_origin_quad = None
+            self.transform_box = None
+            self.ensure_transform_selection()
             if hasattr(self, "sel_info"):
                 self.refresh_bytes()
         self.refresh_tool_buttons()
@@ -4915,13 +4947,9 @@ class hex2pixApp(tk.Tk):
                                   "to shear, and the top handle to rotate.")
                 return
         else:
-            bounds = self.doc.selection.bounds()
+            bounds = self.ensure_transform_selection()
             if not bounds:
-                # Nothing selected: the whole layer is the piece.
-                self.doc.selection.select_all()
-                bounds = self.doc.selection.bounds()
-                if not bounds:
-                    return
+                return
             if mode == "move" and not self.doc.selection.get(x, y):
                 self.report_error("Drag from inside the selection to move it, "
                                   "the corner nodes to scale, the edge nodes "
@@ -5099,13 +5127,9 @@ class hex2pixApp(tk.Tk):
         """Enter with the move tool: put the selection's corner at the cursor."""
         if self.transform_base is not None:
             self.finish_transform()
-        bounds = self.doc.selection.bounds()
+        bounds = self.ensure_transform_selection()
         if not bounds:
-            # Nothing selected: Enter moves the whole layer.
-            self.doc.selection.select_all()
-            bounds = self.doc.selection.bounds()
-            if not bounds:
-                return
+            return
         piece = extract_selection(self.doc.bitmap, self.doc.selection.mask,
                                   bounds)
         before = self.doc.begin()
@@ -7439,6 +7463,19 @@ class hex2pixApp(tk.Tk):
         self.transform_base = None
         self.transform_piece = None
         self.transform_before = None
+        self.transform_mask = None
+        self.transform_box = None
+        self.transform_origin_box = None
+        self.transform_start_quad = None
+        self.transform_origin_quad = None
+        self.transform_quad = None
+        self.transform_corner = None
+        self.transform_edge = None
+        self.transform_grab = None
+        self.transform_fixed = None
+        self.transform_rotation = None
+        self.transform_handle_kind = None
+        self.transform_handle_index = None
         self.stroke_before = None
         self.drag_anchor = None
         self.poly_points = []

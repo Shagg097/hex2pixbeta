@@ -356,6 +356,28 @@ def clip(rect, bounds):
     return (x1, y1, max(0, x2 - x1), max(0, y2 - y1))
 
 
+def opaque_bounds(bitmap):
+    """The bounding box of the bitmap's non-transparent pixels, or None."""
+    width, height = bitmap.width, bitmap.height
+    data = bitmap.data
+    left, top = width, height
+    right, bottom = -1, -1
+    for y in range(height):
+        base = y * width * 4
+        for x in range(width):
+            if data[base + x * 4 + 3]:
+                if x < left:
+                    left = x
+                if x > right:
+                    right = x
+                if y < top:
+                    top = y
+                bottom = y
+    if right < left or bottom < top:
+        return None
+    return (left, top, right - left + 1, bottom - top + 1)
+
+
 def blit(data, rect, block, mode="stamp", origin=None, mirror=False, mask=None):
     """Draw `block` into an RGBA bytearray covering `rect`.
 
@@ -903,6 +925,13 @@ def warp_piece(piece, quad, width, height):
     if homography is None:
         return left, top, Bitmap(1, 1)
     h0, h1, h2, h3, h4, h5, h6, h7 = homography
+    # h6 and h7 are the projective terms. Scaling, rotation and shearing are
+    # affine, so they keep the strict edge test below and stay exact. Only a
+    # real perspective quad needs the boundary clamp and forward fill that
+    # keep pinched source pixels alive; applying those to affine transforms
+    # would add pixels outside the transform box.
+    projective = abs(h6) > 1e-9 or abs(h7) > 1e-9
+    epsilon = 1e-9
     for y in range(top, bottom + 1):
         py = y + 0.5
         row = (y - top) * out.width
@@ -913,15 +942,57 @@ def warp_piece(piece, quad, width, height):
                 continue
             sx = (h0 * px + h1 * py + h2) / divisor
             sy = (h3 * px + h4 * py + h5) / divisor
-            if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
-                continue
-            ix, iy = int(sx), int(sy)
+            if projective:
+                # A destination pixel whose centre lands on the source edge
+                # maps to sx == sw or sy == sh. That is the last source
+                # pixel, so clamp the overshoot instead of dropping the
+                # outermost row/column.
+                if (sx < -epsilon or sy < -epsilon
+                        or sx > sw + epsilon or sy > sh + epsilon):
+                    continue
+                ix = max(0, min(sw - 1, int(sx)))
+                iy = max(0, min(sh - 1, int(sy)))
+            else:
+                if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                    continue
+                ix, iy = int(sx), int(sy)
             source_index = (iy * sw + ix) * 4
             if not source[source_index + 3]:
                 continue
             target = (row + (x - left)) * 4
             dst[target:target + 4] = source[source_index:
                                             source_index + 4]
+    # Perspective can make one corner of the source smaller than a destination
+    # pixel. Inverse sampling alone would then never visit that source pixel,
+    # leaving a hole in the warped piece. Fill a destination pixel that the
+    # forward map reaches and inverse sampling missed. This is deliberately
+    # limited to projective quads so affine scaling/rotation/shear cannot grow
+    # an extra fringe around the box.
+    if projective:
+        forward = _quad_homography(corners, quad)
+        if forward is not None:
+            f0, f1, f2, f3, f4, f5, f6, f7 = forward
+            for iy in range(sh):
+                sy = iy + 0.5
+                for ix in range(sw):
+                    source_index = (iy * sw + ix) * 4
+                    if not source[source_index + 3]:
+                        continue
+                    sx = ix + 0.5
+                    divisor = f6 * sx + f7 * sy + 1.0
+                    if abs(divisor) < 1e-12:
+                        continue
+                    dx = (f0 * sx + f1 * sy + f2) / divisor
+                    dy = (f3 * sx + f4 * sy + f5) / divisor
+                    tx = int(math.floor(dx))
+                    ty = int(math.floor(dy))
+                    if tx < left or tx > right or ty < top or ty > bottom:
+                        continue
+                    target = ((ty - top) * out.width + (tx - left)) * 4
+                    if dst[target + 3]:
+                        continue
+                    dst[target:target + 4] = source[source_index:
+                                                    source_index + 4]
     return left, top, out
 
 
