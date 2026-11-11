@@ -626,12 +626,13 @@ def rotate90(bitmap, clockwise=True):
     return out
 
 
-def rotate_piece(bitmap, degrees):
+def rotate_piece(bitmap, degrees, smooth=False):
     """Rotate a bitmap clockwise by any angle, keeping the whole piece.
 
-    Nearest-neighbour sampling around the centre; the result is the bounding
-    box of the rotated rectangle, so nothing is cropped and quarter turns are
-    exact.
+    Sampling is around the centre and the result is the bounding box of the
+    rotated rectangle, so nothing is cropped and quarter turns are exact.
+    Free rotations use nearest-neighbour edges by default; pass `smooth=True`
+    for supersampled edges.
     """
     angle = float(degrees) % 360.0
     if not angle:
@@ -660,7 +661,8 @@ def rotate_piece(bitmap, degrees):
     out_w = max(1, int(math.ceil(max(x for x, _y in points) - left - 1e-9)))
     out_h = max(1, int(math.ceil(max(y for _x, y in points) - top - 1e-9)))
     quad = [(x - left, y - top) for x, y in points]
-    _left, _top, out = warp_piece(bitmap, quad, out_w, out_h)
+    _left, _top, out = warp_piece(bitmap, quad, out_w, out_h,
+                                  smooth=smooth)
     return out
 
 
@@ -927,21 +929,29 @@ def _point_in_quad(quad, x, y, epsilon=1e-9):
     return True
 
 
-def _warp_rotated(out, piece, homography, left, top, factor=4):
-    """Fill a rotated bitmap by supersampling each destination pixel.
+def _warp_smooth(out, piece, homography, left, top, factor=4):
+    """Fill a transformed bitmap with partially transparent edge pixels.
 
     Nearest-neighbour sampling at the pixel centre leaves a staircase on a
     rotated edge: each destination pixel is either fully in or fully out. A
-    factor x factor grid decides coverage and colour by majority instead.
-    The result still uses only source colours, so it cannot introduce blended
-    or random colours, while the boundary no longer jumps by whole pixels.
+    factor x factor grid measures opaque coverage and gives edge pixels a
+    matching alpha, so they blend with what is underneath instead of adding
+    another solid step. The result still uses only source RGB colours.
     """
     h0, h1, h2, h3, h4, h5, h6, h7 = homography
     sw, sh = piece.width, piece.height
     source = piece.data
     dst = out.data
     samples = factor * factor
-    needed = (samples + 1) // 2
+    # Deliberate one-pixel source dots are restored exactly afterwards. Skip
+    # them here so they cannot turn into a cloud of faint edge samples.
+    isolated = set()
+    for sy in range(sh):
+        for sx in range(sw):
+            source_index = (sy * sw + sx) * 4
+            if (source[source_index + 3]
+                    and not _opaque_neighbor_count(piece, sx, sy)):
+                isolated.add((sx, sy))
     for y in range(out.height):
         py = top + y + 0.5
         row = y * out.width
@@ -981,7 +991,7 @@ def _warp_rotated(out, piece, homography, left, top, factor=4):
                     dst[target:target + 4] = corner_colour
                 continue
             counts = {}
-            opaque = 0
+            alpha_sum = 0
             for sy_index in range(factor):
                 sample_y = py + (sy_index + 0.5) / factor - 0.5
                 for sx_index in range(factor):
@@ -993,26 +1003,34 @@ def _warp_rotated(out, piece, homography, left, top, factor=4):
                     sy = (h3 * sample_x + h4 * sample_y + h5) / divisor
                     if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
                         continue
-                    source_index = (int(sy) * sw + int(sx)) * 4
-                    if not source[source_index + 3]:
+                    ix, iy = int(sx), int(sy)
+                    if (ix, iy) in isolated:
                         continue
-                    colour = bytes(source[source_index:source_index + 4])
+                    source_index = (iy * sw + ix) * 4
+                    alpha = source[source_index + 3]
+                    if not alpha:
+                        continue
+                    colour = bytes(source[source_index:source_index + 3])
                     counts[colour] = counts.get(colour, 0) + 1
-                    opaque += 1
-            if opaque < needed:
+                    alpha_sum += alpha
+            if not counts:
                 continue
             colour = max(counts.items(), key=lambda item: (item[1],
                                                           item[0]))[0]
-            dst[target:target + 4] = colour
+            alpha = alpha_sum // samples
+            if not alpha:
+                continue
+            dst[target:target + 3] = colour
+            dst[target + 3] = alpha
 
 
 def _restore_isolated_dots(out, piece, quad, left, top):
     """Put deliberate single-pixel dots back after supersampling.
 
-    A one-pixel source dot can cover less than half of every destination
-    pixel once it is rotated, so the majority pass would drop it. Isolated
-    source pixels are content, not sampling noise, so map their centre
-    forward and stamp them where the result is still empty.
+    A one-pixel source dot can cover only a fraction of every destination
+    pixel once it is rotated, so the supersampling pass would drop it.
+    Isolated source pixels are content, not sampling noise, so map their
+    centre forward and stamp them where the result is still empty.
     """
     sw, sh = piece.width, piece.height
     source = piece.data
@@ -1109,14 +1127,15 @@ def _reconnect_broken_specks(out, piece, quad, homography, left, top):
             out.set_rgba(x, y, (0, 0, 0, 0))
 
 
-def warp_piece(piece, quad, width, height):
+def warp_piece(piece, quad, width, height, smooth=False):
     """Draw the piece into a quadrilateral on a width x height canvas.
 
     A single projective map samples every destination pixel back into the
     source, so any convex quad works: scaling, shearing, rotation and
-    perspective all go through the same path. Pixels outside the canvas or
-    the quad stay transparent. Returns (left, top, bitmap) for the clipped
-    box to stamp.
+    perspective all go through the same path. Transforms use exact
+    nearest-neighbour sampling by default; pass `smooth=True` for
+    partial-alpha supersampled edges. Pixels outside the canvas or the quad
+    stay transparent. Returns (left, top, bitmap) for the clipped box to stamp.
     """
     if len(quad) != 4:
         raise HexError("a transform box needs four corners")
@@ -1149,12 +1168,11 @@ def warp_piece(piece, quad, width, height):
     projective = abs(h6) > 1e-9 or abs(h7) > 1e-9
     epsilon = 1e-9
     rotated = not projective and abs(h1) > 1e-9 and abs(h3) > 1e-9
-    if rotated:
-        # Majority supersampling removes the staircase along an arbitrary
-        # rotation while keeping only source colours. Quarter turns and
-        # integer scaling still land on whole source pixels, so they remain
-        # exact.
-        _warp_rotated(out, piece, homography, left, top)
+    if smooth and not projective:
+        # Coverage supersampling softens transformed edges while keeping only
+        # source RGB colours. Translation and integer scaling still land on
+        # whole source pixels, so they remain exact.
+        _warp_smooth(out, piece, homography, left, top)
         _restore_isolated_dots(out, piece, quad, left, top)
     else:
         for y in range(top, bottom + 1):
@@ -1191,7 +1209,7 @@ def warp_piece(piece, quad, width, height):
     # connection into a lone destination speck. Reattach those pixels only
     # for genuine rotations; translation, scaling and shearing keep their
     # exact sampling and perspective keeps its pinch-fill behaviour.
-    if rotated:
+    if rotated and smooth:
         _reconnect_broken_specks(out, piece, quad, homography, left, top)
     # Perspective can make one corner of the source smaller than a destination
     # pixel. Inverse sampling alone would then never visit that source pixel,

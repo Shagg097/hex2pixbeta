@@ -337,15 +337,19 @@ intersect. Right-drag a selection tool subtracts.
 The **Move / Scale** tool turns a selection into a floating piece: drag inside
 it to move those pixels (the original area is cleared), hold **Shift** while
 dragging to scale them from the corner opposite the one you grabbed, hold
-**Ctrl** to rotate them around their centre in 15° steps (nearest-neighbour
-sampling, so quarter turns are exact), or press `Enter` to drop the piece with
-its corner on the cursor. `Escape` puts the piece back untouched. Scaling is
+**Ctrl** to rotate them around their centre in 15° steps, or press `Enter` to
+drop the piece with its corner on the cursor. `Escape` puts the piece back
+untouched. Scaling is
 uniform and anchored: one factor drives both axes, the opposite corner stays
 put, and the drag starts from whatever size the piece already has, so it
 cannot squash the artwork or collapse on the first pixel of movement. A
 rotation grab inside the middle three pixels holds the current angle until
 the pointer leaves that dead zone, so a click near the centre cannot spin the
-piece. The selection follows the pixels, and the whole drag is one undo step.
+piece. Transforms use exact nearest-neighbour pixels by default; turn on
+**Smooth edges** in the tool options to soften rotated and fractionally scaled
+edges with partial-transparent pixels. Quarter turns and whole-pixel moves
+stay exact either way. The selection follows the pixels, and the whole drag
+is one undo step.
 
 The **Dump** tab shows the selected bytes as `offset  RRGGBBAA` rows, with the
 selection's pixel count and byte count. **Copy dump** puts that text on the
@@ -419,7 +423,7 @@ state the tool uses:
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
 | Lasso | selection mode and Smooth path |
 | Wand, Similar | Tolerance, Ignore alpha |
-| Move / Scale | Rotate snap in degrees |
+| Move / Scale | Rotate snap in degrees, Smooth edges |
 | Hand | zoom out, zoom in and Zoom to fit |
 
 Brush size, tip, mirror and tolerance also stay in the left column.
