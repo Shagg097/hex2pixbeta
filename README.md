@@ -277,9 +277,11 @@ perspective quad. `Shift`+drag still scales and `Ctrl`+drag still rotates from
 anywhere. Scaling keeps the piece's proportions and holds the opposite corner
 still, so a drag can neither squash the artwork nor flip it, and rotation only
 starts once the pointer leaves the middle, so grabbing the centre cannot spin
-the piece wildly. Press `Enter` to drop it at the cursor and `Escape` to put
-it back. The selection follows the pixels, and the whole operation is one undo
-step.
+the piece wildly. **Smooth edges** is off by default for exact nearest-neighbour
+pixels; turn it on in the tool options to soften rotated and fractionally
+scaled edges with partially transparent pixels. Press `Enter` to drop it at
+the cursor and `Escape` to put it back. The selection follows the pixels, and
+the whole operation is one undo step.
 
 Polygon and lasso paths are filled solid, including enclosed pockets, so a
 self-crossing outline cannot leave holes in the mask.

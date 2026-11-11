@@ -363,20 +363,23 @@ clipboard** and **Copy to pattern**.
 The **Move / Scale** tool turns a selection into a floating piece and draws a
 node box around it: four corner nodes scale from the opposite corner, four
 edge nodes shear that edge, and the round handle above the box rotates around
-the centre in 15° steps (nearest-neighbour sampling, so quarter turns are
-exact). Dragging inside the box moves the pixels, holding **Shift** scales from
-anywhere and holding **Ctrl** rotates from anywhere. Right-click inside the
-selection while the tool is active and tick **Perspective nodes** to drag each
-corner on its own and warp the piece into a perspective quad; the mode also
-has a checkbox in the tool options bar. `Enter` drops the piece with its
-corner on the cursor and `Escape` puts it back untouched. Scaling is uniform
-and anchored: one factor drives both axes, the opposite corner stays put, and
-the drag starts from whatever size the piece already has, so it cannot squash
-the artwork or collapse on the first pixel of movement. A rotation grab inside
-the middle three pixels holds the current angle until the pointer leaves that
-dead zone, so a click near the centre cannot spin the piece. The node box is
-drawn in both pixel and hex view. The selection follows the pixels, and the
-whole drag is one undo step.
+the centre in 15° steps. Dragging inside the box moves the pixels, holding
+**Shift** scales from anywhere and holding **Ctrl** rotates from anywhere.
+Right-click inside the selection while the tool is active and tick
+**Perspective nodes** to drag each corner on its own and warp the piece into a
+perspective quad; the mode also has a checkbox in the tool options bar.
+`Enter` drops the piece with its corner on the cursor and `Escape` puts it
+back untouched. Scaling is uniform and anchored: one factor drives both axes,
+the opposite corner stays put, and the drag starts from whatever size the
+piece already has, so it cannot squash the artwork or collapse on the first
+pixel of movement. A rotation grab inside the middle three pixels holds the
+current angle until the pointer leaves that dead zone, so a click near the
+centre cannot spin the piece. Transforms use exact nearest-neighbour pixels by
+default; turn on **Smooth edges** in the tool options to soften rotated and
+fractionally scaled edges with partially transparent pixels. Quarter turns
+and whole-pixel moves stay exact either way. The node box is drawn in both
+pixel and hex view. The selection follows the pixels, and the whole drag is
+one undo step.
 
 The **Dump** tab shows the selected bytes as `offset  RRGGBBAA` rows, with the
 selection's pixel count and byte count. **Copy dump** puts that text on the
@@ -483,7 +486,7 @@ state the tool uses:
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
 | Lasso | selection mode and Smooth path |
 | Wand, Similar | Tolerance, Ignore alpha |
-| Move / Scale | Rotate snap in degrees, Perspective nodes |
+| Move / Scale | Rotate snap in degrees, Perspective nodes, Smooth edges |
 | Hand | zoom out, zoom in and Zoom to fit |
 
 Brush size, tip, mirror and tolerance also stay in the left column.

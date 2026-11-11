@@ -979,6 +979,80 @@ class RotationTests(unittest.TestCase):
                      if turned.rgba(x, y)[3])
         self.assertEqual(opaque, 8)
 
+    def test_rotation_is_nearest_neighbour_by_default(self):
+        piece = Bitmap(8, 8)
+        piece.fill(RED)
+        default = rotate_piece(piece, 15)
+        hard = rotate_piece(piece, 15, smooth=False)
+        smooth = rotate_piece(piece, 15, smooth=True)
+        self.assertEqual(default.data, hard.data)
+        self.assertNotEqual(default.data, smooth.data)
+
+    def test_smoothing_rounds_a_solid_rotation(self):
+        piece = Bitmap(8, 8)
+        piece.fill(RED)
+        smooth = rotate_piece(piece, 15, smooth=True)
+        hard = rotate_piece(piece, 15, smooth=False)
+        smooth_opaque = sum(1 for y in range(smooth.height)
+                            for x in range(smooth.width)
+                            if smooth.rgba(x, y)[3])
+        hard_opaque = sum(1 for y in range(hard.height)
+                          for x in range(hard.width)
+                          if hard.rgba(x, y)[3])
+        smooth_alpha = [smooth.rgba(x, y)[3]
+                        for y in range(smooth.height)
+                        for x in range(smooth.width)]
+        self.assertNotEqual(smooth.data, hard.data)
+        self.assertGreater(smooth_opaque, hard_opaque)
+        self.assertTrue(any(0 < alpha < 255 for alpha in smooth_alpha))
+        self.assertFalse(any(0 < hard.rgba(x, y)[3] < 255
+                             for y in range(hard.height)
+                             for x in range(hard.width)))
+
+    def test_smoothing_can_be_turned_off(self):
+        piece = Bitmap(8, 8)
+        for y in range(8):
+            for x in range(8):
+                piece.set_rgba(x, y, RED if (x + y) % 2 else BLUE)
+        smooth = rotate_piece(piece, 45, smooth=True)
+        hard = rotate_piece(piece, 45, smooth=False)
+
+        smooth_pixels = [smooth.rgba(x, y)
+                         for y in range(smooth.height)
+                         for x in range(smooth.width)]
+        hard_pixels = [hard.rgba(x, y)
+                       for y in range(hard.height)
+                       for x in range(hard.width)]
+        self.assertNotEqual(smooth_pixels, hard_pixels)
+        self.assertEqual(set(hard_pixels) - {(0, 0, 0, 0)},
+                         {RED, BLUE})
+
+    def test_smoothing_off_skips_supersampling(self):
+        piece = Bitmap(4, 4)
+        piece.fill(RED)
+        original = model._warp_smooth
+        called = []
+
+        def fail(*_args, **_kwargs):
+            called.append(True)
+            raise AssertionError("supersampling was used")
+
+        model._warp_smooth = fail
+        try:
+            rotate_piece(piece, 45, smooth=False)
+        finally:
+            model._warp_smooth = original
+        self.assertEqual(called, [])
+
+    def test_quarter_turn_stays_exact_with_smoothing_off(self):
+        piece = Bitmap(2, 1)
+        piece.set_rgba(0, 0, RED)
+        piece.set_rgba(1, 0, GREEN)
+        turned = rotate_piece(piece, 90, smooth=False)
+        self.assertEqual((turned.width, turned.height), (1, 2))
+        self.assertEqual(turned.rgba(0, 0), RED)
+        self.assertEqual(turned.rgba(0, 1), GREEN)
+
 
 class ScaleBoxTests(unittest.TestCase):
     def test_first_movement_keeps_the_piece_as_it_was(self):
@@ -1143,6 +1217,27 @@ class WarpPieceTests(unittest.TestCase):
         self.assertEqual(warped.rgba(0, 2), BLUE)
         self.assertEqual(warped.rgba(3, 3), (255, 255, 255, 255))
 
+    def test_smoothing_softens_a_fractional_scale(self):
+        piece = Bitmap(4, 4)
+        piece.fill(RED)
+        quad = quad_from_box((0.5, 0.5, 6, 6))
+        _, _, hard = warp_piece(piece, quad, 8, 8, smooth=False)
+        _, _, smooth = warp_piece(piece, quad, 8, 8, smooth=True)
+        self.assertTrue(any(0 < smooth.rgba(x, y)[3] < 255
+                            for y in range(smooth.height)
+                            for x in range(smooth.width)))
+        self.assertFalse(any(0 < hard.rgba(x, y)[3] < 255
+                             for y in range(hard.height)
+                             for x in range(hard.width)))
+
+    def test_smoothing_does_not_blur_a_whole_pixel_move(self):
+        piece = Bitmap(4, 4)
+        piece.fill(RED)
+        quad = quad_from_box((2, 2, 4, 4))
+        _, _, hard = warp_piece(piece, quad, 8, 8, smooth=False)
+        _, _, smooth = warp_piece(piece, quad, 8, 8, smooth=True)
+        self.assertEqual(smooth.data, hard.data)
+
     def test_clipped_quad_returns_the_visible_box(self):
         _, _, warped = warp_piece(self.piece(),
                                   quad_from_box((-2, -2, 4, 4)), 8, 8)
@@ -1223,13 +1318,13 @@ class WarpPieceTests(unittest.TestCase):
         piece.set_rgba(0, 0, RED)
         piece.set_rgba(1, 0, GREEN)
         piece.set_rgba(2, 1, BLUE)
-        turned = rotate_piece(piece, 45)
+        turned = rotate_piece(piece, 45, smooth=True)
         opaque = [(x, y) for y in range(turned.height)
                   for x in range(turned.width)
                   if turned.rgba(x, y)[3]]
         self.assertTrue(opaque)
-        self.assertEqual(set(turned.rgba(x, y) for x, y in opaque),
-                         {RED, GREEN, BLUE})
+        self.assertEqual(set(turned.rgba(x, y)[:3] for x, y in opaque),
+                         {colour[:3] for colour in (RED, GREEN, BLUE)})
         for x, y in opaque:
             self.assertTrue(any(0 <= x + dx < turned.width
                                 and 0 <= y + dy < turned.height
@@ -1241,7 +1336,7 @@ class WarpPieceTests(unittest.TestCase):
     def test_rotation_keeps_an_intentional_single_pixel(self):
         piece = Bitmap(3, 3)
         piece.set_rgba(1, 1, RED)
-        turned = rotate_piece(piece, 45)
+        turned = rotate_piece(piece, 45, smooth=True)
         opaque = [(x, y) for y in range(turned.height)
                   for x in range(turned.width)
                   if turned.rgba(x, y)[3]]

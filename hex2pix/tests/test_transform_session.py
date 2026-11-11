@@ -2,11 +2,20 @@
 
 import unittest
 
+from hex2pix import app as app_module
 from hex2pix.app import hex2pixApp
-from hex2pix.model import Document, quad_from_box, selection_rect_mask
+from hex2pix.model import Bitmap, Document, quad_from_box, selection_rect_mask
 
 
 RED = (255, 0, 0, 255)
+
+
+class _ValueVar(object):
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
 
 
 class _TransformHarness(hex2pixApp):
@@ -33,6 +42,7 @@ class _TransformHarness(hex2pixApp):
         self.transform_handle_kind = None
         self.transform_handle_index = None
         self.transform_perspective = False
+        self.transform_smooth = False
         self.rotate_snap = 15
         self._hex_incremental_ok = True
 
@@ -141,6 +151,32 @@ class TransformSessionTests(unittest.TestCase):
 
         self.assertEqual(app.transform_quad, [
             (-7.0, -6.0), (1.0, -6.0), (1.0, 2.0), (-7.0, 2.0)])
+
+    def test_smooth_toggle_reaches_the_sampler(self):
+        document = Document(8, 8)
+        document.bitmap.fill(RED)
+        document.selection.select_all()
+        app = _TransformHarness(document)
+        app.transform_smooth = True
+        app.transform_smooth_var = _ValueVar(True)
+        seen = []
+        original = app_module.warp_piece
+
+        def fake(piece, quad, width, height, smooth=True):
+            seen.append(smooth)
+            return 0, 0, Bitmap(1, 1)
+
+        app_module.warp_piece = fake
+        try:
+            hex2pixApp.begin_transform(app, 4, 4, "move")
+            hex2pixApp.apply_transform(app, 5, 5, "move")
+            app.transform_smooth_var.value = False
+            hex2pixApp.apply_transform_smooth(app)
+        finally:
+            app_module.warp_piece = original
+
+        self.assertEqual(seen, [True, False])
+        self.assertFalse(app.transform_smooth)
 
 
 if __name__ == "__main__":
