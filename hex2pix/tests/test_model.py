@@ -1218,6 +1218,35 @@ class WarpPieceTests(unittest.TestCase):
                         self.assertTrue(inside(left + x + 0.5,
                                                top + y + 0.5))
 
+    def test_rotation_keeps_a_diagonal_pixel_attached(self):
+        piece = Bitmap(3, 3)
+        piece.set_rgba(0, 0, RED)
+        piece.set_rgba(1, 0, GREEN)
+        piece.set_rgba(2, 1, BLUE)
+        turned = rotate_piece(piece, 45)
+        opaque = [(x, y) for y in range(turned.height)
+                  for x in range(turned.width)
+                  if turned.rgba(x, y)[3]]
+        self.assertTrue(opaque)
+        self.assertEqual(set(turned.rgba(x, y) for x, y in opaque),
+                         {RED, GREEN, BLUE})
+        for x, y in opaque:
+            self.assertTrue(any(0 <= x + dx < turned.width
+                                and 0 <= y + dy < turned.height
+                                and turned.rgba(x + dx, y + dy)[3]
+                                for dy in (-1, 0, 1)
+                                for dx in (-1, 0, 1)
+                                if dx or dy))
+
+    def test_rotation_keeps_an_intentional_single_pixel(self):
+        piece = Bitmap(3, 3)
+        piece.set_rgba(1, 1, RED)
+        turned = rotate_piece(piece, 45)
+        opaque = [(x, y) for y in range(turned.height)
+                  for x in range(turned.width)
+                  if turned.rgba(x, y)[3]]
+        self.assertEqual(len(opaque), 1)
+
     def test_perspective_pinch_keeps_the_last_source_pixel(self):
         piece = Bitmap(2, 2)
         colours = [(50, 20, 0, 255), (110, 20, 0, 255),
