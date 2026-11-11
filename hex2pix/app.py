@@ -3702,8 +3702,6 @@ class hex2pixApp(tk.Tk):
 
     def apply_transform_perspective(self):
         self.transform_perspective = bool(self.transform_perspective_var.get())
-        if self.transform_base is not None:
-            self.finish_transform()
         self.request_redraw()
 
     # --------------------------------------------------------------- rendering
@@ -3737,6 +3735,7 @@ class hex2pixApp(tk.Tk):
         whatever the canvas size.
         """
         self.view.delete("hex")
+        self.view.delete("transform")
         width, height = self.doc.width, self.doc.height
         zoom = max(self.min_zoom(), float(self.zoom))
         full_w = max(1, int(round(width * zoom)))
@@ -3774,8 +3773,6 @@ class hex2pixApp(tk.Tk):
         if self.grid and zoom >= 6:
             image = self.grid_overlay(image, cw, ch, zoom)
         image = self.polygon_overlay(image, zoom, (ox, oy))
-        if self.tool == "transform":
-            image = self.transform_overlay(image, zoom, (ox, oy))
         image = self.keyboard_overlay(image, zoom, (ox, oy))
         image = self.cursor_overlay(image, zoom, (ox, oy))
         photo = getattr(self, "_photo", None)
@@ -3786,6 +3783,7 @@ class hex2pixApp(tk.Tk):
         # Switching from hex clears the item, so re-attach it on every draw.
         self.view.itemconfig(self.view_image, image=self._photo)
         self.view.coords(self.view_image, ox, oy)
+        self.draw_transform_overlay()
 
     def _fit_scrollregion(self, width, height):
         """Centre the canvas and leave room to drag the camera anywhere."""
@@ -3874,6 +3872,7 @@ class hex2pixApp(tk.Tk):
         """
         view = self.view
         view.delete("hex")
+        view.delete("transform")
         view.itemconfig(self.view_image, image="")
         bitmap = self.doc.bitmap
         cols, rows = bitmap.width, bitmap.height
@@ -3941,21 +3940,7 @@ class hex2pixApp(tk.Tk):
                 view.create_rectangle(coords[index] - 3, coords[index + 1] - 3,
                                       coords[index] + 3, coords[index + 1] + 3,
                                       outline="#ffec00", tags="hex")
-        if self.tool == "transform" and self.doc.selection.active:
-            quad = self.transform_display_quad()
-            if quad is not None:
-                coords = []
-                for point_x, point_y in quad:
-                    coords.extend([point_x * cell_w, point_y * cell_h])
-                coords.extend(coords[:2])
-                view.create_line(*coords, fill="#ffec00", width=2, tags="hex")
-                for kind, _index, (hx, hy) in self.transform_handles():
-                    if self.transform_perspective and kind == "edge":
-                        continue
-                    cx, cy = hx * cell_w, hy * cell_h
-                    view.create_rectangle(cx - 3, cy - 3, cx + 3, cy + 3,
-                                          outline="#ffec00", fill="#1e2229",
-                                          tags="hex")
+        self.draw_transform_overlay()
 
     def request_redraw(self):
         if not self._redraw_pending:
@@ -4178,18 +4163,54 @@ class hex2pixApp(tk.Tk):
             return []
         cell_w, cell_h = self.cell_size()
         gap = 24.0 / max(1.0, min(cell_w, cell_h))
-        handles = quad_handles(quad, gap)
-        # Keep the rotation handle on the canvas: above the box when there
-        # is room, below it otherwise, and just inside the top as a fallback.
-        kind, index, (hx, hy) = handles[-1]
-        if hy < 0 or hy > self.doc.height:
-            bottom = (quad[2][1] + quad[3][1]) / 2.0
-            if 0 <= bottom + gap <= self.doc.height:
-                hy = bottom + gap
-            else:
-                hy = min(float(self.doc.height), quad[0][1] + gap)
-        handles[-1] = (kind, index, (hx, hy))
-        return handles
+        return quad_handles(quad, gap)
+
+    def draw_transform_overlay(self):
+        """Draw the nodes in view coordinates, outside the image crop too."""
+        if self.tool != "transform":
+            return
+        quad = self.transform_display_quad()
+        if quad is None:
+            return
+        cell_w, cell_h = self.cell_size()
+        view = self.view
+        accent = "#ffec00"
+        fill = "#1e2229"
+        points = [(px * cell_w, py * cell_h) for px, py in quad]
+        coords = []
+        for px, py in points:
+            coords.extend((px, py))
+        coords.extend(coords[:2])
+        view.create_line(*coords, fill=accent, width=1, tags="transform")
+        handles = self.transform_handles()
+        for kind, _index, (hx, hy) in handles:
+            if kind == "rotate":
+                continue
+            if self.transform_perspective and kind == "edge":
+                continue
+            cx = hx * cell_w
+            cy = hy * cell_h
+            view.create_rectangle(cx - 3, cy - 3, cx + 3, cy + 3,
+                                  fill=fill, outline=accent, width=1,
+                                  tags="transform")
+        for kind, _index, (hx, hy) in handles:
+            if kind != "rotate":
+                continue
+            cx = hx * cell_w
+            cy = hy * cell_h
+            top_mid = ((points[0][0] + points[1][0]) / 2.0,
+                       (points[0][1] + points[1][1]) / 2.0)
+            bottom_mid = ((points[2][0] + points[3][0]) / 2.0,
+                          (points[2][1] + points[3][1]) / 2.0)
+            anchor = min((top_mid, bottom_mid),
+                         key=lambda point: ((point[0] - cx) ** 2
+                                            + (point[1] - cy) ** 2))
+            view.create_line(anchor[0], anchor[1], cx, cy,
+                             fill=accent, width=1, tags="transform")
+            view.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
+                             fill=fill, outline=accent, width=1,
+                             tags="transform")
+        view.tag_raise("transform")
 
     def transform_handle_at(self, point):
         """The handle under a continuous canvas-pixel point, or None."""
@@ -4237,30 +4258,6 @@ class hex2pixApp(tk.Tk):
                 best_distance = distance
                 best = index
         return best
-
-    def clamp_quad(self, quad):
-        right = float(self.doc.width)
-        bottom = float(self.doc.height)
-        return [(max(0.0, min(right, px)), max(0.0, min(bottom, py)))
-                for px, py in quad]
-
-    def scale_quad_limit(self, anchor, quad):
-        """The largest scale factor that keeps the quad on the canvas."""
-        limit = float("inf")
-        ax, ay = anchor
-        for px, py in quad:
-            dx, dy = px - ax, py - ay
-            if dx > 1e-9:
-                limit = min(limit, (self.doc.width - ax) / dx)
-            elif dx < -1e-9:
-                limit = min(limit, -ax / dx)
-            if dy > 1e-9:
-                limit = min(limit, (self.doc.height - ay) / dy)
-            elif dy < -1e-9:
-                limit = min(limit, -ay / dy)
-        if limit == float("inf"):
-            return 1.0
-        return max(0.02, limit)
 
     def pointer_at(self, event):
         """The pointer in continuous canvas pixels, for node hit-testing."""
@@ -4393,7 +4390,7 @@ class hex2pixApp(tk.Tk):
                         mode = "perspective"
                     else:
                         mode = "scale"
-            self.begin_transform(x, y, mode)
+            self.begin_transform(free_x, free_y, mode)
         elif tool == "hand":
             self.begin_pan(event)
         self.request_redraw()
@@ -4475,7 +4472,7 @@ class hex2pixApp(tk.Tk):
                     mode = "scale"
                 elif state & 0x0004:
                     mode = "rotate"
-            self.apply_transform(x, y, mode)
+            self.apply_transform(free_x, free_y, mode)
         self.request_redraw()
         self.refresh_status()
 
@@ -4493,7 +4490,7 @@ class hex2pixApp(tk.Tk):
         if self.gradient_anchor is not None:
             self.apply_gradient()
         if self.transform_base is not None:
-            self.finish_transform()
+            self.finish_transform_drag()
         if self.stroke_before is not None:
             self.doc.commit(self.stroke_before)
             self.stroke_before = None
@@ -4636,6 +4633,12 @@ class hex2pixApp(tk.Tk):
             name = "shuffle"
         elif name == "airbrush":   # ... and before it became Spray can
             name = "spray"
+        if (getattr(self, "tool", None) == "transform"
+                and name != "transform"
+                and getattr(self, "transform_base", None) is not None):
+            # A transform session stays live across individual node drags.
+            # Leaving the tool is the explicit end of that session.
+            self.finish_transform()
         self.stop_spray()
         self.tool = name
         self.tool_var.set(name)
@@ -4890,35 +4893,51 @@ class hex2pixApp(tk.Tk):
         Dragging inside moves the piece; a corner node scales from the
         opposite corner, an edge node shears that edge, and the handle above
         the box rotates it. In perspective mode each corner moves on its own.
+
+        The first drag captures the selected pixels and the pre-transform
+        layer. Later drags continue from the current node box but keep
+        sampling those original pixels, so transforming repeatedly does not
+        resample the already-warped result.
         """
-        if self.transform_base is not None:
-            return
         if mode is True:
             mode = "scale"
         elif mode is False:
             mode = "move"
-        bounds = self.doc.selection.bounds()
-        if not bounds:
-            # Nothing selected: the whole layer is the piece.
-            self.doc.selection.select_all()
+        continuing = (self.transform_base is not None
+                      and self.transform_piece is not None
+                      and self.transform_quad is not None
+                      and self.transform_origin_box is not None)
+        if continuing:
+            start = [tuple(point) for point in self.transform_quad]
+            if mode == "move" and not self.doc.selection.get(x, y):
+                self.report_error("Drag from inside the selection to move it, "
+                                  "the corner nodes to scale, the edge nodes "
+                                  "to shear, and the top handle to rotate.")
+                return
+        else:
             bounds = self.doc.selection.bounds()
             if not bounds:
+                # Nothing selected: the whole layer is the piece.
+                self.doc.selection.select_all()
+                bounds = self.doc.selection.bounds()
+                if not bounds:
+                    return
+            if mode == "move" and not self.doc.selection.get(x, y):
+                self.report_error("Drag from inside the selection to move it, "
+                                  "the corner nodes to scale, the edge nodes "
+                                  "to shear, and the top handle to rotate.")
                 return
-        if mode == "move" and not self.doc.selection.get(x, y):
-            self.report_error("Drag from inside the selection to move it, "
-                              "the corner nodes to scale, the edge nodes to "
-                              "shear, and the top handle to rotate.")
-            return
-        self.transform_before = self.doc.begin()
-        self.transform_base = self.doc.bitmap.copy()
-        self.transform_mask = bytes(self.doc.selection.mask)
-        self.transform_piece = extract_selection(
-            self.doc.bitmap, self.transform_mask, bounds)
-        self.transform_origin_box = bounds
-        self.transform_box = bounds
-        self.transform_start_quad = quad_from_box(bounds)
-        self.transform_origin_quad = list(self.transform_start_quad)
-        self.transform_quad = list(self.transform_start_quad)
+            start = quad_from_box(bounds)
+            self.transform_before = self.doc.begin()
+            self.transform_base = self.doc.bitmap.copy()
+            self.transform_mask = bytes(self.doc.selection.mask)
+            self.transform_piece = extract_selection(
+                self.doc.bitmap, self.transform_mask, bounds)
+            self.transform_origin_box = bounds
+            self.transform_origin_quad = list(start)
+        self.transform_box = box_from_quad(start)
+        self.transform_start_quad = list(start)
+        self.transform_quad = list(start)
         self.transform_grab = (x, y)
         self.transform_mode = mode
         self.transform_angle = 0.0
@@ -4965,8 +4984,7 @@ class hex2pixApp(tk.Tk):
             pointer_reach = math.hypot(x + 0.5 - anchor[0],
                                        y + 0.5 - anchor[1])
             factor = pointer_reach / max(3.0, grab_reach)
-            factor = max(0.02, min(self.scale_quad_limit(anchor, start),
-                                   factor))
+            factor = max(0.02, factor)
             quad = quad_scale(start, anchor, factor)
         elif mode == "rotate":
             snap = max(1, int(getattr(self, "rotate_snap", ROTATE_SNAP)))
@@ -4986,16 +5004,13 @@ class hex2pixApp(tk.Tk):
             quad = quad_move_corner(start, index, x - grab_x, y - grab_y)
         else:
             quad = quad_translate(start, x - grab_x, y - grab_y)
-        quad = self.clamp_quad(quad)
         self.doc.bitmap = self.transform_base.copy()
         clear_region(self.doc.bitmap, self.transform_mask)
-        if mode == "move":
-            origin = (int(round(quad[0][0])), int(round(quad[0][1])))
-            warped = piece
-        else:
-            left, top, warped = warp_piece(piece, quad, self.doc.width,
-                                           self.doc.height)
-            origin = (left, top)
+        # Every mode uses the same sampler. In particular, moving a piece
+        # that was already rotated must not stamp the unrotated source back.
+        left, top, warped = warp_piece(piece, quad, self.doc.width,
+                                       self.doc.height)
+        origin = (left, top)
         stamp_bitmap(self.doc.bitmap, warped, origin)
         self.doc.limit_pixels()
         mask = piece_mask(warped, origin, self.doc.width, self.doc.height)
@@ -5005,6 +5020,23 @@ class hex2pixApp(tk.Tk):
         self._hex_incremental_ok = False
         self.refresh_bytes()
         self.refresh_status()
+        self.request_redraw()
+
+    def finish_transform_drag(self):
+        """End one node drag but keep the live transform and its source data."""
+        if self.transform_base is None:
+            return
+        if self.transform_quad is not None:
+            self.transform_start_quad = list(self.transform_quad)
+        self.transform_grab = None
+        self.transform_corner = None
+        self.transform_edge = None
+        self.transform_fixed = None
+        self.transform_rotation = None
+        self.transform_handle_kind = None
+        self.transform_handle_index = None
+        self.transform_mode = "move"
+        self.transform_angle = 0.0
         self.request_redraw()
 
     def finish_transform(self):
@@ -5028,8 +5060,11 @@ class hex2pixApp(tk.Tk):
         self.transform_mode = "move"
         self.transform_angle = 0.0
         self.transform_rotation = None
+        self.transform_handle_kind = None
+        self.transform_handle_index = None
         self.refresh_bytes()
         self.refresh_status()
+        self.request_redraw()
 
     def cancel_transform(self):
         """Escape while moving: put the pixels back where they were."""
@@ -5054,11 +5089,16 @@ class hex2pixApp(tk.Tk):
         self.transform_mode = "move"
         self.transform_angle = 0.0
         self.transform_rotation = None
+        self.transform_handle_kind = None
+        self.transform_handle_index = None
         self.refresh_bytes()
         self.refresh_status()
+        self.request_redraw()
 
     def move_selection_to(self, x, y):
         """Enter with the move tool: put the selection's corner at the cursor."""
+        if self.transform_base is not None:
+            self.finish_transform()
         bounds = self.doc.selection.bounds()
         if not bounds:
             # Nothing selected: Enter moves the whole layer.
@@ -7418,6 +7458,8 @@ class hex2pixApp(tk.Tk):
 
     def adopt_document(self, document, working=None):
         """Show a freshly opened document with its own working layout."""
+        if getattr(self, "transform_base", None) is not None:
+            self.finish_transform()
         if working is None:
             working = document.working_layout()
         if working is None:
@@ -7444,6 +7486,8 @@ class hex2pixApp(tk.Tk):
         if not self.tabs:
             return False
         index = max(0, min(len(self.tabs) - 1, int(index)))
+        if getattr(self, "transform_base", None) is not None:
+            self.finish_transform()
         if capture:
             self.capture_tab_view()
         self.tab_index = index
@@ -7494,6 +7538,8 @@ class hex2pixApp(tk.Tk):
 
     def close_tab(self, index=None):
         """Close one tab, offering to save it first."""
+        if self.transform_base is not None:
+            self.finish_transform()
         if not self.tabs:
             return False
         index = self.tab_index if index is None else int(index)
@@ -7525,6 +7571,8 @@ class hex2pixApp(tk.Tk):
 
     def request_close(self):
         """Close the window, asking about every tab holding unsaved work."""
+        if self.transform_base is not None:
+            self.finish_transform()
         if getattr(self, "_closing", False):
             return True
         if self.silent:
@@ -7607,6 +7655,8 @@ class hex2pixApp(tk.Tk):
             self.home.refresh_recent()
 
     def apply_canvas_spec(self, spec, working=None):
+        if self.transform_base is not None:
+            self.finish_transform()
         widths = None
         if working:
             try:
@@ -7759,6 +7809,8 @@ class hex2pixApp(tk.Tk):
         return True
 
     def save_project(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         if not formats.is_project_path(self.doc.path or ""):
             return self.save_project_as()
         try:
@@ -7771,6 +7823,8 @@ class hex2pixApp(tk.Tk):
         return self.mark_saved()
 
     def save_project_as(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         path = filedialog.asksaveasfilename(
             parent=self, title="Save project",
             defaultextension=formats.PROJECT_EXT,
@@ -7789,6 +7843,8 @@ class hex2pixApp(tk.Tk):
         return self.mark_saved()
 
     def save_document(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         if formats.is_project_path(self.doc.path or ""):
             return self.save_project()
         if not self.doc.path:
@@ -7804,6 +7860,8 @@ class hex2pixApp(tk.Tk):
         return self.mark_saved()
 
     def save_document_as(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         path = filedialog.asksaveasfilename(
             parent=self, title="Save image", defaultextension=".png",
             filetypes=formats.SAVE_FILETYPES)
@@ -7831,6 +7889,8 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------ edits
     def undo(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         if self.doc.undo_last():
             self.refresh_layers()
             self.refresh_bytes()
@@ -7838,6 +7898,8 @@ class hex2pixApp(tk.Tk):
             self.redraw()
 
     def redo(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         if self.doc.redo_last():
             self.refresh_layers()
             self.refresh_bytes()
@@ -7845,21 +7907,29 @@ class hex2pixApp(tk.Tk):
             self.redraw()
 
     def select_all(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         self.doc.selection.select_all()
         self.refresh_bytes()
         self.redraw()
 
     def deselect(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         self.doc.selection.clear()
         self.refresh_bytes()
         self.redraw()
 
     def invert_selection(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         self.doc.selection.invert()
         self.refresh_bytes()
         self.redraw()
 
     def clear_selection(self):
+        if self.transform_base is not None:
+            self.finish_transform()
         before = self.doc.begin()
         clear_region(self.doc.bitmap, self.doc.mask())
         self.doc.commit(before)
@@ -9488,7 +9558,8 @@ def run_selftest(out_path=None):
                         test_filters,
                         test_formats, test_icons, test_integrations,
                         test_macro, test_model, test_palette, test_pattern,
-                        test_project, test_shapes, test_textfont)
+                        test_project, test_shapes, test_textfont,
+                        test_transform_session)
 
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([
@@ -9509,6 +9580,7 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_editor_features),
         loader.loadTestsFromModule(test_brush_tips),
         loader.loadTestsFromModule(test_textfont),
+        loader.loadTestsFromModule(test_transform_session),
     ])
     stream = io.StringIO()
     result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)
