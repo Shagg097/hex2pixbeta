@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/hex2pix-logo.png" width="160" alt="hex2pix logo">
+</p>
+
 # hex2pix
 
 **A pixel editor where the hex is the tool.**
@@ -22,8 +26,7 @@ keyboard is the primary instrument.
 > Python 3.10/PyInstaller build and fails on XP with
 > `K32EnumProcessModules`.
 
-
-![hex2pix editor showing a pixel-art night scene, tool palette, color wheel and layer stack](docs/hex2pix-pixel-view.png)
+![hex2pix editor showing the pixel-art workspace, tool palette and layer panel](docs/hex2pix-editor.png)
 
 ## Highlights
 
@@ -48,15 +51,6 @@ keyboard is the primary instrument.
   repository-root `hex2pix.exe` is the separate 3.10 main-line build.
 - **Optional desktop extras** — automatic update checks in the packaged
   Windows build.
-
-## Example artwork
-
-This 64×64 scene, *Night Signal*, was made as a two-layer hex2pix document
-(`Night signal` + `Atmosphere`) and is included in the screenshots below.
-
-<p align="center">
-  <img src="docs/night-signal.png" width="420" alt="Night Signal: a 64 by 64 pixel-art lighthouse, moonlit sea, sailboat and pine trees">
-</p>
 
 ## Install on Windows
 
@@ -213,10 +207,6 @@ flagged it as malicious** ([full report](https://www.virustotal.com/gui/url/6455
 scanned 9 November 2026). The check covers the repository page, not the
 contents of the executable.
 
-<p align="center">
-  <a href="https://www.virustotal.com/gui/url/6455f0b48e41bf69bc1ee2070d13780ff75483edb85d802520ce373ec3efc4e2"><img src="docs/virustotal-scan.png" width="560" alt="VirusTotal URL report for github.com/Shagg097/hex2pixbeta: no security vendors flagged this URL as malicious"></a>
-</p>
-
 ## The hex idea
 
 ### Paint by typing
@@ -300,8 +290,6 @@ The tool palette is a grid of dropdown folders, grouped by what the tools do:
 **Brush**, **Shapes**, **Fill**, **Select**, **Transform**, and **Text and
 pick**. Click a folder to open its tools; the button shows the tool you last
 used from that folder, and hovering it lists what is inside.
-
-![The rectangle tile beside the new triangle, diamond, star and arrow tiles](docs/shape-icons.png)
 
 ### Painting and shapes
 
@@ -408,8 +396,6 @@ writes an adaptive 256-color palette.
 Open a document in **pixel view** to see the rendered artwork on a checkerboard
 with a pixel grid and selection overlays. Switch to **hex view** with
 `View > Hex code view`, the **Pixel / Hex** radios, or the `H` key.
-
-![hex2pix hex view with colored hex codes and a live byte dump](docs/hex2pix-hex-view.png)
 
 In hex view every visible cell is drawn as its own code:
 
@@ -682,8 +668,6 @@ The editor starts in dark mode. **View > Dark mode** switches the entire window
 — menus, dockers, tool cards, fields, text panels, the color wheel and the start
 page — to the light palette and back.
 
-![hex2pix light theme with the Filters panel open](docs/hex2pix-light-theme.png)
-
 The same View menu ends with one checkbutton per right-side docker
 (**Block**, **Layers**, **Bytes**, **Dump**, **Export**, **Pattern**,
 **Filters**), so any tab can be hidden and restored without losing its contents
@@ -807,7 +791,7 @@ hex2pixmain/
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
 │  └─ tests/              551 unit tests
-└─ docs/                   screenshots, artwork; logo source in logo/
+└─ docs/                   logo and editor screenshot; logo source in logo/
 ```
 
 ## Limits
