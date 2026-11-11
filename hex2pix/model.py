@@ -614,34 +614,31 @@ def rotate_piece(bitmap, degrees):
     angle = float(degrees) % 360.0
     if not angle:
         return bitmap.copy()
+    if angle == 90.0:
+        return rotate90(bitmap, True)
+    if angle == 180.0:
+        return rotate90(rotate90(bitmap, True), True)
+    if angle == 270.0:
+        return rotate90(bitmap, False)
     radians = math.radians(angle)
     cos_a, sin_a = math.cos(radians), math.sin(radians)
     w, h = bitmap.width, bitmap.height
     half_w, half_h = w / 2.0, h / 2.0
-    xs, ys = [], []
-    for x, y in ((0, 0), (w, 0), (0, h), (w, h)):
+    points = []
+    for x, y in ((0, 0), (w, 0), (w, h), (0, h)):
         dx, dy = x - half_w, y - half_h
-        xs.append(dx * cos_a - dy * sin_a)
-        ys.append(dx * sin_a + dy * cos_a)
-    out_w = max(1, int(round(max(xs) - min(xs))))
-    out_h = max(1, int(round(max(ys) - min(ys))))
-    out = Bitmap(out_w, out_h)
-    back = math.radians(-angle)
-    cos_b, sin_b = math.cos(back), math.sin(back)
-    cx_out, cy_out = out_w / 2.0, out_h / 2.0
-    src = bitmap.data
-    dst = out.data
-    for oy in range(out_h):
-        dy = oy + 0.5 - cy_out
-        for ox in range(out_w):
-            dx = ox + 0.5 - cx_out
-            sx = half_w + dx * cos_b - dy * sin_b
-            sy = half_h + dx * sin_b + dy * cos_b
-            ix, iy = int(math.floor(sx)), int(math.floor(sy))
-            if 0 <= ix < w and 0 <= iy < h:
-                si = (iy * w + ix) * 4
-                di = (oy * out_w + ox) * 4
-                dst[di:di + 4] = src[si:si + 4]
+        points.append((half_w + dx * cos_a - dy * sin_a,
+                       half_h + dx * sin_a + dy * cos_a))
+    # Keep the original pixel grid instead of re-centring a rounded output
+    # box: the latter shifts even-sized pieces by half a pixel at odd angles
+    # and can duplicate or drop samples. The shared projective sampler also
+    # keeps arbitrary rotation on the same path as every other transform.
+    left = int(math.floor(min(x for x, _y in points)))
+    top = int(math.floor(min(y for _x, y in points)))
+    out_w = max(1, int(math.ceil(max(x for x, _y in points) - left - 1e-9)))
+    out_h = max(1, int(math.ceil(max(y for _x, y in points) - top - 1e-9)))
+    quad = [(x - left, y - top) for x, y in points]
+    _left, _top, out = warp_piece(bitmap, quad, out_w, out_h)
     return out
 
 
@@ -838,22 +835,62 @@ def quad_handles(quad, rotation_gap=24.0):
     return handles
 
 
+def _quad_homography(quad, source):
+    """Solve the projective map from a destination quad to source corners.
+
+    The returned coefficients map a destination point (x, y) to a source
+    point (u, v) with `u = (h0*x + h1*y + h2) / (h6*x + h7*y + 1)` and the
+    matching expression for v. Four point pairs determine the eight
+    coefficients, including true perspective rather than a triangle affine
+    approximation.
+    """
+    rows = []
+    for (x, y), (u, v) in zip(quad, source):
+        rows.append([x, y, 1.0, 0.0, 0.0, 0.0,
+                     -u * x, -u * y, u])
+        rows.append([0.0, 0.0, 0.0, x, y, 1.0,
+                     -v * x, -v * y, v])
+    for column in range(8):
+        pivot = max(range(column, 8),
+                    key=lambda row: abs(rows[row][column]))
+        if abs(rows[pivot][column]) < 1e-12:
+            return None
+        if pivot != column:
+            rows[column], rows[pivot] = rows[pivot], rows[column]
+        divisor = rows[column][column]
+        for index in range(column, 9):
+            rows[column][index] /= divisor
+        for row in range(8):
+            if row == column:
+                continue
+            factor = rows[row][column]
+            if abs(factor) < 1e-15:
+                continue
+            for index in range(column, 9):
+                rows[row][index] -= factor * rows[column][index]
+    return [rows[index][8] for index in range(8)]
+
+
 def warp_piece(piece, quad, width, height):
     """Draw the piece into a quadrilateral on a width x height canvas.
 
-    The quad is filled as two triangles with nearest-neighbour samples, so
-    any convex quad works: scaling, shearing, rotation and perspective all go
-    through the same path. Pixels outside the canvas or the quad stay
-    transparent. Returns (left, top, bitmap) for the clipped box to stamp.
+    A single projective map samples every destination pixel back into the
+    source, so any convex quad works: scaling, shearing, rotation and
+    perspective all go through the same path. Pixels outside the canvas or
+    the quad stay transparent. Returns (left, top, bitmap) for the clipped
+    box to stamp.
     """
     if len(quad) != 4:
         raise HexError("a transform box needs four corners")
     xs = [point[0] for point in quad]
     ys = [point[1] for point in quad]
-    left = max(0, int(math.floor(min(xs))))
-    top = max(0, int(math.floor(min(ys))))
-    right = min(width - 1, int(math.ceil(max(xs))) - 1)
-    bottom = min(height - 1, int(math.ceil(max(ys))) - 1)
+    # Include a pixel only when its centre lies inside the quad. Edge-based
+    # floor/ceil bounds add a half-pixel border, which shifts even-sized
+    # pieces at 90 degrees and makes thin pieces look cropped.
+    left = max(0, int(math.ceil(min(xs) - 0.5)))
+    top = max(0, int(math.ceil(min(ys) - 0.5)))
+    right = min(width - 1, int(math.ceil(max(xs) - 0.5)) - 1)
+    bottom = min(height - 1, int(math.ceil(max(ys) - 0.5)) - 1)
     if right < left or bottom < top:
         return left, top, Bitmap(1, 1)
     out = Bitmap(right - left + 1, bottom - top + 1)
@@ -862,40 +899,29 @@ def warp_piece(piece, quad, width, height):
     dst = out.data
     corners = [(0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh)),
                (0.0, float(sh))]
-    for i0, i1, i2 in ((0, 1, 2), (0, 2, 3)):
-        q0, q1, q2 = quad[i0], quad[i1], quad[i2]
-        s0, s1, s2 = corners[i0], corners[i1], corners[i2]
-        denom = ((q1[1] - q2[1]) * (q0[0] - q2[0])
-                 + (q2[0] - q1[0]) * (q0[1] - q2[1]))
-        if abs(denom) < 1e-9:
-            continue
-        min_x = max(left, int(math.floor(min(q0[0], q1[0], q2[0]))))
-        max_x = min(right, int(math.ceil(max(q0[0], q1[0], q2[0]))) - 1)
-        min_y = max(top, int(math.floor(min(q0[1], q1[1], q2[1]))))
-        max_y = min(bottom, int(math.ceil(max(q0[1], q1[1], q2[1]))) - 1)
-        for y in range(min_y, max_y + 1):
-            py = y + 0.5
-            row = (y - top) * out.width
-            for x in range(min_x, max_x + 1):
-                px = x + 0.5
-                a = ((q1[1] - q2[1]) * (px - q2[0])
-                     + (q2[0] - q1[0]) * (py - q2[1])) / denom
-                b = ((q2[1] - q0[1]) * (px - q2[0])
-                     + (q0[0] - q2[0]) * (py - q2[1])) / denom
-                c = 1.0 - a - b
-                if a < -1e-9 or b < -1e-9 or c < -1e-9:
-                    continue
-                sx = a * s0[0] + b * s1[0] + c * s2[0]
-                sy = a * s0[1] + b * s1[1] + c * s2[1]
-                ix, iy = int(sx), int(sy)
-                if ix < 0 or iy < 0 or ix >= sw or iy >= sh:
-                    continue
-                source_index = (iy * sw + ix) * 4
-                if not source[source_index + 3]:
-                    continue
-                target = (row + (x - left)) * 4
-                dst[target:target + 4] = source[source_index:
-                                                source_index + 4]
+    homography = _quad_homography(quad, corners)
+    if homography is None:
+        return left, top, Bitmap(1, 1)
+    h0, h1, h2, h3, h4, h5, h6, h7 = homography
+    for y in range(top, bottom + 1):
+        py = y + 0.5
+        row = (y - top) * out.width
+        for x in range(left, right + 1):
+            px = x + 0.5
+            divisor = h6 * px + h7 * py + 1.0
+            if abs(divisor) < 1e-12:
+                continue
+            sx = (h0 * px + h1 * py + h2) / divisor
+            sy = (h3 * px + h4 * py + h5) / divisor
+            if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                continue
+            ix, iy = int(sx), int(sy)
+            source_index = (iy * sw + ix) * 4
+            if not source[source_index + 3]:
+                continue
+            target = (row + (x - left)) * 4
+            dst[target:target + 4] = source[source_index:
+                                            source_index + 4]
     return left, top, out
 
 

@@ -968,6 +968,16 @@ class RotationTests(unittest.TestCase):
         self.assertGreater(opaque, 0)
         self.assertLessEqual(opaque, turned.width * turned.height)
 
+    def test_odd_angle_preserves_a_thin_piece(self):
+        piece = Bitmap(4, 2)
+        piece.fill(RED)
+        turned = rotate_piece(piece, 45)
+        self.assertEqual((turned.width, turned.height), (4, 4))
+        opaque = sum(1 for y in range(turned.height)
+                     for x in range(turned.width)
+                     if turned.rgba(x, y)[3])
+        self.assertEqual(opaque, 8)
+
 
 class ScaleBoxTests(unittest.TestCase):
     def test_first_movement_keeps_the_piece_as_it_was(self):
@@ -1144,6 +1154,27 @@ class WarpPieceTests(unittest.TestCase):
                       for x in range(warped.width))
         self.assertIn(RED, colours)
         self.assertIn(GREEN, colours)
+
+    def test_quarter_turn_matches_the_exact_rotation(self):
+        piece = self.piece()
+        quad = quad_rotate(quad_from_box((0, 0, 2, 2)), (1.0, 1.0), 90)
+        left, top, warped = warp_piece(piece, quad, 4, 4)
+        turned = rotate_piece(piece, 90)
+        self.assertEqual((left, top), (0, 0))
+        self.assertEqual((warped.width, warped.height),
+                         (turned.width, turned.height))
+        for y in range(turned.height):
+            for x in range(turned.width):
+                self.assertEqual(warped.rgba(x, y), turned.rgba(x, y))
+
+    def test_perspective_corners_follow_the_projective_map(self):
+        piece = self.piece()
+        quad = [(0.0, 0.0), (4.0, 0.0), (3.0, 4.0), (1.0, 4.0)]
+        _, _, warped = warp_piece(piece, quad, 8, 8)
+        self.assertEqual(warped.rgba(0, 0), RED)
+        self.assertEqual(warped.rgba(3, 0), GREEN)
+        self.assertEqual(warped.rgba(1, 3), BLUE)
+        self.assertEqual(warped.rgba(2, 3), (255, 255, 255, 255))
 
 
 if __name__ == "__main__":
