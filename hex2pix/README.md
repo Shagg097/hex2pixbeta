@@ -413,17 +413,15 @@ Each layer has three separate option groups, applied in order, and an opacity:
 
 | Blend | Result |
 | --- | --- |
-| None | the result covers what is below (the default) |
+| None | the layer's own values (the default) |
 | Screen | `255 - (255-below)(255-above)/255` |
 | Overlay | multiplies dark areas, screens light ones |
 | Darken | the darker of the two |
 | Lighten | the lighter of the two |
 | Difference | `abs(below - above)` |
 
-The operation runs first, then the gate works bit by bit on that result and
-the stack below, then the blend mode mixes the outcome into the stack, so a
-layer can use all three at once (Multiply, then Nand, then Screen, for
-example). A pixel's alpha is the strength of the result, so transparent pixels
+The blend mode runs first, then the operation, then the gate, so a layer can
+use all three at once (Screen, then Multiply, then Nand, for example). A pixel's alpha is the strength of the result, so transparent pixels
 leave the stack below alone and a partly transparent layer mixes it. Where the
 stack below is transparent the layer shows as it is. New layers start with no
 operation, no gate and no blend, so drawing covers instead of combining.

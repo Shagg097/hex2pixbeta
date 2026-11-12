@@ -453,17 +453,17 @@ has three separate option groups, applied in order, and an opacity:
 
 | Blend | Result |
 | --- | --- |
-| None | Covers the layers below (the default) |
+| None | the layer's own values (the default) |
 | Screen | `255 - (255-below)(255-above)/255` |
 | Overlay | Multiplies dark areas, screens light ones |
 | Darken | Darker of the two |
 | Lighten | Lighter of the two |
 | Difference | `abs(below - above)` |
 
-The groups apply one after another - the operation, then the gate, then the
-blend mode - so a layer can use all three at once (Multiply, then Nand, then
-Screen, for example). A pixel's alpha is the strength of the result, so
-transparent pixels leave the stack alone. The **Opacity** slider blends the
+The blend mode runs first, then the operation, then the gate, so a layer can
+use all three at once (Screen, then Multiply, then Nand, for example). A pixel's
+alpha is the strength of the result, so transparent pixels leave the stack
+alone. The **Opacity** slider blends the
 active layer without changing its stored pixels. New layers start with no
 operation, no gate and no blend, so drawing covers instead of combining.
 
