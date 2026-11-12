@@ -744,7 +744,7 @@ def save_project(path, document, extras=None):
     layers = []
     for index, layer in enumerate(document.layers):
         name = "layers/%03d.rgba" % index
-        layers.append({
+        entry = {
             "name": layer.name,
             "op": layer.op,
             "gate": layer.gate,
@@ -752,8 +752,12 @@ def save_project(path, document, extras=None):
             "visible": bool(layer.visible),
             "alpha": int(layer.alpha),
             "group": layer.group,
+            "render_mode": layer.render_mode,
             "data": name,
-        })
+        }
+        if layer.graph.nodes:
+            entry["graph"] = layer.graph.to_state()
+        layers.append(entry)
         entries.append((name, bytes(layer.bitmap.data)))
     header = {
         "format": PROJECT_FORMAT,

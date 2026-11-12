@@ -376,7 +376,8 @@ clipboard; **Copy block** copies the selection as hex pixel rows.
 ## Layers
 
 The **Layers** tab stacks bitmaps that share one selection and canvas size.
-Each layer has three separate option groups, applied in order, and an opacity:
+Each layer has three separate option groups, applied in order, and an opacity,
+or a node graph in **Complex Render**:
 
 | Operation | Result |
 | --- | --- |
@@ -427,6 +428,74 @@ layer, dragging a row restacks it, double-clicking shows or hides it, and
 `Alt+Up` / `Alt+Down` restack the active layer, and `Alt+N`, `Alt+C` and
 `Alt+Delete` add, copy and remove layers from the keyboard. `Escape`
 deselects instantly.
+
+### Quick and Complex Render
+
+Every layer starts in **Quick Render**, the Operation, Nandgate and Blend
+dropdowns. Set **Render** to **Complex Render** (in the Layers panel or the
+**Nodes** tab) to drive the layer from a node graph instead. Switching to
+Complex creates a starter `Layer -> Output` graph, so the layer keeps looking
+the same until you add nodes.
+
+**Open node editor...** in the **Nodes** tab opens a graph window. Use
+**Add node** for Layer, Below, Output, Operation, Gate, Blend, Perlin Noise,
+Hue Shift, Color Ramp, Mask, Apply Mask, Color, Value and Math. Right-click a node
+for **Duplicate node**, which copies its parameters and offsets the copy
+without copying wires. Drag a node body to move it and
+drag a right-hand output socket onto a left-hand input socket to connect
+them; right-click a wire or node to remove it. The inspector on the right
+edits the selected node's mode, scale, seed, hue shift, colour, number or
+gradient.
+
+`A` is the layer and `B` is the stack below; unconnected colour sockets use
+those pixels automatically. Any output can feed any input: a number plugged
+into a colour socket becomes opaque grey, and a colour plugged into a number
+socket becomes its brightness from 0 to 1. An input can take several wires:
+number inputs add their wires together, and colour inputs average them, alpha
+included. The **Output** node's input becomes the layer's contribution, and
+layer and group opacity still apply. If no Output is connected, the layer
+falls back to Quick Render.
+
+The **Layer** node also exposes `Red`, `Green`, `Blue`, `Alpha`, `Opacity`,
+`Hue` (degrees), `Saturation` (HSV), `HSL Saturation`, `Brightness` (HSV),
+`Lightness` (HSL), `Luminance`, `Gamma` (gamma-corrected luminance) and
+`Chroma` (largest minus smallest channel). Channels and measurements are 0
+.. 1. Wiring `Red`, `Green` or `Blue` into a colour input renders that channel
+as a colour with the layer's alpha; other number sockets still become opaque
+grey. The **Value** node has an unbounded base number plus up to eight adding
+inputs A-H. Use Add input in the inspector to reveal each one; only the chosen
+number is drawn, and removing an input disconnects its wires.
+
+The **Color Ramp** node maps a 0..1 number through a multi-stop gradient. Its
+Value input defaults to a measurement read from the layer: Luminance, Hue,
+Saturation, Lightness, Brightness or Chroma, chosen with Source. The inspector
+shows the gradient and its stops: click a stop's colour swatch to change it,
+`x` removes it, and Add stop inserts one in the widest gap. Each stop stores a
+position and an RGBA colour, so gradients survive saving and undo. The
+Interpolation dropdown chooses Linear, Constant (hard steps) or Smooth
+(smoothstep) blending between stops. The Preset dropdown supplies ready-made
+ramps such as Fire, Ocean, Sunset, Rainbow, Vaporwave and Fade to Clear, and
+Reverse mirrors the current stops end to end.
+
+**Mask** turns a colour into a grayscale mask. Source chooses Alpha,
+Luminance, Red, Green or Blue; Invert flips the result. Its Value output feeds
+**Apply Mask**, which multiplies the source colour's alpha by the mask.
+Unconnected colour inputs use the layer, and an unconnected Mask input means
+fully visible (1), so Apply Mask is a pass-through until wired.
+
+Every node's output sockets are adjustable from the inspector's Outputs
+control: multi-output nodes can hide trailing outputs, and single-output
+nodes can add duplicate outputs (`Color 2`, `Color 3`, ...) up to eight.
+Right-click any input or output socket for a micro gate: AND, OR, XOR, NOT,
+NAND, NOR or XNOR. Gates render as compact symbol extensions with their own
+output socket; binary gates expose a B input above the body for their second
+operand. With B unconnected it defaults to all ones, so NAND and NOT invert a
+colour's RGB while keeping alpha, or turn a number into `1 - value`. The
+inspector's **Micro gates** section lists the selected node's gates, changes
+their type, and disconnects their B wires.
+
+Graphs are saved in `.h2p` projects and in undo history. **Merge down** bakes
+the graph into pixels and leaves the merged layer in Quick Render.
 
 ## Tool palette
 
