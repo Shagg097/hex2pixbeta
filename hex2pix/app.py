@@ -9527,11 +9527,27 @@ class hex2pixApp(tk.Tk):
                 y = canvas.canvasy(90)
             except tk.TclError:
                 pass
-        count = len(layer.graph.nodes)
+        graph = layer.graph
+        # A fresh Complex Render graph is Layer -> Output.  Adding Hue Shift
+        # should show the shift immediately, so put it into that path instead
+        # of leaving it disconnected beside the original passthrough wire.
+        starter = graph.is_passthrough()
+        count = len(graph.nodes)
         x += (count % 5) * 26
         y += (count % 4) * 26
         before = self.doc.begin()
-        node = layer.graph.add_node(node_type, x, y)
+        node = graph.add_node(node_type, x, y)
+        if starter and node_type == "hue":
+            layer_node = next((item for item in graph.nodes.values()
+                               if item.type == "layer"), None)
+            output_node = next((item for item in graph.nodes.values()
+                                if item.type == "output"), None)
+            if layer_node is not None and output_node is not None:
+                graph.unlink_input(output_node.id, "Color")
+                graph.link(layer_node.id, "Color", node.id, "Color")
+                graph.link(node.id, "Color", output_node.id, "Color")
+                node.x, node.y = 250.0, 70.0
+                output_node.x = max(output_node.x, 500.0)
         self.doc.commit(before)
         self.node_selected = node.id
         self.layers_changed()
@@ -11761,6 +11777,20 @@ def run_selftest(out_path=None):
                         app.node_props))
         app.set_socket_gate(value, "@gate:out:Value", "none")
         nodes_ok = nodes_ok and "@gate:out:Value" not in value.params
+
+        # Adding Hue Shift to an untouched starter graph should insert it
+        # into the Layer -> Output path, not leave the layer passthrough wire
+        # in place so the colour operation appears to do nothing.
+        app.new_layer()
+        app.doc.active_layer.bitmap.fill((0, 0, 255, 255))
+        app.set_layer_render_mode(RENDER_COMPLEX)
+        hue_layer = app.doc.active_layer
+        hue_node = app.add_graph_node("hue")
+        hue_links = hue_layer.graph.links
+        nodes_ok = (nodes_ok and hue_node is not None
+                    and len(hue_links) == 2
+                    and app.doc.flatten().rgba(0, 0) == (128, 0, 255, 255))
+        app.delete_layer()
         app.close_node_editor()
         app.set_layer_render_mode(RENDER_QUICK)
         nodes_ok = (nodes_ok
