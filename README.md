@@ -104,7 +104,7 @@ Verified on this branch with CPython 3.8.20 (32-bit, Tcl/Tk 8.6, MSC v.1916):
 
 | Check | Result |
 | --- | --- |
-| `python -m unittest discover -s hex2pix/tests -t .` | 551 tests, 0 failures, 0 errors |
+| `python -m unittest discover -s hex2pix/tests -t .` | 668 tests, 0 failures, 0 errors |
 | `python run_hex2pix.py --selftest` | `RESULT: PASS`, every GUI check true |
 | `packaging/hex2pix.spec` to `dist\hex2pix.exe` | built, `--selftest` gives `RESULT: PASS` |
 | `packaging/hex2pix_onedir.spec` to `dist\hex2pix-portable\` | built, `--selftest` gives `RESULT: PASS` |
