@@ -2,10 +2,10 @@
 
 # Portable build: a folder with the executable and its runtime beside it.
 #
-# The single-file hex2pix.exe unpacks python310.dll and friends into
+# The single-file hex2pix.exe unpacks python38.dll and friends into
 # %TEMP%\_MEIxxxxxx on every start. Antivirus tools that quarantine or block
 # that freshly written DLL make the bootloader fail with
-#     Failed to load Python DLL ...\_MEIxxxxxx\python310.dll
+#     Failed to load Python DLL ...\_MEIxxxxxx\python38.dll
 # This build keeps those DLLs on disk next to the executable, so nothing has
 # to be extracted and loaded from %TEMP% at all. Ship it as a ZIP.
 from pathlib import Path
@@ -49,6 +49,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ASSETS / "logoicon.ico"),
+    version=str(ROOT / "packaging" / "version_info.txt"),
 )
 
 coll = COLLECT(

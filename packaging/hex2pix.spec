@@ -31,6 +31,7 @@ exe = EXE(
     a.datas,
     [],
     icon=str(ASSETS / "logoicon.ico"),
+    version=str(ROOT / "packaging" / "version_info.txt"),
     name='hex2pix',
     debug=False,
     bootloader_ignore_signals=False,
