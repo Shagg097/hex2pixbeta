@@ -2,15 +2,48 @@
 
 import unittest
 
+from hex2pix import app as app_module
 from hex2pix import shapes
 from hex2pix.effects import blur_area, shuffle_area, spray_area
-from hex2pix.model import Bitmap
+from hex2pix.model import Bitmap, Document, selection_rect_mask
 from hex2pix.shapes import (brush_offsets, custom_brush, custom_brush_from_text,
-                            custom_brush_text, set_custom_brush,
-                            stamp_pattern)
+                            custom_brush_text, custom_tip_rows,
+                            paint_pattern_dab, paint_pattern_stroke,
+                            set_custom_brush, stamp_pattern)
 
 RED = (255, 0, 0, 255)
 BLUE = (0, 0, 255, 255)
+CLEAR = (0, 0, 0, 0)
+
+
+class _ValueVar(object):
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class _Settings(object):
+    def __init__(self):
+        self.values = {}
+
+    def set(self, key, value):
+        self.values[key] = value
+
+
+class _TipHarness(app_module.hex2pixApp):
+    def __init__(self, document):
+        self.doc = document
+        self.settings = _Settings()
+        self.brush_shape_var = _ValueVar("Square")
+        self.export_info = _ValueVar("")
+
+    def report_error(self, message):
+        raise AssertionError(message)
 
 
 class CustomBrushTest(unittest.TestCase):
@@ -89,6 +122,46 @@ class CustomBrushTest(unittest.TestCase):
         set_custom_brush([[1], [1, 1, 1]])
         self.assertEqual(custom_brush(), ((1, 0, 0), (1, 1, 1)))
 
+    def test_a_rectangular_tip_keeps_its_aspect(self):
+        set_custom_brush(["11111", "11111", "11111"])
+        offsets = brush_offsets(9, "custom")
+        self.assertEqual({x for x, _y in offsets}, set(range(-4, 5)))
+        self.assertEqual({y for _x, y in offsets}, set(range(-2, 3)))
+
+    def test_a_bitmap_copies_into_a_custom_tip(self):
+        bitmap = Bitmap(3, 2)
+        bitmap.set_rgba(0, 0, RED)
+        bitmap.set_rgba(2, 1, BLUE)
+        self.assertEqual(custom_tip_rows(bitmap), [[1, 0, 0], [0, 0, 1]])
+
+    def test_transparent_pixels_make_empty_cells(self):
+        self.assertEqual(custom_tip_rows(Bitmap(2, 2)), [[0, 0], [0, 0]])
+
+    def test_large_artwork_is_sampled_down_without_cropping(self):
+        bitmap = Bitmap(40, 8)
+        bitmap.set_rgba(0, 0, RED)
+        bitmap.set_rgba(39, 7, BLUE)
+        rows = custom_tip_rows(bitmap, 16)
+        self.assertEqual((len(rows[0]), len(rows)), (16, 3))
+        self.assertEqual(rows[0][0], 1)
+        self.assertEqual(rows[-1][-1], 1)
+
+    def test_the_selection_action_stores_and_selects_the_tip(self):
+        document = Document(6, 4)
+        document.bitmap.set_rgba(1, 1, RED)
+        document.bitmap.set_rgba(4, 2, BLUE)
+        document.selection.apply_mask(
+            selection_rect_mask(6, 4, 1, 1, 5, 3), "replace")
+        app = _TipHarness(document)
+        app.copy_selection_to_custom_tip()
+        self.assertEqual(custom_brush(),
+                         ((1, 0, 0, 0, 0),
+                          (0, 0, 0, 1, 0),
+                          (0, 0, 0, 0, 0)))
+        self.assertEqual(app.brush_shape_var.get(), "Custom")
+        self.assertEqual(app.settings.values["custom_brush"],
+                         custom_brush_text())
+
     def test_empty_text_keeps_the_default(self):
         self.assertIsNone(custom_brush_from_text(""))
         self.assertEqual(custom_brush(),
@@ -130,6 +203,43 @@ class PatternTipTest(unittest.TestCase):
         bitmap = Bitmap(2, 2)
         self.assertEqual(stamp_pattern(bitmap, None, 0, 0, [[RED, RED, RED]]),
                          2)
+
+    def test_pattern_dab_keeps_the_brush_shape(self):
+        bitmap = Bitmap(7, 7)
+        painted = paint_pattern_dab(bitmap, None, 3, 3, 3, [[RED]],
+                                    "circle", "", BLUE)
+        self.assertEqual(painted, len(brush_offsets(3, "circle")))
+        self.assertEqual(bitmap.rgba(3, 3), RED)
+        self.assertEqual(bitmap.rgba(2, 2), CLEAR)
+
+    def test_pattern_dab_uses_pattern_colours(self):
+        bitmap = Bitmap(5, 5)
+        cells = [[RED, BLUE], [BLUE, RED]]
+        painted = paint_pattern_dab(bitmap, None, 2, 2, 3, cells,
+                                    "square", "", BLUE)
+        self.assertEqual(painted, 9)
+        self.assertEqual(bitmap.rgba(1, 1), cells[1][1])
+        self.assertEqual(bitmap.rgba(2, 1), cells[1][0])
+        self.assertNotEqual(bitmap.rgba(1, 1), bitmap.rgba(2, 1))
+
+    def test_pattern_none_cells_fall_back_without_cutting_holes(self):
+        bitmap = Bitmap(5, 5)
+        cells = [[None, BLUE], [BLUE, BLUE]]
+        painted = paint_pattern_dab(bitmap, None, 2, 2, 3, cells,
+                                    "square", "", RED)
+        self.assertEqual(painted, 9)
+        self.assertEqual(bitmap.rgba(2, 2), RED)
+
+    def test_pattern_stroke_keeps_the_brush_footprint(self):
+        bitmap = Bitmap(7, 7)
+        expected = set()
+        for x in range(1, 6):
+            for dx, dy in brush_offsets(3, "circle"):
+                expected.add((x + dx, 3 + dy))
+        painted = paint_pattern_stroke(bitmap, None, 1, 3, 5, 3, 3,
+                                       [[RED]], "circle", "", RED)
+        self.assertEqual(painted, len(expected))
+        self.assertEqual(bitmap.rgba(0, 2), CLEAR)
 
 
 if __name__ == "__main__":

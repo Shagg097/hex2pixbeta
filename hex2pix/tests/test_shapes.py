@@ -1,6 +1,7 @@
 """Tests for the Aseprite-style drawing helpers."""
 
 import unittest
+from collections import deque
 
 from hex2pix.model import Bitmap, Block, HexError
 from hex2pix.shapes import (SHAPE_KINDS, brush_offsets, curve_points,
@@ -11,6 +12,46 @@ from hex2pix.shapes import (SHAPE_KINDS, brush_offsets, curve_points,
 RED = (255, 0, 0, 255)
 BLUE = (0, 0, 255, 255)
 CLEAR = (0, 0, 0, 0)
+
+
+def transparent_holes(bitmap):
+    """Transparent pixels not connected to the canvas border."""
+    width, height = bitmap.width, bitmap.height
+    outside = set()
+    queue = deque()
+    for x in range(width):
+        queue.extend(((x, 0), (x, height - 1)))
+    for y in range(height):
+        queue.extend(((0, y), (width - 1, y)))
+    while queue:
+        x, y = queue.popleft()
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        if (x, y) in outside or bitmap.rgba(x, y)[3]:
+            continue
+        outside.add((x, y))
+        queue.extend(((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)))
+    return sum(1 for y in range(height) for x in range(width)
+               if bitmap.rgba(x, y)[3] == 0 and (x, y) not in outside)
+
+
+def background_edges(bitmap, color):
+    """Background pixels touching transparent pixels or the canvas edge."""
+    count = 0
+    for y in range(bitmap.height):
+        for x in range(bitmap.width):
+            if bitmap.rgba(x, y) != color:
+                continue
+            for nx, ny in ((x + 1, y), (x - 1, y),
+                           (x, y + 1), (x, y - 1)):
+                if not (0 <= nx < bitmap.width
+                        and 0 <= ny < bitmap.height):
+                    count += 1
+                    break
+                if bitmap.rgba(nx, ny)[3] == 0:
+                    count += 1
+                    break
+    return count
 
 
 class BrushTest(unittest.TestCase):
@@ -95,6 +136,14 @@ class ShapeTest(unittest.TestCase):
         self.assertEqual(bitmap.rgba(7, 0), RED)
         self.assertEqual(bitmap.rgba(4, 0), RED)
 
+    def test_star_shape_receives_its_options(self):
+        bitmap = Bitmap(21, 21)
+        painted = paint_shape(bitmap, None, "star", 0, 0, 20, 20,
+                              1, RED, True, "square", "",
+                              points=3, angle=15, depth=20)
+        self.assertGreater(painted, 0)
+        self.assertEqual(bitmap.rgba(10, 10), RED)
+
     def test_stroke_uses_brush_size(self):
         bitmap = Bitmap(8, 8)
         painted = paint_stroke(bitmap, None, 1, 1, 3, 1, 3, BLUE)
@@ -131,6 +180,53 @@ class PresetShapeTests(unittest.TestCase):
         self.assertLessEqual(min(y for _, y in filled), 2)
         self.assertGreaterEqual(max(y for _, y in filled), 10)
 
+    def test_polygon_points_change_the_outline(self):
+        five = set(shape_points("star", 0, 0, 20, 20))
+        seven = set(shape_points("star", 0, 0, 20, 20, points=7))
+        triangle = set(shape_points("triangle", 0, 0, 20, 20))
+        pentagon = set(shape_points("triangle", 0, 0, 20, 20, points=5))
+        self.assertTrue(five)
+        self.assertTrue(seven)
+        self.assertNotEqual(five, seven)
+        self.assertNotEqual(triangle, pentagon)
+
+    def test_polygon_angle_rotates_triangle_and_diamond(self):
+        triangle = set(shape_points("triangle", 0, 0, 20, 20))
+        tilted_triangle = set(shape_points("triangle", 0, 0, 20, 20,
+                                           angle=30))
+        diamond = set(shape_points("diamond", 0, 0, 20, 20))
+        tilted_diamond = set(shape_points("diamond", 0, 0, 20, 20,
+                                          angle=45))
+        self.assertNotEqual(triangle, tilted_triangle)
+        self.assertNotEqual(diamond, tilted_diamond)
+
+    def test_polygon_depth_adds_star_notches(self):
+        regular = set(shape_points("triangle", 0, 0, 20, 20, True,
+                                   depth=100))
+        notched = set(shape_points("triangle", 0, 0, 20, 20, True,
+                                   depth=40))
+        self.assertNotEqual(regular, notched)
+
+    def test_star_depth_controls_the_inner_radius(self):
+        narrow = set(shape_points("star", 0, 0, 20, 20, True,
+                                  depth=10))
+        wide = set(shape_points("star", 0, 0, 20, 20, True,
+                                depth=80))
+        self.assertLess(len(narrow), len(wide))
+
+    def test_arrow_body_and_head_sizes_change_the_shape(self):
+        default = set(shape_points("arrow", 0, 0, 20, 12, True))
+        weighted = set(shape_points("arrow", 0, 0, 20, 12, True,
+                                    body_size=20, head_size=70))
+        self.assertNotEqual(default, weighted)
+
+    def test_arrow_head_shapes_differ(self):
+        triangle = set(shape_points("arrow", 0, 0, 20, 12, True,
+                                    head_shape="triangle"))
+        barbed = set(shape_points("arrow", 0, 0, 20, 12, True,
+                                  head_shape="barbed"))
+        self.assertNotEqual(triangle, barbed)
+
     def test_arrow_points_right(self):
         filled = set(shape_points("arrow", 0, 0, 12, 8, True))
         self.assertIn((11, 4), filled)
@@ -146,6 +242,31 @@ class PresetShapeTests(unittest.TestCase):
         self.assertEqual(shape_color(RED, BLUE, True), BLUE)
         self.assertEqual(shape_color(RED, BLUE, False), RED)
         self.assertEqual(shape_color(RED, BLUE), RED)
+
+    def test_fill_colour_keeps_preset_outlines_foreground(self):
+        for kind in ("rect", "ellipse", "triangle", "diamond", "star",
+                     "arrow"):
+            for size in (1, 3):
+                with self.subTest(kind=kind, size=size):
+                    bitmap = Bitmap(21, 21)
+                    paint_shape(bitmap, None, kind, 0, 0, 20, 20, size,
+                                RED, True, "square", fill_color=BLUE)
+                    colors = {bitmap.rgba(x, y)
+                              for y in range(21) for x in range(21)
+                              if bitmap.rgba(x, y)[3]}
+                    self.assertIn(RED, colors)
+                    self.assertIn(BLUE, colors)
+                    self.assertEqual(transparent_holes(bitmap), 0,
+                                     (kind, size))
+                    self.assertEqual(background_edges(bitmap, BLUE), 0,
+                                     (kind, size))
+
+    def test_fill_colour_does_nothing_without_fill(self):
+        bitmap = Bitmap(7, 7)
+        paint_shape(bitmap, None, "rect", 1, 1, 5, 5, 1, RED, False,
+                    "square", fill_color=BLUE)
+        self.assertEqual(bitmap.rgba(1, 1), RED)
+        self.assertEqual(bitmap.rgba(3, 3), CLEAR)
 
 
 class GradientTest(unittest.TestCase):

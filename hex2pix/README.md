@@ -374,10 +374,12 @@ the opposite corner stays put, and the drag starts from whatever size the
 piece already has, so it cannot squash the artwork or collapse on the first
 pixel of movement. A rotation grab inside the middle three pixels holds the
 current angle until the pointer leaves that dead zone, so a click near the
-centre cannot spin the piece. Transforms use exact nearest-neighbour pixels by
-default; turn on **Smooth edges** in the tool options to soften rotated and
-fractionally scaled edges with partially transparent pixels. Quarter turns
-and whole-pixel moves stay exact either way. The node box is drawn in both
+centre cannot spin the piece. Rotation uses **CleanEdge** by default: each
+destination pixel takes its colour from cleanEdge's quadrant slices, so a
+turned outline is redrawn as a clean line instead of breaking into dashes.
+The **Algorithm** menu also offers RotSprite, Nearest and Transpose 90, and
+**Smooth edges** is a separate toggle that blends the rotated edges instead.
+Quarter turns and whole-pixel moves stay exact either way. The node box is drawn in both
 pixel and hex view. The selection follows the pixels, and the whole drag is
 one undo step.
 
@@ -486,7 +488,7 @@ state the tool uses:
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
 | Lasso | selection mode and Smooth path |
 | Wand, Similar | Tolerance, Ignore alpha |
-| Move / Scale | Rotate snap in degrees, Perspective nodes, Smooth edges |
+| Move / Scale | Rotate snap in degrees, Perspective nodes, Algorithm (CleanEdge, RotSprite, Nearest, Transpose 90), Smooth edges, Upscale, Similar |
 | Hand | zoom out, zoom in and Zoom to fit |
 
 Brush size, tip, mirror and tolerance also stay in the left column.

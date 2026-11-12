@@ -277,9 +277,11 @@ perspective quad. `Shift`+drag still scales and `Ctrl`+drag still rotates from
 anywhere. Scaling keeps the piece's proportions and holds the opposite corner
 still, so a drag can neither squash the artwork nor flip it, and rotation only
 starts once the pointer leaves the middle, so grabbing the centre cannot spin
-the piece wildly. **Smooth edges** is off by default for exact nearest-neighbour
-pixels; turn it on in the tool options to soften rotated and fractionally
-scaled edges with partially transparent pixels. Press `Enter` to drop it at
+the piece wildly. Rotation uses **CleanEdge** by default: each destination
+pixel takes its colour from cleanEdge's quadrant slices, so a turned outline
+is redrawn as a clean line instead of breaking into dashes. The **Algorithm**
+menu also offers RotSprite, Nearest and Transpose 90, and **Smooth edges** is
+a separate toggle that blends the rotated edges instead. Press `Enter` to drop it at
 the cursor and `Escape` to put it back. The selection follows the pixels, and
 the whole operation is one undo step.
 
