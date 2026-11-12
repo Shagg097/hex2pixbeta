@@ -7,8 +7,9 @@ build/
 dist/
 *.spec.bak
 
-# Local experimental work, kept out of main
+# Local experimental work, kept out of main and release builds
 experimental/
+wip/
 
 # Report written by --selftest
 hex2pix-selftest.txt

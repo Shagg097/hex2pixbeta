@@ -415,7 +415,8 @@ Mouse and camera controls:
 ## Layers
 
 The **Layers** tab stacks bitmaps that share a canvas and selection. Each layer
-has three separate option groups, applied in order, and an opacity:
+has three separate option groups, applied in order, and an opacity, or a node
+graph in **Complex Render**:
 
 | Operation | Result |
 | --- | --- |
@@ -462,6 +463,36 @@ the layers. Group names and layer names are both editable with **Rename** (or
 `F2`). **Merge down** combines the active layer into the one below using its
 operation and opacity, and **Merge group** flattens a whole group into one
 layer. A group's name, visibility and opacity are saved in the `.h2p` project.
+
+### Node editor
+
+**Quick Render** is the default: the Operation, Nandgate and Blend dropdowns.
+Set **Render** to **Complex Render** to drive the layer from a node graph, then
+open the editor from the **Nodes** tab. Layer, Below, Output, Operation, Gate,
+Blend, Perlin Noise, Hue Shift, Color Ramp, Mask, Apply Mask, Color, Value
+and Math nodes have input and output sockets; drag any socket onto any socket, edit the selected
+node on the right, and the Output node becomes the layer's contribution. Right-click a
+node to duplicate it, or use the Duplicate node button.
+Numbers and colours convert automatically when a graph mixes them; Layer
+`Red`, `Green` and `Blue` outputs become channel-only colours with the layer's
+alpha when wired into colour inputs. Several wires into one input add on
+number sockets and average on colour sockets, and right-clicking a wire
+deletes just that wire. Layer nodes expose channels and
+measurements (red/green/blue, alpha, opacity, hue, both saturations,
+brightness, lightness, luminance, gamma and chroma), and Value nodes have an
+unbounded base with up to eight adding inputs you reveal in the inspector.
+Color Ramp nodes map luminance, hue or another layer measurement through an
+editable multi-stop gradient with Linear, Constant or Smooth interpolation,
+ready-made presets and a Reverse button.
+Output sockets can be trimmed or duplicated, and right-clicking any socket
+opens a micro gate menu with AND, OR, XOR, NOT, NAND, NOR and XNOR. A gate is
+drawn as an extension of the node with its logic symbol and its own output
+socket; binary gates also get a B input socket for their second operand. The
+inspector's **Micro gates** section lists the gates on the selected node, lets
+you change their type, and disconnects their B wires. `A` is the layer and
+`B` is the stack below, so a single Operation node works before you wire
+anything. Graphs are saved in `.h2p` projects and undo states, and **Merge
+down** bakes the graph into pixels.
 
 ## Canvas and documents
 

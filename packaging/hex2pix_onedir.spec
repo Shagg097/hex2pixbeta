@@ -23,7 +23,8 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['numpy', 'PyQt5'],
+    # WIP code lives in ../wip and must never be bundled into a release EXE.
+    excludes=['numpy', 'PyQt5', 'wip', 'hex2pix.wip'],
     noarchive=False,
     optimize=0,
 )
