@@ -25,9 +25,10 @@ OP_LABELS = {
 }
 OP_BY_LABEL = {label: op for op, label in OP_LABELS.items()}
 
-# A layer reaches the stack below through three separate option groups, and
-# they apply in order. `op` is the arithmetic operation, `gate` is the
-# bitwise gate and `blend` is the blend mode; "none" switches a group off.
+# A layer reaches the stack below through three separate option groups.
+# `blend` shapes the layer against the stack below first, `op` combines that
+# result with the below stack and `gate` is the final bitwise pass; "none"
+# switches a group off.
 LAYER_OPS = ("none", "add", "subtract", "multiply", "divide")
 LAYER_OP_LABELS = {
     "none": "None",
@@ -165,18 +166,20 @@ def combine_layer(below, above, op="none", gate="none", blend="none",
                   strength=255, wrap=False):
     """Combine one channel through a layer's three option groups.
 
-    The groups apply in order: the arithmetic operation, then the bitwise
-    gate, then the blend mode, each working on the result so far and the
-    stack below. "none" leaves a group out, and the layer's alpha is the
-    strength of the final mix.
+    The groups apply in order: the blend mode first, then the arithmetic
+    operation, then the bitwise gate, each working on the result so far and
+    the stack below.  A blend applied last could only pick the backdrop and
+    hide the layer (Add followed by Darken, for example), so the blend runs
+    first and the operation still reaches the stack below.  "none" leaves a
+    group out, and the layer's alpha is the strength of the final mix.
     """
     value = above
+    if blend not in ("none", "", None):
+        value = combine(below, value, blend, 255, wrap)
     if op not in ("none", "", None):
         value = combine(below, value, op, 255, wrap)
     if gate not in ("none", "", None):
         value = gate_value(below, value, gate)
-    if blend not in ("none", "", None):
-        value = combine(below, value, blend, 255, wrap)
     return combine(below, value, "normal", strength, wrap)
 
 
@@ -1904,7 +1907,8 @@ class Layer(object):
 
     `op`, `gate` and `blend` are the layer's three separate option groups:
     the arithmetic operation, the bitwise gate and the blend mode. Each is
-    "none" unless chosen, and they apply in that order to the stack below.
+    "none" unless chosen; the blend applies first, then the operation, then
+    the gate.
     `alpha` is the layer's own opacity, which scales the strength of the
     result for every pixel. `group` names the layer's group, or is empty when
     it is ungrouped. `Document.layers[0]` is the bottom layer.
