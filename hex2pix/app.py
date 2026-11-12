@@ -8558,6 +8558,14 @@ class hex2pixApp(tk.Tk):
         self.layer_visible_var.set(bool(layer.visible))
         self.sync_layer_alpha(layer)
         self.sync_layer_group(layer)
+        # Operation, gate and blend each combine this layer with the stack
+        # below it, so they cannot do anything on the bottom layer. Disable
+        # the three boxes there instead of letting a choice silently no-op.
+        if hasattr(self, "layer_op_box"):
+            combined = "readonly" if self.doc.layer_index > 0 else "disabled"
+            for box in (self.layer_op_box, self.layer_gate_box,
+                        self.layer_blend_box):
+                box.configure(state=combined)
         self.refresh_layer_info()
 
     def refresh_layer_info(self):
@@ -8570,6 +8578,9 @@ class hex2pixApp(tk.Tk):
         if self.doc.groups:
             info += " \u00b7 %d group%s" % (
                 len(self.doc.groups), "" if len(self.doc.groups) == 1 else "s")
+        if self.doc.layer_index == 0:
+            info += (" \u00b7 bottom layer: operation, gate and blend "
+                     "combine with a layer below")
         self.layer_info.set(info)
 
     def layers_changed(self):
@@ -10263,6 +10274,40 @@ def run_selftest(out_path=None):
                      and app.doc.active_layer.name == "Group 1"
                      and app.doc.bitmap.rgba(0, 0) == (100, 100, 100, 255))
 
+        # Layer options run through the panel handlers and land in the
+        # composite; the bottom layer says why its three boxes are off.
+        app.new_canvas(CanvasSpec(4, 4))
+        app.doc.layers[0].bitmap.fill((200, 0, 0, 255))
+        app.new_layer()
+        app.doc.layers[1].bitmap.fill((100, 0, 0, 255))
+        app.refresh_layers()
+        app.set_layer_op("add")
+        layer_ops_ok = app.doc.flatten().rgba(0, 0) == (255, 0, 0, 255)
+        app.set_layer_op("none")
+        app.set_layer_gate("nand")
+        layer_ops_ok = (layer_ops_ok
+                        and app.doc.flatten().rgba(0, 0) == (191, 255, 255, 255))
+        app.set_layer_gate("none")
+        app.set_layer_blend("screen")
+        layer_ops_ok = (layer_ops_ok
+                        and app.doc.flatten().rgba(0, 0) == (222, 0, 0, 255))
+        app.set_layer_blend("darken")
+        app.set_layer_op("add")
+        layer_ops_ok = (layer_ops_ok
+                        and app.doc.flatten().rgba(0, 0) == (255, 0, 0, 255))
+        app.set_layer_op("none")
+        app.set_layer_blend("none")
+        app.doc.layer_index = 0
+        app.refresh_layers()
+        layer_ops_ok = (layer_ops_ok
+                        and str(app.layer_op_box["state"]) == "disabled"
+                        and "layer below" in app.layer_info.get())
+        app.doc.layer_index = 1
+        app.doc.layers[1].blend = "none"
+        app.refresh_layers()
+        layer_ops_ok = (layer_ops_ok
+                        and str(app.layer_op_box["state"]) == "readonly")
+
         old_tool = app.tool
         app.tool = "line"
         app.shape_anchor = (0, 0)
@@ -10422,7 +10467,7 @@ def run_selftest(out_path=None):
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
                      "palette=%s wheel=%s quantize=%s dark=%s light=%s "
                      "dockers=%s overlay=%s layer_keys=%s groups=%s "
-                     "merge=%s mouse=%s"
+                     "merge=%s layer_options=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -10433,7 +10478,8 @@ def run_selftest(out_path=None):
                         fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                         gradient_ok, palette_ok, wheel_ok, quantize_ok,
                         dark_ok, light_ok, dockers_ok, overlay_ok,
-                        layer_keys_ok, group_ok, merged_ok, mouse_ok))
+                        layer_keys_ok, group_ok, merged_ok, layer_ops_ok,
+                        mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))

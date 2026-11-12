@@ -333,20 +333,38 @@ Mouse and camera controls:
 ## Layers
 
 The **Layers** tab stacks bitmaps that share a canvas and selection. Each layer
-has an operation and an opacity:
+has three separate option groups, applied in order, and an opacity:
 
 | Operation | Result |
 | --- | --- |
-| Normal | Covers the layers below |
+| None | the layer's own values (the default) |
 | Add | `below + above`, clamped |
 | Subtract | `below - above`, clamped |
 | Multiply | `below * above / 255` |
 | Divide | `below * 255 / above` |
 
-A pixel's alpha is the strength of the operation, so transparent pixels leave
-the stack alone. The **Opacity** slider blends the active layer without changing
-its stored pixels. New layers start as **Normal**, so drawing covers instead of
-combining.
+| Nandgate | Result |
+| --- | --- |
+| None | the layer's own bits (the default) |
+| And / Or / Xor | `below AND / OR / XOR above`, per byte |
+| Not | `NOT above`, per byte |
+| Nand / Nor / Xnor | the inverted And / Or / Xor, per byte |
+
+| Blend | Result |
+| --- | --- |
+| None | the layer's own values (the default) |
+| Screen | `255 - (255-below)(255-above)/255` |
+| Overlay | multiplies dark areas, screens light ones |
+| Darken | the darker of the two |
+| Lighten | the lighter of the two |
+| Difference | `abs(below - above)` |
+
+The blend mode runs first, then the operation, then the gate, so a layer can
+use all three at once (Screen, then Multiply, then Nand, for example). A pixel's
+alpha is the strength of the result, so transparent pixels leave the stack
+alone. The **Opacity** slider blends the active layer without changing its
+stored pixels. New layers start with no operation, no gate and no blend, so
+drawing covers instead of combining.
 
 Both views show the flattened result. The Dump tab, byte tools and Copy block
 work on the active layer. **New**, **Copy**, **Delete**, **Raise** and **Lower**

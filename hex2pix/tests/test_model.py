@@ -529,6 +529,24 @@ class LayerTests(unittest.TestCase):
                 value = model.gate_value(below, above, gate)
                 self.assertTrue(0 <= value <= 255, gate)
 
+    def test_blend_no_longer_hides_the_layer_after_an_operation(self):
+        # Darken applied last returned the backdrop for every pixel, which
+        # made Add + Darken (and Screen + Darken) blank the layer.  The
+        # blend now runs first, so the operation still reaches the stack.
+        self.assertEqual(model.combine_layer(200, 100, "add", "none",
+                                             "darken"), 255)
+        self.assertEqual(model.combine_layer(200, 100, "screen", "none",
+                                             "darken"), 222)
+        self.assertNotEqual(model.combine_layer(200, 100, "add", "none",
+                                                "darken"), 200)
+
+    def test_add_with_darken_keeps_the_layer_on_the_canvas(self):
+        document = Document(1, 1)
+        document.bitmap.set_rgba(0, 0, (200, 0, 0, 255))
+        document.add_layer(op="add", blend="darken")
+        document.bitmap.set_rgba(0, 0, (100, 0, 0, 255))
+        self.assertEqual(document.flatten().rgba(0, 0), (255, 0, 0, 255))
+
     def test_three_option_groups_add_up_on_one_layer(self):
         document = Document(1, 1)
         document.bitmap.set_rgba(0, 0, (200, 100, 50, 255))

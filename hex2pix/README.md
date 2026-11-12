@@ -376,20 +376,42 @@ clipboard; **Copy block** copies the selection as hex pixel rows.
 ## Layers
 
 The **Layers** tab stacks bitmaps that share one selection and canvas size.
-Each layer combines with the layers below it using its operation:
+Each layer has three separate option groups, applied in order, and an opacity:
 
 | Operation | Result |
 | --- | --- |
-| Normal | the layer covers what is below (the default) |
+| None | the layer's own values (the default) |
 | Add | `below + above`, clamped |
 | Subtract | `below - above`, clamped |
 | Multiply | `below * above / 255` |
 | Divide | `below * 255 / above` |
 
-A pixel's alpha is the strength of the operation, so transparent pixels leave
-the stack below alone and a partly transparent layer mixes the result. Where
-the stack below is transparent the layer shows as it is. New layers start
-**Normal**, so drawing covers instead of combining.
+| Nandgate | Result |
+| --- | --- |
+| None | the layer's own bits (the default) |
+| And | `below AND above`, per byte |
+| Or | `below OR above`, per byte |
+| Xor | `below XOR above`, per byte |
+| Not | `NOT above`, per byte |
+| Nand | `NOT (below AND above)`, per byte |
+| Nor | `NOT (below OR above)`, per byte |
+| Xnor | `NOT (below XOR above)`, per byte |
+
+| Blend | Result |
+| --- | --- |
+| None | the layer's own values (the default) |
+| Screen | `255 - (255-below)(255-above)/255` |
+| Overlay | multiplies dark areas, screens light ones |
+| Darken | the darker of the two |
+| Lighten | the lighter of the two |
+| Difference | `abs(below - above)` |
+
+The blend mode runs first, then the operation, then the gate, so a layer can
+use all three at once (Screen, then Multiply, then Nand, for example). A pixel's
+alpha is the strength of the result, so transparent pixels leave the stack
+below alone and a partly transparent layer mixes it. Where the stack below is
+transparent the layer shows as it is. New layers start with no operation, no
+gate and no blend, so drawing covers instead of combining.
 
 The **Opacity** slider under the layer list blends the active layer without
 touching its pixels: it scales the strength of that layer's operation, so
