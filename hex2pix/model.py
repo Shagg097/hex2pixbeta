@@ -629,10 +629,16 @@ def rotate90(bitmap, clockwise=True):
 def rotate_piece(bitmap, degrees, smooth=False):
     """Rotate a bitmap clockwise by any angle, keeping the whole piece.
 
-    Sampling is around the centre and the result is the bounding box of the
-    rotated rectangle, so nothing is cropped and quarter turns are exact.
-    Free rotations use nearest-neighbour edges by default; pass `smooth=True`
-    for supersampled edges.
+    Quarter turns go through the exact `rotate90` path. Other angles sample
+    with an inverse rotation about the piece centre, so there is no
+    projective solve that can distort thin pieces.
+
+    Hard mode is plain nearest neighbour: every destination pixel reads
+    the source pixel under its centre, so the result holds only real source
+    colours, never grows thicker than the artwork and cannot scatter stray
+    specks. `smooth=True` blends bilinearly on premultiplied colours for
+    anti-aliased edges without dark halos. The output is the bounding box of
+    the rotated rectangle, so nothing is cropped.
     """
     angle = float(degrees) % 360.0
     if not angle:
@@ -646,24 +652,137 @@ def rotate_piece(bitmap, degrees, smooth=False):
     radians = math.radians(angle)
     cos_a, sin_a = math.cos(radians), math.sin(radians)
     w, h = bitmap.width, bitmap.height
-    half_w, half_h = w / 2.0, h / 2.0
+    cx, cy = w / 2.0, h / 2.0
     points = []
     for x, y in ((0, 0), (w, 0), (w, h), (0, h)):
-        dx, dy = x - half_w, y - half_h
-        points.append((half_w + dx * cos_a - dy * sin_a,
-                       half_h + dx * sin_a + dy * cos_a))
-    # Keep the original pixel grid instead of re-centring a rounded output
-    # box: the latter shifts even-sized pieces by half a pixel at odd angles
-    # and can duplicate or drop samples. The shared projective sampler also
-    # keeps arbitrary rotation on the same path as every other transform.
-    left = int(math.floor(min(x for x, _y in points)))
-    top = int(math.floor(min(y for _x, y in points)))
-    out_w = max(1, int(math.ceil(max(x for x, _y in points) - left - 1e-9)))
-    out_h = max(1, int(math.ceil(max(y for _x, y in points) - top - 1e-9)))
-    quad = [(x - left, y - top) for x, y in points]
-    _left, _top, out = warp_piece(bitmap, quad, out_w, out_h,
-                                  smooth=smooth)
+        dx, dy = x - cx, y - cy
+        points.append((cx + dx * cos_a - dy * sin_a,
+                       cy + dx * sin_a + dy * cos_a))
+    origin_x = int(math.floor(min(x for x, _y in points)))
+    origin_y = int(math.floor(min(y for _x, y in points)))
+    out_w = max(1, int(math.ceil(max(x for x, _y in points))) - origin_x)
+    out_h = max(1, int(math.ceil(max(y for _x, y in points))) - origin_y)
+    out = Bitmap(out_w, out_h)
+    if smooth:
+        _rotate_smooth_into(out, bitmap, cos_a, sin_a, cx, cy,
+                            origin_x, origin_y)
+    else:
+        _rotate_hard_into(out, bitmap, cos_a, sin_a, cx, cy,
+                          origin_x, origin_y)
     return out
+
+
+def _rotate_hard_into(out, piece, cos_a, sin_a, cx, cy,
+                      origin_x, origin_y):
+    """Nearest-neighbour rotation fill: one sample per output pixel.
+
+    Each output pixel reads the source pixel under its centre, so the
+    result holds only real source colours, never grows thicker than the
+    artwork and cannot scatter isolated specks. Pixels whose centre maps
+    outside the piece stay transparent, which is what keeps a rotated
+    bounding box from filling its corners.
+    """
+    sw, sh = piece.width, piece.height
+    source = piece.data
+    dst = out.data
+    out_w = out.width
+    for y in range(out.height):
+        py = y + 0.5 + origin_y - cy
+        for x in range(out_w):
+            px = x + 0.5 + origin_x - cx
+            u = cx + px * cos_a + py * sin_a
+            v = cy - px * sin_a + py * cos_a
+            if u < 0.0 or v < 0.0 or u >= sw or v >= sh:
+                continue
+            index = (int(v) * sw + int(u)) * 4
+            if not source[index + 3]:
+                continue
+            target = (y * out_w + x) * 4
+            dst[target:target + 4] = source[index:index + 4]
+
+
+def _bilinear_sample(data, sw, sh, sx, sy):
+    """Smoothly sample source pixels at a fractional position.
+
+    A true bilinear blend on premultiplied RGBA: texels outside the source
+    count as transparent, so edges fade out instead of growing dark halos.
+    Positions are snapped to a 1e-9 grid first, so whole-pixel moves and
+    integer scales land exactly on texel centres and stay perfectly sharp.
+    Returns an (r, g, b, a) tuple, or None when nothing is covered.
+    """
+    u = round((sx - 0.5) * 1e9) / 1e9
+    v = round((sy - 0.5) * 1e9) / 1e9
+    x0 = int(math.floor(u))
+    y0 = int(math.floor(v))
+    fx = u - x0
+    fy = v - y0
+    taps = []
+    for dy in (0, 1):
+        weight_y = (1.0 - fy) if dy == 0 else fy
+        if weight_y == 0.0:
+            continue
+        iy = y0 + dy
+        if iy < 0 or iy >= sh:
+            continue
+        for dx in (0, 1):
+            weight_x = (1.0 - fx) if dx == 0 else fx
+            if weight_x == 0.0:
+                continue
+            ix = x0 + dx
+            if ix < 0 or ix >= sw:
+                continue
+            offset = (iy * sw + ix) * 4
+            alpha = data[offset + 3]
+            if not alpha:
+                continue
+            taps.append((weight_x * weight_y, data[offset],
+                         data[offset + 1], data[offset + 2], alpha))
+    if not taps:
+        return None
+    if len(taps) == 4:
+        first = taps[0][1:]
+        if all(tap[1:] == first for tap in taps) and first[3] == 255:
+            return (first[0], first[1], first[2], 255)
+    total = 0.0
+    red = green = blue = 0.0
+    for weight, r, g, b, a in taps:
+        strength = weight * (a / 255.0)
+        total += strength
+        red += r * strength
+        green += g * strength
+        blue += b * strength
+    if total <= 0.0:
+        return None
+    alpha = clamp(round_half_up(total * 255.0), 0, 255)
+    if not alpha:
+        return None
+    return (clamp(round_half_up(red / total), 0, 255),
+            clamp(round_half_up(green / total), 0, 255),
+            clamp(round_half_up(blue / total), 0, 255),
+            alpha)
+
+
+def _rotate_smooth_into(out, piece, cos_a, sin_a, cx, cy,
+                        origin_x, origin_y):
+    """Bilinear rotation fill for `rotate_piece`'s smooth mode."""
+    sw, sh = piece.width, piece.height
+    source = piece.data
+    dst = out.data
+    out_w, out_h = out.width, out.height
+    for y in range(out_h):
+        for x in range(out_w):
+            dx = (x + 0.5 + origin_x) - cx
+            dy = (y + 0.5 + origin_y) - cy
+            sx = cx + dx * cos_a + dy * sin_a
+            sy = cy - dx * sin_a + dy * cos_a
+            colour = _bilinear_sample(source, sw, sh, sx, sy)
+            if colour is None:
+                continue
+            target = (y * out_w + x) * 4
+            dst[target] = colour[0]
+            dst[target + 1] = colour[1]
+            dst[target + 2] = colour[2]
+            dst[target + 3] = colour[3]
 
 
 def scale_box(box, fixed, grab, pointer, bounds, min_radius=4.0):
@@ -707,10 +826,16 @@ def scale_box(box, fixed, grab, pointer, bounds, min_radius=4.0):
 class RotationDrag(object):
     """Turn pointer positions around a centre into a snapped rotation angle.
 
+    Positions are continuous canvas coordinates, not whole cells: a rotation
+    has to follow the pointer at zoom, and rounding every event to a cell
+    would make the piece advance in visible jumps.
+
     A grab close to the centre would otherwise sweep a huge angle for every
     pixel of movement. Inside `min_radius` the current angle is held, and the
     first direction measured outside it becomes the new reference, so the
     piece continues from where it already points instead of jumping.
+    `min_radius` is in canvas cells; callers scale it by the zoom so the dead
+    zone stays a few screen pixels wide at every magnification.
     """
 
     def __init__(self, centre, grab, min_radius=3.0):
@@ -723,12 +848,12 @@ class RotationDrag(object):
             self.grab_angle = self._direction(grab)
 
     def _radius(self, point):
-        return math.hypot(point[0] + 0.5 - self.centre[0],
-                          point[1] + 0.5 - self.centre[1])
+        return math.hypot(point[0] - self.centre[0],
+                          point[1] - self.centre[1])
 
     def _direction(self, point):
-        return math.degrees(math.atan2(point[1] + 0.5 - self.centre[1],
-                                       point[0] + 0.5 - self.centre[0]))
+        return math.degrees(math.atan2(point[1] - self.centre[1],
+                                       point[0] - self.centre[0]))
 
     def update(self, pointer, snap=15.0):
         """Return the angle for the pointer, snapped to `snap` degrees."""
@@ -797,6 +922,27 @@ def quad_rotate(quad, centre, degrees):
         result.append((cx + dx * cos_a - dy * sin_a,
                        cy + dx * sin_a + dy * cos_a))
     return result
+
+
+def snap_quad_to_pixel_grid(quad):
+    """Move an axis-aligned quad onto whole-pixel edges.
+
+    A quarter turn can leave a rectangle centred half a pixel between output
+    pixels (for example a 3x2 piece becoming 2x3). None of those destination
+    pixel centres then falls inside the quad, so inverse sampling repeats one
+    edge row and drops the other. Shift the whole quad to the nearest pixel
+    grid before sampling so every source row and column survives exactly.
+    """
+    for index in range(4):
+        ax, ay = quad[index]
+        bx, by = quad[(index + 1) % 4]
+        if abs(ax - bx) > 1e-9 and abs(ay - by) > 1e-9:
+            return list(quad)
+    xs = [point[0] for point in quad]
+    ys = [point[1] for point in quad]
+    dx = math.floor(min(xs) + 0.5) - min(xs)
+    dy = math.floor(min(ys) + 0.5) - min(ys)
+    return [(x + dx, y + dy) for x, y in quad]
 
 
 def quad_shear(quad, edge, amount):
@@ -929,225 +1075,721 @@ def _point_in_quad(quad, x, y, epsilon=1e-9):
     return True
 
 
-def _warp_smooth(out, piece, homography, left, top, factor=4):
-    """Fill a transformed bitmap with partially transparent edge pixels.
+def _quad_is_convex(quad, epsilon=1e-9):
+    """Whether a quad is convex (no dented or bow-tie corner)."""
+    sign = 0
+    for index in range(4):
+        ax, ay = quad[index]
+        bx, by = quad[(index + 1) % 4]
+        cx, cy = quad[(index + 2) % 4]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        if cross > epsilon:
+            if sign < 0:
+                return False
+            sign = 1
+        elif cross < -epsilon:
+            if sign > 0:
+                return False
+            sign = -1
+    return sign != 0
 
-    Nearest-neighbour sampling at the pixel centre leaves a staircase on a
-    rotated edge: each destination pixel is either fully in or fully out. A
-    factor x factor grid measures opaque coverage and gives edge pixels a
-    matching alpha, so they blend with what is underneath instead of adding
-    another solid step. The result still uses only source RGB colours.
+
+def _point_in_triangle(triangle, x, y, epsilon=1e-9):
+    """Whether a point lies inside a triangle, including its edges."""
+    (ax, ay), (bx, by), (cx, cy) = triangle
+    d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by)
+    d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy)
+    d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay)
+    has_neg = (d1 < -epsilon) or (d2 < -epsilon) or (d3 < -epsilon)
+    has_pos = (d1 > epsilon) or (d2 > epsilon) or (d3 > epsilon)
+    return not (has_neg and has_pos)
+
+
+def _triangle_affine_inverse(triangle, x, y):
+    """Barycentric coordinates of a point in a triangle, or None."""
+    (ax, ay), (bx, by), (cx, cy) = triangle
+    det = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay)
+    if abs(det) < 1e-12:
+        return None
+    dx, dy = x - ax, y - ay
+    u = (dx * (cy - ay) - dy * (cx - ax)) / det
+    v = ((bx - ax) * dy - (by - ay) * dx) / det
+    return (u, v)
+
+
+def _affine_from_parallelogram(quad, sw, sh):
+    """Exact inverse for parallelogram quads (move/scale/shear/rotate).
+
+    Returns (inv_a, inv_b, inv_c, inv_d, inv_tx, inv_ty) mapping a
+    destination point to source pixels, or None when the quad is not a
+    parallelogram or is degenerate. This avoids the projective solver
+    entirely for the common transforms, so thin pieces cannot distort
+    through an ill-conditioned 8x8 system.
     """
-    h0, h1, h2, h3, h4, h5, h6, h7 = homography
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = quad
+    if sw <= 0 or sh <= 0:
+        return None
+    spread = (abs(x0) + abs(y0) + abs(x1) + abs(y1) + abs(x2)
+              + abs(y2) + abs(x3) + abs(y3) + 4.0)
+    tol = 1e-6 * spread
+    if abs((x1 + x3 - x0) - x2) > tol:
+        return None
+    if abs((y1 + y3 - y0) - y2) > tol:
+        return None
+    a = (x1 - x0) / float(sw)
+    b = (x3 - x0) / float(sh)
+    c = (y1 - y0) / float(sw)
+    d = (y3 - y0) / float(sh)
+    det = a * d - b * c
+    if abs(det) < 1e-12:
+        return None
+    return (d / det, -b / det, -c / det, a / det,
+            -(d / det) * x0 + (b / det) * y0,
+            (c / det) * x0 - (a / det) * y0)
+
+
+def _warp_source(piece, px, py, homography, affine, triangles, quad=None):
+    """Map a destination point to continuous source coordinates, or None."""
+    sw, sh = piece.width, piece.height
+    if quad is not None and triangles is None:
+        if not _point_in_quad(quad, px, py):
+            return None
+    if triangles is not None:
+        for triangle, (sax, say), (sbx, sby), (scx, scy) in triangles:
+            if not _point_in_triangle(triangle, px, py):
+                continue
+            uv = _triangle_affine_inverse(triangle, px, py)
+            if uv is None:
+                continue
+            u, v = uv
+            if u < -1e-9 or v < -1e-9 or u + v > 1.0 + 1e-9:
+                continue
+            sx = sax + (sbx - sax) * u + (scx - sax) * v
+            sy = say + (sby - say) * u + (scy - say) * v
+            if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
+                return None
+            return (sx, sy)
+        return None
+    if affine is not None:
+        ia, ib, ic, id_, itx, ity = affine
+        sx = ia * px + ib * py + itx
+        sy = ic * px + id_ * py + ity
+    else:
+        h0, h1, h2, h3, h4, h5, h6, h7 = homography
+        divisor = h6 * px + h7 * py + 1.0
+        if abs(divisor) < 1e-12:
+            return None
+        sx = (h0 * px + h1 * py + h2) / divisor
+        sy = (h3 * px + h4 * py + h5) / divisor
+    epsilon = 1e-7
+    if sx < -epsilon or sy < -epsilon:
+        return None
+    if affine is not None:
+        # Half-open bounds for the affine transforms: pixel (i, j) covers
+        # [i, i + 1) x [j, j + 1). Accepting a centre that lands exactly on
+        # the far edge read the last source row or column a second time, so
+        # every odd-sized piece came back one row or column too fat.
+        if sx >= sw or sy >= sh:
+            return None
+    elif sx > sw + epsilon or sy > sh + epsilon:
+        # A projective quad can pinch the far edge onto the destination grid,
+        # so keep the closed bound there and let the last pixel survive.
+        return None
+    return (sx, sy)
+
+
+def _warp_sample(piece, px, py, homography, affine, triangles, quad=None):
+    """Map one destination point to a source pixel, or None if outside."""
+    point = _warp_source(piece, px, py, homography, affine, triangles, quad)
+    if point is None:
+        return None
+    return (max(0, min(piece.width - 1, int(math.floor(point[0] + 1e-9)))),
+            max(0, min(piece.height - 1, int(math.floor(point[1] + 1e-9)))))
+
+
+def _warp_smooth(out, piece, homography, left, top, affine=None,
+                 triangles=None):
+    """Fill a transformed bitmap with smoothly blended pixels.
+
+    Each destination pixel centre is mapped back into the source and read
+    with a premultiplied bilinear blend, so rotated edges fade out instead
+    of stair-stepping, and transparent edges never grow dark halos. Whole
+    pixels landing on one opaque texel stay perfectly sharp.
+    """
     sw, sh = piece.width, piece.height
     source = piece.data
     dst = out.data
-    samples = factor * factor
-    # Deliberate one-pixel source dots are restored exactly afterwards. Skip
-    # them here so they cannot turn into a cloud of faint edge samples.
-    isolated = set()
-    for sy in range(sh):
-        for sx in range(sw):
-            source_index = (sy * sw + sx) * 4
-            if (source[source_index + 3]
-                    and not _opaque_neighbor_count(piece, sx, sy)):
-                isolated.add((sx, sy))
+    if homography is not None:
+        h0, h1, h2, h3, h4, h5, h6, h7 = homography
+    for y in range(out.height):
+        row = y * out.width
+        for x in range(out.width):
+            px = left + x + 0.5
+            py = top + y + 0.5
+            if triangles is not None:
+                found = None
+                for triangle, (sax, say), (sbx, sby), (scx, scy) \
+                        in triangles:
+                    if not _point_in_triangle(triangle, px, py):
+                        continue
+                    uv = _triangle_affine_inverse(triangle, px, py)
+                    if uv is None:
+                        continue
+                    u, v = uv
+                    if u < -1e-9 or v < -1e-9 or u + v > 1.0 + 1e-9:
+                        continue
+                    found = (sax + (sbx - sax) * u + (scx - sax) * v,
+                             say + (sby - say) * u + (scy - say) * v)
+                    break
+                if found is None:
+                    continue
+                sx, sy = found
+            elif affine is not None:
+                ia, ib, ic, id_, itx, ity = affine
+                sx = ia * px + ib * py + itx
+                sy = ic * px + id_ * py + ity
+            else:
+                divisor = h6 * px + h7 * py + 1.0
+                if abs(divisor) < 1e-12:
+                    continue
+                sx = (h0 * px + h1 * py + h2) / divisor
+                sy = (h3 * px + h4 * py + h5) / divisor
+            colour = _bilinear_sample(source, sw, sh, sx, sy)
+            if colour is None:
+                continue
+            target = (row + x) * 4
+            dst[target] = colour[0]
+            dst[target + 1] = colour[1]
+            dst[target + 2] = colour[2]
+            dst[target + 3] = colour[3]
+
+
+CLEAN_EDGE_SIMILAR = 0.0      # RGBA distance in 0..1 units; 0 = exact
+CLEAN_EDGE_LINE_WIDTH = 1.0
+
+TRANSFORM_ALGORITHMS = ("RotSprite", "Nearest", "CleanEdge",
+                        "Transpose 90")
+
+# RotSprite (Xenowhirl): enlarge with a pixel-choosing Scale2x that treats
+# similar colours as a match, then rotate and shrink with nearest neighbour.
+# The cap keeps a live drag responsive on large pieces; 8x is the classic
+# factor and is used for anything close to sprite size.
+ROTSPRITE_MAX_PIXELS = 600000
+ROTSPRITE_SIMILAR = 16
+_ROTSPRITE_CACHE = {"piece": None, "scale": 0, "similar": None,
+                    "bitmap": None}
+
+
+def _similar_colour(first, second, threshold=ROTSPRITE_SIMILAR):
+    """Whether two RGBA pixels are close enough to be one shape."""
+    if first == second:
+        return True
+    if not first[3] and not second[3]:
+        return True
+    return (abs(first[0] - second[0]) + abs(first[1] - second[1])
+            + abs(first[2] - second[2]) + abs(first[3] - second[3])
+            <= threshold)
+
+
+def _scale2x(bitmap, similar=ROTSPRITE_SIMILAR):
+    """Double a bitmap with the Scale2x pixel-choosing enlargement.
+
+    Never blends: each output pixel is copied from an existing one, which is
+    what lets RotSprite add detail and still keep the original palette.
+    `similar` is how far apart two colours may be and still count as one
+    shape; 0 makes the comparison strict equality.
+    """
+    width, height = bitmap.width, bitmap.height
+    data = bytes(bitmap.data)
+    out = Bitmap(width * 2, height * 2)
+    dst = out.data
+    stride = width * 4
+    out_stride = out.width * 4
+    empty = b"\x00\x00\x00\x00"
+
+    def alike(first, second):
+        return _similar_colour(first, second, similar)
+
+    def pixel(x, y):
+        if 0 <= x < width and 0 <= y < height:
+            base = y * stride + x * 4
+            return data[base:base + 4]
+        return empty
+
+    for y in range(height):
+        row = y * out_stride * 2
+        for x in range(width):
+            here = pixel(x, y)
+            up = pixel(x, y - 1)
+            right = pixel(x + 1, y)
+            left = pixel(x - 1, y)
+            down = pixel(x, y + 1)
+            if (alike(left, up) and not alike(left, down)
+                    and not alike(up, right)):
+                top_left = up
+            else:
+                top_left = here
+            if (alike(up, right) and not alike(up, left)
+                    and not alike(right, down)):
+                top_right = right
+            else:
+                top_right = here
+            if (alike(left, down) and not alike(left, up)
+                    and not alike(down, right)):
+                bottom_left = left
+            else:
+                bottom_left = here
+            if (alike(right, down) and not alike(right, up)
+                    and not alike(down, left)):
+                bottom_right = down
+            else:
+                bottom_right = here
+            base = row + x * 8
+            dst[base:base + 4] = top_left
+            dst[base + 4:base + 8] = top_right
+            base += out_stride
+            dst[base:base + 4] = bottom_left
+            dst[base + 4:base + 8] = bottom_right
+    return out
+
+
+def _rotsprite_scale(piece, requested=None):
+    """The enlargement to use: the requested factor inside the pixel cap.
+
+    `requested` is 2, 4 or 8, or None/0 for the classic 8x. The cap still
+    applies, so a large selection cannot stall a live drag.
+    """
+    try:
+        scale = int(requested)
+    except (TypeError, ValueError):
+        scale = 0
+    if scale <= 0:
+        scale = 8
+    scale = max(1, min(8, scale))
+    while (scale > 1
+           and piece.width * piece.height * scale * scale
+           > ROTSPRITE_MAX_PIXELS):
+        scale //= 2
+    return scale
+
+
+def _rotsprite_upscale(piece, scale, similar=ROTSPRITE_SIMILAR):
+    """The enlarged piece, cached across the drags of one session."""
+    cache = _ROTSPRITE_CACHE
+    if (cache["piece"] is piece and cache["scale"] == scale
+            and cache["similar"] == similar):
+        return cache["bitmap"]
+    big = piece
+    size = 1
+    while size < scale:
+        big = _scale2x(big, similar)
+        size *= 2
+    cache.update(piece=piece, scale=scale, similar=similar, bitmap=big)
+    return big
+
+
+def _stamp_quarter_turn(out, turned, xs, ys, left, top):
+    """Copy an exactly turned piece into the clipped box, or False."""
+    offset_x = int(round(min(xs) - left))
+    offset_y = int(round(min(ys) - top))
+    if (offset_x < 0 or offset_y < 0
+            or turned.width > out.width - offset_x
+            or turned.height > out.height - offset_y):
+        return False
+    # The box can pad a half pixel around the quad; stamp the turned pixels
+    # at the quad's corner instead of stretching them.
+    out.data[:] = bytes(out.width * out.height * 4)
+    for row in range(turned.height):
+        source_start = row * turned.width * 4
+        target = ((offset_y + row) * out.width + offset_x) * 4
+        out.data[target:target + turned.width * 4] = \
+            turned.data[source_start:source_start + turned.width * 4]
+    return True
+
+
+def _warp_rotsprite(out, piece, homography, left, top, affine, triangles,
+                    quad, scale=None, similar=None):
+    """Rotate by sampling the enlarged piece and shrinking it in one go."""
+    scale = _rotsprite_scale(piece, scale)
+    threshold = ROTSPRITE_SIMILAR if similar is None else int(similar)
+    big = _rotsprite_upscale(piece, scale, threshold)
+    big_width, big_height = big.width, big.height
+    source = big.data
+    dst = out.data
     for y in range(out.height):
         py = top + y + 0.5
         row = y * out.width
         for x in range(out.width):
-            px = left + x + 0.5
+            point = _warp_source(piece, left + x + 0.5, py, homography,
+                                 affine, triangles, quad)
+            if point is None:
+                continue
+            sx = int(point[0] * scale)
+            sy = int(point[1] * scale)
+            if sx < 0 or sy < 0 or sx >= big_width or sy >= big_height:
+                continue
+            index = (sy * big_width + sx) * 4
+            if not source[index + 3]:
+                continue
             target = (row + x) * 4
-            # An affine map takes the whole destination pixel to the convex
-            # hull of its four corners. If all four corners land on source
-            # pixels of the same colour, the whole pixel has that colour and
-            # no supersampling is needed. This keeps large interiors fast.
-            corner_colour = None
-            uniform = True
-            for corner_y in (-0.5, 0.5):
-                if not uniform:
-                    break
-                for corner_x in (-0.5, 0.5):
-                    sample_x = px + corner_x
-                    sample_y = py + corner_y
-                    divisor = h6 * sample_x + h7 * sample_y + 1.0
-                    if abs(divisor) < 1e-12:
-                        uniform = False
-                        break
-                    sx = (h0 * sample_x + h1 * sample_y + h2) / divisor
-                    sy = (h3 * sample_x + h4 * sample_y + h5) / divisor
-                    if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
-                        uniform = False
-                        break
-                    source_index = (int(sy) * sw + int(sx)) * 4
-                    colour = bytes(source[source_index:source_index + 4])
-                    if corner_colour is None:
-                        corner_colour = colour
-                    elif colour != corner_colour:
-                        uniform = False
-                        break
-            if uniform:
-                if corner_colour[3]:
-                    dst[target:target + 4] = corner_colour
-                continue
-            counts = {}
-            alpha_sum = 0
-            for sy_index in range(factor):
-                sample_y = py + (sy_index + 0.5) / factor - 0.5
-                for sx_index in range(factor):
-                    sample_x = px + (sx_index + 0.5) / factor - 0.5
-                    divisor = h6 * sample_x + h7 * sample_y + 1.0
-                    if abs(divisor) < 1e-12:
-                        continue
-                    sx = (h0 * sample_x + h1 * sample_y + h2) / divisor
-                    sy = (h3 * sample_x + h4 * sample_y + h5) / divisor
-                    if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
-                        continue
-                    ix, iy = int(sx), int(sy)
-                    if (ix, iy) in isolated:
-                        continue
-                    source_index = (iy * sw + ix) * 4
-                    alpha = source[source_index + 3]
-                    if not alpha:
-                        continue
-                    colour = bytes(source[source_index:source_index + 3])
-                    counts[colour] = counts.get(colour, 0) + 1
-                    alpha_sum += alpha
-            if not counts:
-                continue
-            colour = max(counts.items(), key=lambda item: (item[1],
-                                                          item[0]))[0]
-            alpha = alpha_sum // samples
-            if not alpha:
-                continue
-            dst[target:target + 3] = colour
-            dst[target + 3] = alpha
+            dst[target:target + 4] = source[index:index + 4]
+    return out
 
 
-def _restore_isolated_dots(out, piece, quad, left, top):
-    """Put deliberate single-pixel dots back after supersampling.
+def _quarter_turn_piece(piece, affine):
+    """The piece turned by an exact quarter turn, or None.
 
-    A one-pixel source dot can cover only a fraction of every destination
-    pixel once it is rotated, so the supersampling pass would drop it.
-    Isolated source pixels are content, not sampling noise, so map their
-    centre forward and stamp them where the result is still empty.
+    Transpose plus row reversal is the classic matrix rotation from
+    waelby99/pixel-rotate: it moves pixels around without sampling them, so
+    a quarter turn keeps every pixel exactly as it was, including colours
+    that a nearest-neighbour resample would shift by half a pixel.
     """
+    if affine is None:
+        return None
+    ia, ib, ic, id_ = affine[0], affine[1], affine[2], affine[3]
+    epsilon = 1e-6
+    if abs(ia) < epsilon and abs(id_) < epsilon:
+        if ib > 0.0 and ic < 0.0:
+            return rotate90(piece, True)
+        if ib < 0.0 and ic > 0.0:
+            return rotate90(piece, False)
+        return None
+    if abs(ib) < epsilon and abs(ic) < epsilon:
+        if abs(ia + 1.0) < epsilon and abs(id_ + 1.0) < epsilon:
+            return rotate90(rotate90(piece, True), True)
+        if abs(ia - 1.0) < epsilon and abs(id_ - 1.0) < epsilon:
+            return piece.copy()
+    return None
+
+
+def _clean_distance(first, second):
+    """Euclidean RGBA distance in cleanEdge's 0..1 colour space."""
+    return math.sqrt((first[0] - second[0]) ** 2
+                     + (first[1] - second[1]) ** 2
+                     + (first[2] - second[2]) ** 2
+                     + (first[3] - second[3]) ** 2)
+
+
+def _clean_similar(first, second, threshold):
+    if not first[3] and not second[3]:
+        return True
+    return _clean_distance(first, second) <= threshold
+
+
+def _clean_lift(colour):
+    """How close a colour is to the shader's white priority colour."""
+    return ((colour[0] - 1.0) ** 2 + (colour[1] - 1.0) ** 2
+            + (colour[2] - 1.0) ** 2)
+
+
+def _clean_higher(first, second, threshold):
+    """True when `first` would be drawn over `second`, as in the shader."""
+    if _clean_similar(first, second, threshold):
+        return False
+    if first[3] == second[3]:
+        return _clean_lift(first) < _clean_lift(second)
+    return first[3] > second[3]
+
+
+def _clean_dist_to_line(test, start, end, direction):
+    """Signed distance from `test` to the line through `start` and `end`."""
+    line_x, line_y = end[0] - start[0], end[1] - start[1]
+    perp_x, perp_y = line_y, -line_x
+    to_x, to_y = start[0] - test[0], start[1] - test[1]
+    sign = 1.0 if perp_x * direction[0] + perp_y * direction[1] > 0.0 else -1.0
+    length = math.hypot(perp_x, perp_y)
+    if not length:
+        return 0.0
+    return sign * ((perp_x * to_x + perp_y * to_y) / length)
+
+
+def _clean_slice(point, direction, main, cells, similar, line_width,
+                 lengths=None):
+    """One quadrant's cleanEdge slice, ported from torcado194's shader.
+
+    `point` is where the sample sits inside its source pixel and `main` names
+    the corner of that pixel being filled, so the neighbour grid is read
+    through a frame mirrored to face that corner. The slice only covers the
+    sample when a 45-degree or 2:1 line crosses it; then it returns the
+    artwork colour on the covered side. None means "no line here".
+    """
+    mx, my = main
+    point = (mx * (point[0] - 0.5) + 0.5,
+             my * (point[1] - 0.5) + 0.5)
+
+    def colour(dx, dy):
+        return cells[(my * dy + 2) * 5 + (mx * dx + 2)]
+
+    # The slices ask for the same few pair distances over and over, so one
+    # small cache shared by the three of them keeps sqrt calls to unique
+    # pairs only.
+    lengths = {} if lengths is None else lengths
+
+    def cd(first, second):
+        key = (first, second)
+        value = lengths.get(key)
+        if value is None:
+            key = (second, first)
+            value = lengths.get(key)
+            if value is None:
+                value = _clean_distance(first, second)
+                lengths[key] = value
+        return value
+
+    def sim(first, second):
+        if not first[3] and not second[3]:
+            return True
+        return cd(first, second) <= similar
+
+    def higher(first, second):
+        if sim(first, second):
+            return False
+        if first[3] == second[3]:
+            return _clean_lift(first) < _clean_lift(second)
+        return first[3] > second[3]
+
+    def sim3(first, second, third):
+        return sim(first, second) and sim(second, third)
+
+    def sim4(first, second, third, fourth):
+        return sim3(first, second, third) and sim(third, fourth)
+
+    def line(start, end, towards):
+        return _clean_dist_to_line(
+            point,
+            (0.5 + start[0] * direction[0],
+             0.5 + start[1] * direction[1]),
+            (0.5 + end[0] * direction[0],
+             0.5 + end[1] * direction[1]),
+            direction if towards else (-direction[0], -direction[1]))
+
+    c = colour(0, 0)
+    u, d = colour(0, -1), colour(0, 1)
+    f, b = colour(1, 0), colour(-1, 0)
+    uf, ub = colour(1, -1), colour(-1, -1)
+    df, db = colour(1, 1), colour(-1, 1)
+    ff, dd = colour(2, 0), colour(0, 2)
+    dff, ddf, ddb = colour(2, 1), colour(1, 2), colour(-1, 2)
+    uff = colour(2, -1)
+
+    # The shader's edge detector: a slice only exists when the colour runs
+    # against the line more strongly than it runs along it.
+    against = (4.0 * cd(f, d) + cd(uf, c) + cd(c, db) + cd(ff, df)
+               + cd(df, dd))
+    towards = (4.0 * cd(c, df) + cd(u, f) + cd(f, dff) + cd(b, d)
+               + cd(d, ddf))
+    if not (against < towards
+            or (against < towards + 0.001 and not higher(c, f))):
+        return None
+    if sim4(f, d, b, u) and sim4(uf, df, db, ub) and not sim(c, f):
+        return None
+
+    if sim3(f, d, db) and not sim3(f, d, b) and not sim(uf, db):
+        # lower shallow 2:1 slant
+        flip = False
+        if not (sim(c, df) and higher(c, f)):
+            if higher(c, f):
+                flip = True
+            if sim(u, f) and not sim(c, df) and not higher(c, u):
+                flip = True
+        if flip:
+            dist = line_width - line((1.5, -1.0), (-0.5, 0.0), False)
+        else:
+            dist = line((1.5, 0.0), (-0.5, 1.0), True)
+        dist -= line_width / 2.0
+        if dist <= 0.0:
+            return f if cd(c, f) <= cd(c, d) else d
+        return None
+
+    if sim3(uf, f, d) and not sim3(u, f, d) and not sim(uf, db):
+        # forward steep 2:1 slant
+        flip = False
+        if not (sim(c, df) and higher(c, d)):
+            if higher(c, d):
+                flip = True
+            if sim(b, d) and not sim(c, df) and not higher(c, d):
+                flip = True
+        if flip:
+            dist = line_width - line((0.0, -0.5), (-1.0, 1.5), False)
+        else:
+            dist = line((1.0, -0.5), (0.0, 1.5), True)
+        dist -= line_width / 2.0
+        if dist <= 0.0:
+            return f if cd(c, f) <= cd(c, d) else d
+        return None
+
+    if sim(f, d):
+        # 45-degree diagonal
+        flip = False
+        if sim(c, df) and higher(c, f):
+            # single pixel wide diagonal along the neighbours, don't flip
+            if not sim(c, dd) and not sim(c, ff):
+                flip = True
+        else:
+            if higher(c, f):
+                flip = True
+            if not sim(c, b) and sim4(b, f, d, u):
+                flip = True
+        if (((sim(f, db) and sim3(u, f, df))
+             or (sim(uf, d) and sim3(b, d, df)))
+                and not sim(c, df)):
+            # single pixel 2:1 slope, don't flip
+            flip = True
+        if flip:
+            dist = line_width - line((1.0, -1.0), (-1.0, 1.0), False)
+        else:
+            dist = line((1.0, 0.0), (0.0, 1.0), True)
+        dist -= line_width / 2.0
+        if dist <= 0.0:
+            return f if cd(c, f) <= cd(c, d) else d
+        return None
+
+    if sim3(ff, df, d) and not sim3(ff, df, c) and not sim(uff, d):
+        # far corner of a shallow slant
+        flip = False
+        if not (sim(f, dff) and higher(f, ff)):
+            if higher(f, ff):
+                flip = True
+            if sim(uf, ff) and not sim(f, dff) and not higher(f, uf):
+                flip = True
+        if flip:
+            dist = line_width - line((2.5, -1.0), (0.5, 0.0), False)
+        else:
+            dist = line((2.5, 0.0), (0.5, 1.0), True)
+        dist -= line_width / 2.0
+        if dist <= 0.0:
+            return ff if cd(f, ff) <= cd(f, df) else df
+        return None
+
+    if sim3(f, df, dd) and not sim3(c, df, dd) and not sim(f, ddb):
+        # far corner of a steep slant
+        flip = False
+        if not (sim(d, ddf) and higher(d, dd)):
+            if higher(d, dd):
+                flip = True
+            if sim(db, dd) and not sim(d, ddf) and not higher(d, dd):
+                flip = True
+        if flip:
+            dist = line_width - line((0.0, 0.5), (-1.0, 2.5), False)
+        else:
+            dist = line((1.0, 0.5), (0.0, 2.5), True)
+        dist -= line_width / 2.0
+        if dist <= 0.0:
+            return df if cd(d, df) <= cd(d, dd) else dd
+        return None
+    return None
+
+
+def _clean_edge_colour(swatch, width, height, sx, sy, similar, line_width):
+    """The cleanEdge colour for a sample at source position (sx, sy)."""
+    cell_x = int(math.floor(sx))
+    cell_y = int(math.floor(sy))
+    point = (sx - cell_x, sy - cell_y)
+    dir_x = 1 if point[0] >= 0.5 else -1
+    dir_y = 1 if point[1] >= 0.5 else -1
+    cells = []
+    for oy in range(-2, 3):
+        y = cell_y + oy * dir_y
+        y = 0 if y < 0 else (height - 1 if y >= height else y)
+        row = y * width
+        for ox in range(-2, 3):
+            x = cell_x + ox * dir_x
+            x = 0 if x < 0 else (width - 1 if x >= width else x)
+            cells.append(swatch[row + x])
+    base = cells[12]
+    flat = (all(cell == base for cell in cells)
+            if similar <= 0.0
+            else all(_clean_similar(cell, base, similar)
+                     for cell in cells))
+    if flat:
+        # Nothing around to draw a line against: the nearest pixel stands.
+        return base
+    colour = base
+    solid = max(0.45, min(1.142, line_width))
+    lengths = {}
+    for main in ((1, 1), (-1, 1), (1, -1)):
+        picked = _clean_slice(point, (dir_x, dir_y), main, cells, similar,
+                              solid, lengths)
+        if picked is not None:
+            colour = picked
+    return colour
+
+
+def _warp_clean_edge(out, piece, homography, left, top, affine, triangles,
+                     quad, similar=None, line_width=None):
+    """Warp with cleanEdge's quadrant slices instead of a nearest sample.
+
+    Every destination pixel asks the source grid which corner of its pixel
+    the sample falls in, and the slices redraw a turned outline as a clean
+    line at that corner. Colours are only ever copied from the artwork, so
+    a warp still cannot invent a colour that was not there.
+    """
+    threshold = CLEAN_EDGE_SIMILAR if similar is None else float(similar)
+    width = CLEAN_EDGE_LINE_WIDTH if line_width is None else float(line_width)
     sw, sh = piece.width, piece.height
-    source = piece.data
+    data = piece.data
+    swatch = [(data[index] / 255.0, data[index + 1] / 255.0,
+               data[index + 2] / 255.0, data[index + 3] / 255.0)
+              for index in range(0, len(data), 4)]
     dst = out.data
-    forward = _quad_homography(
-        [(0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh)),
-         (0.0, float(sh))], quad)
-    if forward is None:
-        return
-    f0, f1, f2, f3, f4, f5, f6, f7 = forward
-    for sy in range(sh):
-        for sx in range(sw):
-            source_index = (sy * sw + sx) * 4
-            if not source[source_index + 3]:
-                continue
-            if _opaque_neighbor_count(piece, sx, sy):
-                continue
-            px = sx + 0.5
-            py = sy + 0.5
-            divisor = f6 * px + f7 * py + 1.0
-            if abs(divisor) < 1e-12:
-                continue
-            dx = (f0 * px + f1 * py + f2) / divisor
-            dy = (f3 * px + f4 * py + f5) / divisor
-            tx = int(math.floor(dx))
-            ty = int(math.floor(dy))
-            if tx < left or tx >= left + out.width:
-                continue
-            if ty < top or ty >= top + out.height:
-                continue
-            target = ((ty - top) * out.width + (tx - left)) * 4
-            if dst[target + 3]:
-                continue
-            dst[target:target + 4] = source[source_index:source_index + 4]
-
-
-def _reconnect_broken_specks(out, piece, quad, homography, left, top):
-    """Nudge isolated rotated pixels back against their neighbours.
-
-    A source pixel connected only diagonally can map to a destination pixel
-    with no neighbours at all. That looks like a stray speck even though the
-    source pixel is real. Move such a pixel one cell to an empty neighbour
-    that touches another pixel, keeping its colour and the pixel count. An
-    intentionally isolated single-pixel dot is left alone.
-    """
-    h0, h1, h2, h3, h4, h5, h6, h7 = homography
-    sw, sh = piece.width, piece.height
-    source = piece.data
-    isolated = []
     for y in range(out.height):
+        wy = top + y + 0.5
+        row = y * out.width
         for x in range(out.width):
-            if not out.rgba(x, y)[3]:
+            point = _warp_source(piece, left + x + 0.5, wy, homography,
+                                 affine, triangles, quad)
+            if point is None:
                 continue
-            if _opaque_neighbor_count(out, x, y):
-                continue
-            px = left + x + 0.5
-            py = top + y + 0.5
-            divisor = h6 * px + h7 * py + 1.0
-            if abs(divisor) < 1e-12:
-                continue
-            sx = (h0 * px + h1 * py + h2) / divisor
-            sy = (h3 * px + h4 * py + h5) / divisor
+            sx, sy = point
             if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
                 continue
-            source_index = (int(sy) * sw + int(sx)) * 4
-            if not source[source_index + 3]:
+            colour = _clean_edge_colour(swatch, sw, sh, sx, sy, threshold,
+                                        width)
+            if colour[3] <= 0.0:
                 continue
-            if not _opaque_neighbor_count(piece, int(sx), int(sy)):
-                # The source was a deliberate lone dot; do not move it.
-                continue
-            isolated.append((x, y))
-    for x, y in isolated:
-        if not out.rgba(x, y)[3] or _opaque_neighbor_count(out, x, y):
-            continue
-        colour = out.rgba(x, y)
-        best = None
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if not dx and not dy:
-                    continue
-                nx, ny = x + dx, y + dy
-                if not (0 <= nx < out.width and 0 <= ny < out.height):
-                    continue
-                if out.rgba(nx, ny)[3]:
-                    continue
-                if not _point_in_quad(quad, left + nx + 0.5, top + ny + 0.5):
-                    continue
-                count = _opaque_neighbor_count(out, nx, ny,
-                                               ignore=(x, y))
-                if count and (best is None or count > best[0]):
-                    best = (count, nx, ny)
-        if best is not None:
-            out.set_rgba(best[1], best[2], colour)
-            out.set_rgba(x, y, (0, 0, 0, 0))
+            target = (row + x) * 4
+            dst[target] = min(255, int(colour[0] * 255.0 + 0.5))
+            dst[target + 1] = min(255, int(colour[1] * 255.0 + 0.5))
+            dst[target + 2] = min(255, int(colour[2] * 255.0 + 0.5))
+            dst[target + 3] = min(255, int(colour[3] * 255.0 + 0.5))
+    return out
 
 
-def warp_piece(piece, quad, width, height, smooth=False):
+def warp_piece(piece, quad, width, height, smooth=False, mode=None,
+               rotsprite_scale=None, rotsprite_similar=None):
     """Draw the piece into a quadrilateral on a width x height canvas.
 
-    A single projective map samples every destination pixel back into the
-    source, so any convex quad works: scaling, shearing, rotation and
-    perspective all go through the same path. Transforms use exact
-    nearest-neighbour sampling by default; pass `smooth=True` for
-    partial-alpha supersampled edges. Pixels outside the canvas or the quad
-    stay transparent. Returns (left, top, bitmap) for the clipped box to stamp.
+    Parallelogram quads (move, scale, shear and rotation) use an exact
+    affine inverse, so thin pieces cannot distort through an
+    ill-conditioned projective solve. True perspective quads use one
+    projective map, and twisted or dented quads fall back to two affine
+    triangles so they shear instead of exploding across the canvas.
+
+    `mode` picks the sampling algorithm: "CleanEdge" (the default: cleanEdge's
+    quadrant slices redraw a turned outline as a clean line), "RotSprite"
+    (8x Scale2x pixel guessing, then a nearest rotate and shrink), "Nearest"
+    (one source sample per destination pixel), "Smooth" (bilinear, the
+    faiface/pixel smooth toggle), or "Transpose 90" (exact quarter turns by
+    transpose and row reversal, falling back to nearest when the quad is not
+    a right angle).
+    `smooth`
+    is the older spelling of "Smooth" and still works. Pixels outside the
+    canvas or the artwork stay transparent. Returns (left, top, bitmap) for
+    the clipped box to stamp.
     """
     if len(quad) != 4:
         raise HexError("a transform box needs four corners")
+    quad = [(float(x), float(y)) for x, y in quad]
     xs = [point[0] for point in quad]
     ys = [point[1] for point in quad]
-    # Include a pixel only when its centre lies inside the quad. Edge-based
-    # floor/ceil bounds add a half-pixel border, which shifts even-sized
-    # pieces at 90 degrees and makes thin pieces look cropped.
-    left = max(0, int(math.ceil(min(xs) - 0.5)))
-    top = max(0, int(math.ceil(min(ys) - 0.5)))
-    right = min(width - 1, int(math.ceil(max(xs) - 0.5)) - 1)
-    bottom = min(height - 1, int(math.ceil(max(ys) - 0.5)) - 1)
+    # One pixel convention everywhere: pixel (x, y) covers the square
+    # [x, x + 1) x [y, y + 1), so the clipped box holds every pixel whose
+    # square meets the quad's bounding box. This matches box_from_quad
+    # and keeps rotate_piece and the live preview on the same grid.
+    left = max(0, int(math.floor(min(xs))))
+    top = max(0, int(math.floor(min(ys))))
+    right = min(width - 1, int(math.ceil(max(xs))) - 1)
+    bottom = min(height - 1, int(math.ceil(max(ys))) - 1)
     if right < left or bottom < top:
         return left, top, Bitmap(1, 1)
     out = Bitmap(right - left + 1, bottom - top + 1)
@@ -1156,92 +1798,73 @@ def warp_piece(piece, quad, width, height, smooth=False):
     dst = out.data
     corners = [(0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh)),
                (0.0, float(sh))]
-    homography = _quad_homography(quad, corners)
-    if homography is None:
-        return left, top, Bitmap(1, 1)
-    h0, h1, h2, h3, h4, h5, h6, h7 = homography
-    # h6 and h7 are the projective terms. Scaling, rotation and shearing are
-    # affine, so they keep the strict edge test below and stay exact. Only a
-    # real perspective quad needs the boundary clamp and forward fill that
-    # keep pinched source pixels alive; applying those to affine transforms
-    # would add pixels outside the transform box.
-    projective = abs(h6) > 1e-9 or abs(h7) > 1e-9
-    epsilon = 1e-9
-    rotated = not projective and abs(h1) > 1e-9 and abs(h3) > 1e-9
-    if smooth and not projective:
-        # Coverage supersampling softens transformed edges while keeping only
-        # source RGB colours. Translation and integer scaling still land on
-        # whole source pixels, so they remain exact.
-        _warp_smooth(out, piece, homography, left, top)
-        _restore_isolated_dots(out, piece, quad, left, top)
-    else:
-        for y in range(top, bottom + 1):
-            py = y + 0.5
-            row = (y - top) * out.width
-            for x in range(left, right + 1):
-                px = x + 0.5
-                divisor = h6 * px + h7 * py + 1.0
-                if abs(divisor) < 1e-12:
-                    continue
-                sx = (h0 * px + h1 * py + h2) / divisor
-                sy = (h3 * px + h4 * py + h5) / divisor
-                if projective:
-                    # A destination pixel whose centre lands on the source
-                    # edge maps to sx == sw or sy == sh. That is the last
-                    # source pixel, so clamp the overshoot instead of
-                    # dropping the outermost row/column.
-                    if (sx < -epsilon or sy < -epsilon
-                            or sx > sw + epsilon or sy > sh + epsilon):
-                        continue
-                    ix = max(0, min(sw - 1, int(sx)))
-                    iy = max(0, min(sh - 1, int(sy)))
-                else:
-                    if sx < 0.0 or sy < 0.0 or sx >= sw or sy >= sh:
-                        continue
-                    ix, iy = int(sx), int(sy)
-                source_index = (iy * sw + ix) * 4
-                if not source[source_index + 3]:
-                    continue
-                target = (row + (x - left)) * 4
-                dst[target:target + 4] = source[source_index:
-                                                source_index + 4]
-    # A quarter turn or another affine rotation can split a diagonal source
-    # connection into a lone destination speck. Reattach those pixels only
-    # for genuine rotations; translation, scaling and shearing keep their
-    # exact sampling and perspective keeps its pinch-fill behaviour.
-    if rotated and smooth:
-        _reconnect_broken_specks(out, piece, quad, homography, left, top)
-    # Perspective can make one corner of the source smaller than a destination
-    # pixel. Inverse sampling alone would then never visit that source pixel,
-    # leaving a hole in the warped piece. Fill a destination pixel that the
-    # forward map reaches and inverse sampling missed. This is deliberately
-    # limited to projective quads so affine scaling/rotation/shear cannot grow
-    # an extra fringe around the box.
-    if projective:
-        forward = _quad_homography(corners, quad)
-        if forward is not None:
-            f0, f1, f2, f3, f4, f5, f6, f7 = forward
-            for iy in range(sh):
-                sy = iy + 0.5
-                for ix in range(sw):
-                    source_index = (iy * sw + ix) * 4
-                    if not source[source_index + 3]:
-                        continue
-                    sx = ix + 0.5
-                    divisor = f6 * sx + f7 * sy + 1.0
-                    if abs(divisor) < 1e-12:
-                        continue
-                    dx = (f0 * sx + f1 * sy + f2) / divisor
-                    dy = (f3 * sx + f4 * sy + f5) / divisor
-                    tx = int(math.floor(dx))
-                    ty = int(math.floor(dy))
-                    if tx < left or tx > right or ty < top or ty > bottom:
-                        continue
-                    target = ((ty - top) * out.width + (tx - left)) * 4
-                    if dst[target + 3]:
-                        continue
-                    dst[target:target + 4] = source[source_index:
-                                                    source_index + 4]
+    convex = _quad_is_convex(quad)
+    affine = _affine_from_parallelogram(quad, sw, sh) if convex else None
+    homography = None
+    triangles = None
+    if affine is None and convex:
+        homography = _quad_homography(quad, corners)
+        if homography is None:
+            return left, top, Bitmap(1, 1)
+    elif not convex:
+        # Two affine triangles along the source diagonal. Concave and
+        # bow-tie quads stay bounded; each destination pixel is sampled
+        # from the triangle that contains it.
+        triangles = [
+            ([quad[0], quad[1], quad[2]],
+             (0.0, 0.0), (float(sw), 0.0), (float(sw), float(sh))),
+            ([quad[0], quad[2], quad[3]],
+             (0.0, 0.0), (float(sw), float(sh)), (0.0, float(sh))),
+        ]
+    if mode is None:
+        mode = "Smooth" if smooth else "CleanEdge"
+    mode = str(mode)
+    if mode == "RotSprite":
+        # RotSprite is a rotation algorithm. A move, scale or perspective
+        # warp keeps plain nearest neighbour, so dragging a selection can
+        # never redraw the artwork and a scale stays pixel exact.
+        if affine is None or (abs(affine[1]) < 1e-6
+                              and abs(affine[2]) < 1e-6):
+            mode = "Nearest"
+    if mode in ("Transpose 90", "RotSprite", "CleanEdge"):
+        turned = _quarter_turn_piece(piece, affine if convex else None)
+        if (turned is not None
+                and _stamp_quarter_turn(out, turned, xs, ys, left, top)):
+            return left, top, out
+        if mode == "Transpose 90":
+            mode = "Nearest"
+        elif mode == "RotSprite":
+            return left, top, _warp_rotsprite(
+                out, piece, homography, left, top, affine, triangles, quad,
+                scale=rotsprite_scale, similar=rotsprite_similar)
+    if mode == "Smooth":
+        _warp_smooth(out, piece, homography, left, top,
+                     affine=affine, triangles=triangles)
+        return left, top, out
+    if mode == "CleanEdge":
+        # Like RotSprite, cleanEdge only earns its keep on a turned piece.
+        # An axis-aligned move or scale stays an exact nearest sample.
+        if affine is None or (abs(affine[1]) < 1e-6
+                              and abs(affine[2]) < 1e-6):
+            mode = "Nearest"
+        else:
+            return left, top, _warp_clean_edge(out, piece, homography,
+                                               left, top, affine, triangles,
+                                               quad)
+
+    for y in range(top, bottom + 1):
+        py = y + 0.5
+        row = (y - top) * out.width
+        for x in range(left, right + 1):
+            sampled = _warp_sample(piece, x + 0.5, py, homography, affine,
+                                   triangles, quad)
+            if sampled is None:
+                continue
+            index = (sampled[1] * sw + sampled[0]) * 4
+            if not source[index + 3]:
+                continue
+            target = (row + (x - left)) * 4
+            dst[target:target + 4] = source[index:index + 4]
     return left, top, out
 
 

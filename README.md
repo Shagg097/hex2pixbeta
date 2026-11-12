@@ -181,10 +181,14 @@ with a selection tool subtracts. Tolerance lives in the left panel; `0` means
 an exact byte match.
 
 **Move / Scale** turns a selection into a floating piece. Drag inside it to
-move, `Shift`+drag to scale from the opposite corner, or `Ctrl`+drag to rotate
-in 15° steps. **Smooth edges** is off by default for exact nearest-neighbour
-pixels; turn it on in the tool options to soften rotated and fractionally
-scaled edges with partial-transparent pixels.
+move, `Shift`+drag to scale from the opposite corner, or `Ctrl`+drag to
+rotate. Rotation uses **CleanEdge** by default: each destination pixel takes
+its colour from cleanEdge's quadrant slices, so a turned outline is redrawn
+as a clean line instead of breaking into dashes. The **Algorithm** menu also
+offers RotSprite (8x Scale2x pixel guessing, then a nearest rotate and
+shrink), Nearest and Transpose 90, and **Smooth edges** is a separate toggle
+that blends the rotated edges instead; moves, scales and perspective stay on
+exact nearest-neighbour pixels whichever is picked.
 Scaling keeps the piece's proportions and holds the opposite
 corner still, so a drag can neither squash the artwork nor flip it, and
 rotation only starts once the pointer leaves the middle, so grabbing the
@@ -212,7 +216,9 @@ used from that folder, and hovering it lists what is inside.
 | Picker | Pick a color into the foreground or background |
 | Line | Drag a straight line; `Shift` snaps to 0°, 45° or 90°; **Background** paints in the BG color |
 | Curve | Bend a line by a percentage, split it into 1–8 arcs and choose left, right or alternating sides; **Background** paints in the BG color |
-| Rectangle / Ellipse / Triangle / Diamond / Star / Arrow | Outline or filled preset shapes; `Shift` constrains to a square or circle, and **Background** paints with the BG color so the shape cuts into the artwork |
+| Rectangle / Ellipse | Outline or filled preset shapes; `Shift` constrains to a square or circle; when filled, **Background** uses the BG color for the interior and keeps the outline in FG |
+| Triangle / Diamond / Star | Outline or filled polygons with **Points** (3-24), **Angle** (-180° to 180°) and **Depth** (inner radius percentage; 100% is a regular polygon); defaults are 3, 4 and 5 points; `Shift` constrains to a square; when filled, **Background** uses the BG color for the interior and keeps the outline in FG |
+| Arrow | Outline or filled arrow with **Shape** (Triangle or Barbed), **Body** thickness and **Head** length; both sizes are percentages; when filled, **Background** uses the BG color for the interior and keeps the outline in FG |
 | Gradient | Interpolate foreground to background (linear or radial), or step through the whole palette; Spread clamps, repeats or reflects; optional dithering |
 | Contour | Draw an inside or outside ring around a selection or opaque artwork |
 | Blur | Soften with a 3×3 neighborhood; strength controls the mix, smear drags colour along the stroke, and the tip picks the footprint |
@@ -223,10 +229,14 @@ used from that folder, and hovering it lists what is inside.
 
 Brush size, tip shape and mirroring are shared across the painting tools,
 Blur and Shuffle included. The tip is **Square**, **Circle** or **Custom**:
-**Edit…** opens a 9×9 grid where clicking cells shapes your own footprint,
-which then scales to the tool's Size, and it is remembered between sessions.
-**Pattern tip** on the Pencil stamps the Pattern tab's grid as the brush, in
-the pattern's own colours, so a drag paints the tile itself.
+**Edit…** opens a grid from 1×1 to 24×24 where clicking cells shapes your own
+footprint; rectangular tips keep their proportions when they scale to the
+tool's Size, and the tip is remembered between sessions. Right-click a
+selection and choose **Copy to custom tip** to turn its visible pixels into a
+tip, with oversized artwork sampled down to the 24×24 limit.
+**Pattern tip** on the Pencil uses the Pattern tab's colours inside the
+current brush size and tip. The grid no longer replaces the tip shape, so a
+square stays square and a circle stays round.
 Mirroring can work across the X axis, Y axis, or both. Shapes and brush strokes
 preview live while dragging.
 

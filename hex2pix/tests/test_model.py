@@ -1,5 +1,6 @@
 """Unit tests for the pure hex2pix model."""
 
+import math
 import unittest
 
 from hex2pix import model
@@ -16,7 +17,7 @@ from hex2pix.model import (
     rotate_piece, rotate_ramp, scale_box,
     box_from_quad, quad_centre, quad_from_box, quad_handles,
     quad_move_corner, quad_rotate, quad_scale, quad_shear, quad_translate,
-    warp_piece,
+    snap_quad_to_pixel_grid, warp_piece,
     selected_bytes, selection_ellipse_mask, selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block, unique_colors,
     fill_holes,
@@ -970,14 +971,25 @@ class RotationTests(unittest.TestCase):
         self.assertLessEqual(opaque, turned.width * turned.height)
 
     def test_odd_angle_preserves_a_thin_piece(self):
+        # A 4x2 block rotated 45 degrees spans 4.24 x 4.24 units, so its
+        # pixel-grid box is 6 x 6. Coverage sampling keeps the band whole:
+        # no source pixel is dropped, there are no stray specks, and only
+        # a couple of diagonal edge cells join the run.
         piece = Bitmap(4, 2)
         piece.fill(RED)
         turned = rotate_piece(piece, 45)
-        self.assertEqual((turned.width, turned.height), (4, 4))
-        opaque = sum(1 for y in range(turned.height)
-                     for x in range(turned.width)
-                     if turned.rgba(x, y)[3])
-        self.assertEqual(opaque, 8)
+        self.assertEqual((turned.width, turned.height), (6, 6))
+        opaque = [(x, y) for y in range(turned.height)
+                  for x in range(turned.width)
+                  if turned.rgba(x, y)[3]]
+        self.assertEqual(len(opaque), 8)
+        for x, y in opaque:
+            neighbours = [1 for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                          if (dx or dy)
+                          and 0 <= x + dx < turned.width
+                          and 0 <= y + dy < turned.height
+                          and turned.rgba(x + dx, y + dy)[3]]
+            self.assertTrue(neighbours)
 
     def test_rotation_is_nearest_neighbour_by_default(self):
         piece = Bitmap(8, 8)
@@ -1116,6 +1128,20 @@ class RotationDragTests(unittest.TestCase):
         self.assertEqual(handle.update((11, 10)), turned)
         self.assertEqual(handle.update((10, 20)), turned)
 
+    def test_grab_close_to_the_centre_turns_when_the_zone_shrinks(self):
+        # A small selection puts the rotate handle only a couple of cells
+        # out; a cell-sized dead zone would ignore the whole gesture.
+        handle = RotationDrag((10.0, 10.0), (10.0, 12.2), min_radius=0.5)
+        self.assertAlmostEqual(handle.update((12.2, 10.0), 1), 270.0)
+        stuck = RotationDrag((10.0, 10.0), (10.0, 12.2))
+        self.assertEqual(stuck.update((12.2, 10.0), 1), 0.0)
+
+    def test_one_degree_snap_follows_the_pointer(self):
+        handle = RotationDrag((0.0, 0.0), (10.0, 0.0))
+        target = 10.0 * math.tan(math.radians(37.0))
+        self.assertAlmostEqual(handle.update((10.0, target), 1), 37.0,
+                               places=6)
+
     def test_angles_are_snapped_and_wrapped(self):
         handle = RotationDrag((10.0, 10.0), (10, 20))
         for pointer in ((19, 10), (10, 0), (0, 10), (10, 20)):
@@ -1151,6 +1177,13 @@ class QuadGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(turned[0][1], 0.0)
         self.assertAlmostEqual(turned[1][0], 1.0)
         self.assertAlmostEqual(turned[1][1], 1.0)
+
+    def test_snapping_only_moves_an_axis_aligned_quad(self):
+        aligned = [(0.4, 0.6), (2.4, 0.6), (2.4, 3.6), (0.4, 3.6)]
+        self.assertEqual(snap_quad_to_pixel_grid(aligned),
+                         [(0.0, 1.0), (2.0, 1.0), (2.0, 4.0), (0.0, 4.0)])
+        turned = quad_rotate(quad_from_box((0, 0, 3, 2)), (1.5, 1.0), 45)
+        self.assertEqual(snap_quad_to_pixel_grid(turned), turned)
 
     def test_shear_moves_only_the_chosen_edge(self):
         quad = quad_from_box((0, 0, 10, 10))
@@ -1274,6 +1307,32 @@ class WarpPieceTests(unittest.TestCase):
             for x in range(turned.width):
                 self.assertEqual(warped.rgba(x, y), turned.rgba(x, y))
 
+    def test_quarter_turns_keep_thin_non_square_pieces_exact(self):
+        # A one-pixel-wide piece puts both output pixel centres on source
+        # boundaries after a quarter turn. Rounding used to drop the last
+        # row and duplicate the first, which is glaring on a thin line.
+        for width, height in ((2, 1), (3, 1), (1, 2), (1, 3), (2, 3),
+                              (3, 2), (4, 3), (3, 4)):
+            piece = Bitmap(width, height)
+            for y in range(height):
+                for x in range(width):
+                    piece.set_rgba(x, y, (20 + x * 40, 20 + y * 40,
+                                          x * 7 + y * 3, 255))
+            for angle in (90, 180, 270):
+                for smooth in (False, True):
+                    box = (10, 10, width, height)
+                    centre = (10 + width / 2.0, 10 + height / 2.0)
+                    quad = quad_rotate(quad_from_box(box), centre, angle)
+                    quad = snap_quad_to_pixel_grid(quad)
+                    _left, _top, warped = warp_piece(piece, quad, 40, 40,
+                                                     smooth=smooth)
+                    turned = rotate_piece(piece, angle, smooth=smooth)
+                    self.assertEqual((warped.width, warped.height),
+                                     (turned.width, turned.height),
+                                     (width, height, angle, smooth))
+                    self.assertEqual(warped.data, turned.data,
+                                     (width, height, angle, smooth))
+
     def test_perspective_corners_follow_the_projective_map(self):
         piece = self.piece()
         quad = [(0.0, 0.0), (4.0, 0.0), (3.0, 4.0), (1.0, 4.0)]
@@ -1307,11 +1366,48 @@ class WarpPieceTests(unittest.TestCase):
                 return (all(value >= -1e-9 for value in signs)
                         or all(value <= 1e-9 for value in signs))
 
+            def segments_hit(p1, p2, p3, p4):
+                def direction(a, b, c):
+                    return ((c[1] - a[1]) * (b[0] - a[0])
+                            - (b[1] - a[1]) * (c[0] - a[0]))
+                d1 = direction(p3, p4, p1)
+                d2 = direction(p3, p4, p2)
+                d3 = direction(p1, p2, p3)
+                d4 = direction(p1, p2, p4)
+                return (((d1 > 0 > d2) or (d2 > 0 > d1))
+                        and ((d3 > 0 > d4) or (d4 > 0 > d3)))
+
+            def square_hits_quad(x, y):
+                # A rotated edge can cover a sliver of a pixel whose
+                # centre lies just outside the quad. Those pixels are
+                # real coverage, not fringe, so the rule is square
+                # intersection: centre in, corner in, quad corner inside
+                # the square, or an edge crossing.
+                if inside(x + 0.5, y + 0.5):
+                    return True
+                corners = [(x, y), (x + 1, y),
+                           (x + 1, y + 1), (x, y + 1)]
+                if any(inside(cx, cy) for cx, cy in corners):
+                    return True
+                for qx, qy in quad:
+                    if x - 1e-9 <= qx <= x + 1 + 1e-9 \
+                            and y - 1e-9 <= qy <= y + 1 + 1e-9:
+                        return True
+                square_edges = [(corners[0], corners[1]),
+                                (corners[1], corners[2]),
+                                (corners[2], corners[3]),
+                                (corners[3], corners[0])]
+                quad_edges = [(quad[index], quad[(index + 1) % 4])
+                              for index in range(4)]
+                return any(segments_hit(s1, s2, q1, q2)
+                           for s1, s2 in square_edges
+                           for q1, q2 in quad_edges)
+
             for y in range(warped.height):
                 for x in range(warped.width):
                     if warped.rgba(x, y)[3]:
-                        self.assertTrue(inside(left + x + 0.5,
-                                               top + y + 0.5))
+                        self.assertTrue(square_hits_quad(left + x,
+                                                        top + y))
 
     def test_rotation_keeps_a_diagonal_pixel_attached(self):
         piece = Bitmap(3, 3)
@@ -1323,8 +1419,17 @@ class WarpPieceTests(unittest.TestCase):
                   for x in range(turned.width)
                   if turned.rgba(x, y)[3]]
         self.assertTrue(opaque)
-        self.assertEqual(set(turned.rgba(x, y)[:3] for x, y in opaque),
-                         {colour[:3] for colour in (RED, GREEN, BLUE)})
+        # Bilinear blending mixes neighbour colours at the boundaries,
+        # so every channel must stay inside the source range instead of
+        # matching one source colour exactly.
+        for x, y in opaque:
+            r, g, b, _a = turned.rgba(x, y)
+            self.assertTrue(min(c[0] for c in (RED, GREEN, BLUE))
+                            <= r <= max(c[0] for c in (RED, GREEN, BLUE)))
+            self.assertTrue(min(c[1] for c in (RED, GREEN, BLUE))
+                            <= g <= max(c[1] for c in (RED, GREEN, BLUE)))
+            self.assertTrue(min(c[2] for c in (RED, GREEN, BLUE))
+                            <= b <= max(c[2] for c in (RED, GREEN, BLUE)))
         for x, y in opaque:
             self.assertTrue(any(0 <= x + dx < turned.width
                                 and 0 <= y + dy < turned.height
@@ -1334,13 +1439,23 @@ class WarpPieceTests(unittest.TestCase):
                                 if dx or dy))
 
     def test_rotation_keeps_an_intentional_single_pixel(self):
+        # Bilinear blending spreads one dot over its neighbours, so the
+        # dot survives at full strength in the middle with a small soft
+        # halo instead of vanishing or duplicating across the canvas.
         piece = Bitmap(3, 3)
         piece.set_rgba(1, 1, RED)
         turned = rotate_piece(piece, 45, smooth=True)
         opaque = [(x, y) for y in range(turned.height)
                   for x in range(turned.width)
                   if turned.rgba(x, y)[3]]
-        self.assertEqual(len(opaque), 1)
+        self.assertTrue(opaque)
+        self.assertLessEqual(len(opaque), 9)
+        centre = max(opaque,
+                     key=lambda pos: turned.rgba(pos[0], pos[1])[3])
+        self.assertEqual(turned.rgba(centre[0], centre[1]), RED)
+        for x, y in opaque:
+            self.assertLessEqual(max(abs(x - centre[0]),
+                                     abs(y - centre[1])), 1)
 
     def test_perspective_pinch_keeps_the_last_source_pixel(self):
         piece = Bitmap(2, 2)
@@ -1356,6 +1471,401 @@ class WarpPieceTests(unittest.TestCase):
         seen = set(warped.rgba(x, y) for y in range(warped.height)
                    for x in range(warped.width) if warped.rgba(x, y)[3])
         self.assertEqual(seen, set(colours))
+
+
+class RotationQualityTests(unittest.TestCase):
+    """Invariants that catch shattered, speckled rotations.
+
+    Hard mode is coverage sampled, so rotated artwork keeps its area, never
+    scatters solitary pixels and keeps one-pixel details in one piece. These
+    three properties regressed together when centre-point sampling plus a
+    gap-filling pass replaced the shape with a cloud of dots.
+    """
+
+    RED = (255, 0, 0, 255)
+
+    @classmethod
+    def _solid(cls, width, height):
+        piece = Bitmap(width, height)
+        piece.fill(cls.RED)
+        return piece
+
+    @staticmethod
+    def _opaque(bitmap):
+        return {(x, y) for y in range(bitmap.height)
+                for x in range(bitmap.width) if bitmap.rgba(x, y)[3]}
+
+    @staticmethod
+    def _isolated(points):
+        """Opaque pixels with no 8-connected opaque neighbour."""
+        return sorted(point for point in points
+                      if not any((point[0] + dx, point[1] + dy) in points
+                                 for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                                 if dx or dy))
+
+    @staticmethod
+    def _largest_piece(points):
+        """Size of the biggest 8-connected group of pixels."""
+        best = 0
+        seen = set()
+        for start in points:
+            if start in seen:
+                continue
+            stack = [start]
+            size = 0
+            while stack:
+                point = stack.pop()
+                if point in seen:
+                    continue
+                seen.add(point)
+                size += 1
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        neighbour = (point[0] + dx, point[1] + dy)
+                        if neighbour in points and neighbour not in seen:
+                            stack.append(neighbour)
+            if size > best:
+                best = size
+        return best
+
+    def test_rotation_keeps_a_solid_shape_area(self):
+        # A 64-pixel square stays within a few percent at every snap
+        # angle; the spread comes from diagonal edge cells that coverage
+        # sampling legitimately claims. Measured range: 60 to 68.
+        piece = self._solid(8, 8)
+        for angle in range(15, 360, 15):
+            turned = rotate_piece(piece, float(angle))
+            area = len(self._opaque(turned))
+            self.assertGreaterEqual(area, 60, "area %d at %d deg"
+                                    % (area, angle))
+            self.assertLessEqual(area, 68, "area %d at %d deg"
+                                 % (area, angle))
+
+    def test_rotation_never_scatters_isolated_pixels(self):
+        # A deliberate lone source pixel is content, but a rotated solid
+        # shape must not sprout pixels one cell away from the mass.
+        for piece in (self._solid(8, 8), self._solid(5, 3),
+                      self._solid(2, 7)):
+            for angle in range(1, 360, 10):
+                turned = rotate_piece(piece, float(angle))
+                self.assertEqual(
+                    self._isolated(self._opaque(turned)), [],
+                    "%dx%d at %d deg"
+                    % (piece.width, piece.height, angle))
+
+    def test_thin_line_stays_one_connected_shape_every_angle(self):
+        # A one-pixel line used to come back as scattered dots: eight
+        # pixels where only two touched. Nearest-neighbour sampling can
+        # drop a cell where the line slips between pixel centres, so the
+        # count may fall a little and rise where a shallow angle crosses
+        # a row boundary, but the line must stay one piece and must not
+        # double in thickness.
+        piece = self._solid(8, 1)
+        for angle in range(1, 360):
+            turned = rotate_piece(piece, float(angle))
+            points = self._opaque(turned)
+            self.assertGreaterEqual(len(points), 6,
+                                    "lost pixels at %d deg" % angle)
+            self.assertLessEqual(
+                len(points), 12,
+                "fattened to %d at %d deg" % (len(points), angle))
+            self.assertEqual(
+                self._largest_piece(points), len(points),
+                "broken into separate pieces at %d deg" % angle)
+            self.assertEqual(self._isolated(points), [],
+                             "stray pixels at %d deg" % angle)
+
+    def test_rotated_hard_pixels_stay_source_colours(self):
+        # Hard mode must never invent blended colours; anti-aliasing is
+        # only what the optional Smooth edges pass adds.
+        piece = Bitmap(6, 6)
+        for y in range(6):
+            for x in range(6):
+                piece.set_rgba(x, y, self.RED if (x + y) % 2
+                               else (0, 0, 255, 255))
+        allowed = {self.RED, (0, 0, 255, 255)}
+        for angle in range(15, 360, 15):
+            turned = rotate_piece(piece, float(angle))
+            seen = {turned.rgba(x, y) for y in range(turned.height)
+                    for x in range(turned.width) if turned.rgba(x, y)[3]}
+            self.assertEqual(seen - allowed, set(),
+                             "blended colour at %d deg" % angle)
+
+
+class ThinPieceWarpTests(unittest.TestCase):
+    """The live sampler must not double or drop the edge of a thin piece.
+
+    Sampling a destination centre that lands exactly on the quad's far edge
+    read the last source row or column again, so every odd-sized piece came
+    back one row or column too fat.
+    """
+
+    def _block(self, width, height):
+        piece = model.Bitmap(width, height)
+        for y in range(height):
+            for x in range(width):
+                piece.set_rgba(x, y, (255, 220, 60, 255))
+        return piece
+
+    def _live_points(self, piece, degrees, size=80):
+        centre = (size / 2.0, size / 2.0)
+        quad = model.quad_rotate(
+            model.quad_from_box((0, 0, piece.width, piece.height)),
+            (piece.width / 2.0, piece.height / 2.0), degrees)
+        quad = [(x - piece.width / 2.0 + centre[0],
+                 y - piece.height / 2.0 + centre[1]) for x, y in quad]
+        left, top, warped = model.warp_piece(piece, quad, size, size,
+                                             mode="Nearest")
+        return {(x + left, y + top) for y in range(warped.height)
+                for x in range(warped.width) if warped.rgba(x, y)[3]}
+
+    def test_a_one_pixel_piece_stays_one_pixel(self):
+        for width, height in ((1, 12), (12, 1), (1, 1), (3, 5)):
+            piece = self._block(width, height)
+            for degrees in (0, 90, 180, 270):
+                self.assertEqual(len(self._live_points(piece, degrees)),
+                                 width * height, (width, height, degrees))
+
+    def test_a_turned_thin_piece_stays_in_one_piece(self):
+        piece = self._block(1, 12)
+        for degrees in range(0, 360, 11):
+            points = self._live_points(piece, degrees)
+            self.assertTrue(points, degrees)
+            remaining = set(points)
+            pieces = 0
+            while remaining:
+                pieces += 1
+                stack = [remaining.pop()]
+                while stack:
+                    x, y = stack.pop()
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            point = (x + dx, y + dy)
+                            if point in remaining:
+                                remaining.remove(point)
+                                stack.append(point)
+            self.assertEqual(pieces, 1, degrees)
+            self.assertLessEqual(len(points), 20, degrees)
+
+
+class TransformAlgorithmTests(unittest.TestCase):
+    """The transform algorithm menu, one test per entry."""
+
+    def _sprite(self):
+        piece = model.Bitmap(5, 3)
+        for y in range(3):
+            for x in range(5):
+                piece.set_rgba(x, y, (20 * x, 40 * y, 90, 255))
+        return piece
+
+    def _quad(self, piece, degrees, size=40.0):
+        quad = model.quad_rotate(
+            model.quad_from_box((0, 0, piece.width, piece.height)),
+            (piece.width / 2.0, piece.height / 2.0), degrees)
+        return [(x - piece.width / 2.0 + size / 2.0,
+                 y - piece.height / 2.0 + size / 2.0) for x, y in quad]
+
+    def test_the_menu_lists_every_algorithm(self):
+        self.assertEqual(model.TRANSFORM_ALGORITHMS,
+                         ("RotSprite", "Nearest", "CleanEdge",
+                          "Transpose 90"))
+
+    def test_clean_edge_is_the_default(self):
+        piece = self._sprite()
+        quad = self._quad(piece, 27.0)
+        default = model.warp_piece(piece, quad, 80, 80)
+        named = model.warp_piece(piece, quad, 80, 80, mode="CleanEdge")
+        self.assertEqual(default[2].data, named[2].data)
+
+    def test_rotsprite_keeps_the_palette_and_the_identity(self):
+        piece = self._sprite()
+        flat = model.warp_piece(piece, model.quad_from_box((0, 0, 5, 3)),
+                                20, 20, mode="RotSprite")[2]
+        self.assertEqual(flat.data, bytes(piece.data))
+        turned = model.warp_piece(piece, self._quad(piece, 27.0), 80, 80,
+                                  mode="RotSprite")[2]
+        colours = {turned.rgba(x, y) for y in range(turned.height)
+                   for x in range(turned.width) if turned.rgba(x, y)[3]}
+        source = {piece.rgba(x, y) for y in range(piece.height)
+                  for x in range(piece.width) if piece.rgba(x, y)[3]}
+        self.assertTrue(colours <= source)
+
+    def test_rotsprite_keeps_a_turned_line_in_one_piece(self):
+        piece = model.Bitmap(1, 12)
+        for y in range(12):
+            piece.set_rgba(0, y, (255, 220, 60, 255))
+        left, top, warped = model.warp_piece(
+            piece, self._quad(piece, 27.0), 80, 80, mode="RotSprite")
+        points = {(x + left, y + top) for y in range(warped.height)
+                  for x in range(warped.width) if warped.rgba(x, y)[3]}
+        self.assertGreaterEqual(len(points), 10)
+        remaining = set(points)
+        pieces = 0
+        while remaining:
+            pieces += 1
+            stack = [remaining.pop()]
+            while stack:
+                x, y = stack.pop()
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        point = (x + dx, y + dy)
+                        if point in remaining:
+                            remaining.remove(point)
+                            stack.append(point)
+        self.assertEqual(pieces, 1)
+
+    def test_smooth_is_the_bilinear_sampler(self):
+        piece = self._sprite()
+        quad = self._quad(piece, 27.0)
+        legacy = model.warp_piece(piece, quad, 80, 80, smooth=True)
+        named = model.warp_piece(piece, quad, 80, 80, mode="Smooth")
+        self.assertEqual(legacy[2].data, named[2].data)
+
+    def test_transpose_quarter_turn_copies_pixels_exactly(self):
+        piece = self._sprite()
+        quad = self._quad(piece, 90.0)
+        left, top, warped = model.warp_piece(piece, quad, 80, 80,
+                                             mode="Transpose 90")
+        want = model.rotate90(piece, True)
+        offset_x = int(round(min(p[0] for p in quad) - left))
+        offset_y = int(round(min(p[1] for p in quad) - top))
+        rows = []
+        for row in range(want.height):
+            start = ((offset_y + row) * warped.width + offset_x) * 4
+            rows.append(bytes(warped.data[start:start + want.width * 4]))
+        self.assertEqual(b"".join(rows), bytes(want.data))
+
+    def test_transpose_falls_back_to_nearest_for_odd_angles(self):
+        piece = self._sprite()
+        quad = self._quad(piece, 27.0)
+        turned = model.warp_piece(piece, quad, 80, 80, mode="Transpose 90")
+        nearest = model.warp_piece(piece, quad, 80, 80, mode="Nearest")
+        self.assertEqual(turned[2].data, nearest[2].data)
+
+    def test_clean_edge_leaves_a_translated_piece_exact(self):
+        piece = self._sprite()
+        quad = model.quad_from_box((6, 4, piece.width, piece.height))
+        nearest = model.warp_piece(piece, quad, 80, 80, mode="Nearest")
+        clean = model.warp_piece(piece, quad, 80, 80, mode="CleanEdge")
+        self.assertEqual(clean[2].data, nearest[2].data)
+
+    def test_clean_edge_redraws_a_turned_diagonal(self):
+        piece = model.Bitmap(9, 9)
+        for y in range(9):
+            for x in range(9):
+                if x + y <= 8:
+                    piece.set_rgba(x, y, (200, 30, 30, 255))
+        quad = self._quad(piece, 27.0)
+        nearest = model.warp_piece(piece, quad, 80, 80, mode="Nearest")[2]
+        clean = model.warp_piece(piece, quad, 80, 80, mode="CleanEdge")[2]
+        self.assertNotEqual(clean.data, nearest.data)
+
+    def test_clean_edge_rotates_without_pinholes(self):
+        piece = model.Bitmap(10, 10)
+        for y in range(10):
+            for x in range(10):
+                piece.set_rgba(x, y, (200, 30, 30, 255))
+        warped = model.warp_piece(piece, self._quad(piece, 27.0), 80, 80,
+                                  mode="CleanEdge")[2]
+        opaque = {(x, y) for y in range(warped.height)
+                  for x in range(warped.width) if warped.rgba(x, y)[3]}
+        self.assertGreater(len(opaque), 60)
+        for x, y in [(x, y) for y in range(1, warped.height - 1)
+                     for x in range(1, warped.width - 1)
+                     if (x, y) not in opaque]:
+            around = sum(1 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                         if (x + dx, y + dy) in opaque)
+            self.assertLess(around, 4)
+        remaining = set(opaque)
+        pieces = 0
+        while remaining:
+            pieces += 1
+            stack = [remaining.pop()]
+            while stack:
+                px, py = stack.pop()
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        point = (px + dx, py + dy)
+                        if point in remaining:
+                            remaining.remove(point)
+                            stack.append(point)
+        self.assertEqual(pieces, 1)
+
+    def test_clean_edge_never_invents_a_colour(self):
+        piece = model.Bitmap(9, 2)
+        for x in range(9):
+            piece.set_rgba(x, 0, (200, 30, 30, 255))
+            piece.set_rgba(x, 1, (30, 30, 200, 255))
+        warped = model.warp_piece(piece, self._quad(piece, 27.0), 80, 80,
+                                  mode="CleanEdge")[2]
+        colours = {warped.rgba(x, y) for y in range(warped.height)
+                   for x in range(warped.width) if warped.rgba(x, y)[3]}
+        self.assertTrue(colours <= {(200, 30, 30, 255),
+                                    (30, 30, 200, 255)})
+
+
+class RotSpriteOptionsTests(unittest.TestCase):
+    """The RotSprite Upscale and Similar controls."""
+
+    def _piece(self):
+        piece = model.Bitmap(4, 4)
+        for y in range(4):
+            for x in range(4):
+                piece.set_rgba(x, y, (200, 30, 30, 255))
+        piece.set_rgba(1, 1, (204, 32, 32, 255))
+        piece.set_rgba(2, 2, (30, 30, 200, 255))
+        return piece
+
+    def _quad(self, piece):
+        quad = model.quad_rotate(
+            model.quad_from_box((0, 0, piece.width, piece.height)),
+            (piece.width / 2.0, piece.height / 2.0), 27.0)
+        return [(x + 20.0, y + 20.0) for x, y in quad]
+
+    def test_the_upscale_factor_is_honoured(self):
+        piece = model.Bitmap(4, 4)
+        self.assertEqual(model._rotsprite_scale(piece, 2), 2)
+        self.assertEqual(model._rotsprite_scale(piece, 4), 4)
+        self.assertEqual(model._rotsprite_scale(piece, 8), 8)
+        self.assertEqual(model._rotsprite_scale(piece, None), 8)
+
+    def test_the_pixel_cap_still_bounds_the_upscale(self):
+        big = model.Bitmap(256, 256)
+        self.assertEqual(model._rotsprite_scale(big, 8), 2)
+
+    def test_similarity_is_a_colour_distance(self):
+        base = (200, 30, 30, 255)
+        close = (204, 32, 32, 255)
+        self.assertFalse(model._similar_colour(base, close, 0))
+        self.assertTrue(model._similar_colour(base, close, 40))
+        self.assertTrue(model._similar_colour(base, base, 0))
+        self.assertTrue(model._similar_colour((0, 0, 0, 0),
+                                              (9, 9, 9, 0), 0))
+
+    def test_similarity_changes_the_upscale(self):
+        piece = model.Bitmap(3, 3)
+        for y in range(3):
+            for x in range(3):
+                piece.set_rgba(x, y, (200, 30, 30, 255))
+        piece.set_rgba(0, 1, (204, 32, 32, 255))
+        piece.set_rgba(1, 0, (206, 33, 33, 255))
+        piece.set_rgba(1, 2, (30, 30, 200, 255))
+        piece.set_rgba(2, 1, (30, 200, 30, 255))
+        strict = model._scale2x(piece, 0)
+        loose = model._scale2x(piece, 40)
+        self.assertNotEqual(strict.data, loose.data)
+
+    def test_similarity_reaches_the_warp(self):
+        piece = self._piece()
+        model.warp_piece(piece, self._quad(piece), 64, 64,
+                         mode="RotSprite", rotsprite_similar=7)
+        self.assertEqual(model._ROTSPRITE_CACHE["similar"], 7)
+
+    def test_the_upscale_factor_reaches_the_warp(self):
+        piece = self._piece()
+        model.warp_piece(piece, self._quad(piece), 64, 64,
+                         mode="RotSprite", rotsprite_scale=2)
+        self.assertEqual(model._ROTSPRITE_CACHE["scale"], 2)
 
 
 if __name__ == "__main__":

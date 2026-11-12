@@ -261,11 +261,20 @@ Aseprite-style drawing aids on top of the brush:
 
 - **Line** (Shift+N), **Rectangle** (Shift+R), **Ellipse** (Shift+U),
   **Triangle**, **Diamond**, **Star** and **Arrow** drag between two points
-  with a live preview; the **Filled shapes** checkbox picks outline or solid,
-  and **Background** paints the shape in the background colour so it cuts into
-  the artwork. The four preset polygons have no Shift shortcut; open the
+  with a live preview; the **Filled shapes** checkbox picks outline or solid.
+  When filled, **Background** switches only the interior to the background
+  colour, leaving the outline in the foreground; lines and curves still paint
+  entirely in the background colour. The four preset polygons have no Shift
+  shortcut; open the
   Shapes folder in the tool palette for them. From the keyboard, Enter sets
   one end and Enter again commits, with arrows stretching the preview.
+  **Triangle**, **Diamond** and **Star** expose **Points** (3-24), **Angle**
+  (-180 to 180 degrees) and **Depth**. Triangle starts at 3 points, Diamond at
+  4 and Star at 5. Depth is the inner radius as a percentage of the outer
+  radius: 100% draws a regular polygon, while lower values pull alternate
+  vertices inward into star points. **Arrow** has a **Shape** choice
+  (Triangle or Barbed), **Body** thickness and **Head** length, both as
+  percentages.
 - **Gradient** (Shift+V) drags a direction and interpolates the foreground to
   the background colour across the selection; **Radial** uses the distance
   from the drag start, **Whole palette** walks the palette instead, and
@@ -274,9 +283,12 @@ Aseprite-style drawing aids on top of the brush:
 - **Mirror** (left panel) mirrors brush strokes, shapes and erasing across the
   X axis, Y axis or both, like Aseprite's symmetry.
 - **Tip** switches the brush between a square, a circle and a **Custom**
-  footprint you draw on a 9×9 grid (**Edit…**), shared by every brush-like tool
-  including Blur and Shuffle. The Pencil also has **Pattern tip**, which stamps
-  the Pattern tab's grid as the brush in its own colours.
+  footprint you draw on a grid from 1×1 to 24×24 (**Edit…**), shared by every
+  brush-like tool including Blur and Shuffle. Rectangular tips keep their
+  proportions when scaled, and **Copy to custom tip** in the selection menu
+  captures the selection's visible pixels. The Pencil also has **Pattern tip**,
+  which uses the Pattern tab's colours inside the current brush size and tip;
+  it changes the painted colours, not the tip shape.
 - **Palette** keeps a scrolling swatch grid: PICO-8, DB16, Grayscale and the
   256-colour **256 Cube** preset. Left-click a swatch to use its colour,
   right-click to edit it, and **New...** builds a palette from scratch (name,
@@ -337,7 +349,7 @@ intersect. Right-drag a selection tool subtracts.
 The **Move / Scale** tool turns a selection into a floating piece: drag inside
 it to move those pixels (the original area is cleared), hold **Shift** while
 dragging to scale them from the corner opposite the one you grabbed, hold
-**Ctrl** to rotate them around their centre in 15° steps, or press `Enter` to
+**Ctrl** to rotate them around their centre, or press `Enter` to
 drop the piece with its corner on the cursor. `Escape` puts the piece back
 untouched. Scaling is
 uniform and anchored: one factor drives both axes, the opposite corner stays
@@ -345,10 +357,16 @@ put, and the drag starts from whatever size the piece already has, so it
 cannot squash the artwork or collapse on the first pixel of movement. A
 rotation grab inside the middle three pixels holds the current angle until
 the pointer leaves that dead zone, so a click near the centre cannot spin the
-piece. Transforms use exact nearest-neighbour pixels by default; turn on
-**Smooth edges** in the tool options to soften rotated and fractionally scaled
-edges with partial-transparent pixels. Quarter turns and whole-pixel moves
-stay exact either way. The selection follows the pixels, and the whole drag
+piece. Rotation uses **CleanEdge** by default: each destination pixel takes
+its colour from cleanEdge's quadrant slices, so a turned outline is redrawn
+as a clean line instead of breaking into dashes. The **Algorithm** menu also
+offers RotSprite (8x Scale2x pixel guessing, then a nearest rotate and
+shrink), Nearest and Transpose 90, and **Smooth edges** is a separate toggle
+that blends the rotated edges instead.
+Moves, scales and perspective keep exact nearest-neighbour pixels whichever
+is picked. **Upscale** picks RotSprite's enlargement factor (Auto, 2x, 4x,
+8x) and **Similar** sets how far apart two colours may be before the upscale
+treats them as different shapes (0 is exact match). The selection follows the pixels, and the whole drag
 is one undo step.
 
 The **Dump** tab shows the selected bytes as `offset  RRGGBBAA` rows, with the
@@ -410,7 +428,9 @@ state the tool uses:
 | Picker | pick the colour into FG or BG |
 | Fill | Tolerance |
 | Line | Width, Tip, Background |
-| Rectangle, Ellipse, Triangle, Diamond, Star, Arrow | Fill, Background, Width, Tip |
+| Rectangle, Ellipse | Fill, Background, Width, Tip |
+| Triangle, Diamond, Star | Fill, Background, Width, Tip, Points (3-24), Angle (-180 to 180 degrees), Depth (1-100%) |
+| Arrow | Fill, Background, Width, Tip, Shape (Triangle or Barbed), Body (10-90%), Head (10-90%) |
 | Gradient | Radial, Whole palette, reverse the direction (BG to FG), Spread (Clamp, Repeat, Reflect), Dither mode (two-colour linear gradients; Bias/Strength/Scale from the Dither tab) |
 | Line pattern | Grid size, Scale, Shift |
 | Structure fill | Grid size, Mirror tiles |
@@ -423,7 +443,7 @@ state the tool uses:
 | Rect, Ellipse, Polygon select | selection mode: Replace, Add, Subtract, Intersect |
 | Lasso | selection mode and Smooth path |
 | Wand, Similar | Tolerance, Ignore alpha |
-| Move / Scale | Rotate snap in degrees, Smooth edges |
+| Move / Scale | Rotate snap in degrees, Algorithm (RotSprite, Nearest, CleanEdge, Transpose 90), Smooth edges, Upscale, Similar |
 | Hand | zoom out, zoom in and Zoom to fit |
 
 Brush size, tip, mirror and tolerance also stay in the left column.
