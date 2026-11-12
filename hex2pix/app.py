@@ -62,6 +62,14 @@ from .model import (
     selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block,
 )
+from .nodes import (COLOR, GRADIENT_PRESETS, MICRO_GATES, MICRO_GATE_LABELS,
+                    NODE_ORDER, NODE_TYPES, NodeGraph, RENDER_BY_LABEL,
+                    RENDER_COMPLEX, RENDER_LABELS, RENDER_MODES, RENDER_QUICK,
+                    color_text, gate_input_info, gate_input_name,
+                    gradient_color, gradient_text, is_gate_input,
+                    node_all_inputs, node_inputs, node_micro_gates,
+                    node_outputs, parse_color, parse_gradient,
+                    reverse_gradient)
 
 TOOLS = (
     ("pencil", "Pencil", "p", "Paint with the foreground color"),
@@ -2500,6 +2508,19 @@ class hex2pixApp(tk.Tk):
         self.layer_list.bind("<ButtonPress-1>", self.begin_layer_drag)
         self.layer_list.bind("<ButtonRelease-1>", self.end_layer_drag)
 
+        render_row = ttk.Frame(layers)
+        render_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(render_row, text="Render").pack(side="left")
+        self.layer_render_var = tk.StringVar(
+            value=RENDER_LABELS[RENDER_QUICK])
+        self.layer_render_box = ttk.Combobox(
+            render_row, textvariable=self.layer_render_var,
+            values=[RENDER_LABELS[mode] for mode in RENDER_MODES],
+            state="readonly", width=14)
+        self.layer_render_box.pack(side="right")
+        self.layer_render_box.bind("<<ComboboxSelected>>",
+                                   self.on_layer_render)
+
         op_row = ttk.Frame(layers)
         op_row.pack(fill="x", pady=(2, 0))
         ttk.Label(op_row, text="Operation").pack(side="left")
@@ -2616,6 +2637,7 @@ class hex2pixApp(tk.Tk):
                   foreground="#777", wraplength=280,
                   justify="left").pack(anchor="w", pady=(2, 0))
         self.refresh_layers()
+        self._build_nodes_tab()
 
         # ---- byte operations
         ops = ttk.Frame(self.notebook, padding=6)
@@ -8481,6 +8503,8 @@ class hex2pixApp(tk.Tk):
                               (layer.blend, LAYER_BLEND_LABELS)):
             if value != "none":
                 text += "  %s" % labels.get(value, value)
+        if layer.render_mode == RENDER_COMPLEX:
+            text += "  Nodes"
         if layer.alpha < 255:
             text += "  %d%%" % int(round(layer.alpha * 100 / 255.0))
         if not layer.visible:
@@ -8556,17 +8580,26 @@ class hex2pixApp(tk.Tk):
         self.layer_blend_var.set(
             LAYER_BLEND_LABELS.get(layer.blend, "None"))
         self.layer_visible_var.set(bool(layer.visible))
+        if hasattr(self, "layer_render_var"):
+            self.layer_render_var.set(
+                RENDER_LABELS.get(layer.render_mode,
+                                  RENDER_LABELS[RENDER_QUICK]))
         self.sync_layer_alpha(layer)
         self.sync_layer_group(layer)
-        # Operation, gate and blend each combine this layer with the stack
-        # below it, so they cannot do anything on the bottom layer. Disable
-        # the three boxes there instead of letting a choice silently no-op.
+        # Quick Render combines through these three boxes, so they cannot do
+        # anything on the bottom layer; Complex Render drives the layer from
+        # its graph instead. Disable them rather than silently no-op.
         if hasattr(self, "layer_op_box"):
-            combined = "readonly" if self.doc.layer_index > 0 else "disabled"
+            complex_mode = layer.render_mode == RENDER_COMPLEX
+            combined = ("disabled" if complex_mode or self.doc.layer_index == 0
+                        else "readonly")
             for box in (self.layer_op_box, self.layer_gate_box,
                         self.layer_blend_box):
                 box.configure(state=combined)
         self.refresh_layer_info()
+        self.refresh_nodes_tab()
+        if getattr(self, "node_window", None) is not None:
+            self.refresh_node_editor()
 
     def refresh_layer_info(self):
         layer = self.doc.active_layer
@@ -8578,7 +8611,9 @@ class hex2pixApp(tk.Tk):
         if self.doc.groups:
             info += " \u00b7 %d group%s" % (
                 len(self.doc.groups), "" if len(self.doc.groups) == 1 else "s")
-        if self.doc.layer_index == 0:
+        if layer.render_mode == RENDER_COMPLEX:
+            info += " \u00b7 complex render (node graph)"
+        elif self.doc.layer_index == 0:
             info += (" \u00b7 bottom layer: operation, gate and blend "
                      "combine with a layer below")
         self.layer_info.set(info)
@@ -8672,6 +8707,1346 @@ class hex2pixApp(tk.Tk):
         self.doc.active_layer.blend = blend
         self.doc.commit(before)
         self.layers_changed()
+
+    # ------------------------------------------------------------ node render
+    def on_layer_render(self, event=None):
+        widget = getattr(event, "widget", None)
+        if widget is getattr(self, "nodes_render_box", None):
+            label = self.nodes_render_var.get()
+        else:
+            label = self.layer_render_var.get()
+        mode = RENDER_BY_LABEL.get(label)
+        if mode is not None:
+            self.set_layer_render_mode(mode)
+
+    def set_layer_render_mode(self, mode):
+        """Switch the active layer between Quick and Complex Render."""
+        if mode not in RENDER_MODES:
+            return
+        layer = self.doc.active_layer
+        if layer.render_mode == mode:
+            self.refresh_nodes_tab()
+            return
+        before = self.doc.begin()
+        layer.render_mode = mode
+        if mode == RENDER_COMPLEX and not layer.graph.nodes:
+            layer.graph = NodeGraph.starter()
+        self.doc.commit(before)
+        self.layers_changed()
+        if mode == RENDER_COMPLEX and hasattr(self, "nodes_tab"):
+            self.notebook.select(self.nodes_tab)
+        self.refresh_node_editor()
+
+    def create_starter_graph(self):
+        layer = self.doc.active_layer
+        if layer.render_mode != RENDER_COMPLEX:
+            self.set_layer_render_mode(RENDER_COMPLEX)
+            layer = self.doc.active_layer
+        if not layer.graph.nodes:
+            before = self.doc.begin()
+            layer.graph = NodeGraph.starter()
+            self.doc.commit(before)
+            self.layers_changed()
+        self.open_node_editor()
+
+    def _build_nodes_tab(self):
+        tab = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(tab, text="Nodes")
+        self.nodes_tab = tab
+        ttk.Label(tab, text="Layer render mode").pack(anchor="w")
+        self.nodes_render_var = tk.StringVar(
+            value=RENDER_LABELS[RENDER_QUICK])
+        self.nodes_render_box = ttk.Combobox(
+            tab, textvariable=self.nodes_render_var,
+            values=[RENDER_LABELS[mode] for mode in RENDER_MODES],
+            state="readonly")
+        self.nodes_render_box.pack(fill="x", pady=(2, 4))
+        self.nodes_render_box.bind("<<ComboboxSelected>>",
+                                   self.on_layer_render)
+        ttk.Button(tab, text="Open node editor...",
+                   command=self.open_node_editor).pack(fill="x", pady=1)
+        ttk.Button(tab, text="Use starter graph",
+                   command=self.create_starter_graph).pack(fill="x", pady=1)
+        ttk.Button(tab, text="Back to Quick Render",
+                   command=lambda: self.set_layer_render_mode(RENDER_QUICK)
+                   ).pack(fill="x", pady=1)
+        ttk.Separator(tab).pack(fill="x", pady=6)
+        self.nodes_info = tk.StringVar(value="")
+        ttk.Label(tab, textvariable=self.nodes_info, foreground="#8ab4f8",
+                  wraplength=280, justify="left").pack(anchor="w")
+        ttk.Label(tab,
+                  text="Complex Render runs a node graph instead of the "
+                       "operation, gate and blend dropdowns. A is the layer "
+                       "and B is the stack below; any output can feed any "
+                       "input, and colours and numbers convert. Number "
+                       "sockets add their wires; colour sockets average "
+                       "them. The Output node becomes the layer. The Layer "
+                       "node also outputs its channels, opacity, hue, "
+                       "saturation, brightness, lightness, luminance, "
+                       "gamma and chroma; Value adds an unbounded base "
+                       "and up to eight inputs you add in the inspector. "
+                       "Color Ramp maps one of those "
+                       "measurements through editable gradient stops with "
+                       "Linear, Constant or Smooth interpolation, presets "
+                       "and Reverse. "
+                       "Output counts are adjustable, and right-clicking "
+                       "any socket opens its micro logic gate menu; gates "
+                       "attach as symbol extensions with their own sockets. "
+                       "Right-click a node to duplicate it.",
+                  foreground="#777", wraplength=280,
+                  justify="left").pack(anchor="w", pady=(6, 0))
+        self.refresh_nodes_tab()
+
+    def refresh_nodes_tab(self):
+        if not hasattr(self, "nodes_info"):
+            return
+        layer = self.doc.active_layer
+        self.nodes_render_var.set(
+            RENDER_LABELS.get(layer.render_mode, RENDER_LABELS[RENDER_QUICK]))
+        if layer.render_mode != RENDER_COMPLEX:
+            text = ("Quick Render: the Operation, Nandgate and Blend "
+                    "dropdowns drive this layer.")
+        elif not layer.graph.nodes:
+            text = ("Complex Render has no graph yet. Use the starter graph "
+                    "or open the node editor.")
+        else:
+            text = "%d node%s, %d connection%s" % (
+                len(layer.graph.nodes),
+                "" if len(layer.graph.nodes) == 1 else "s",
+                len(layer.graph.links),
+                "" if len(layer.graph.links) == 1 else "s")
+            if not layer.graph.is_active():
+                text += " - no Output connection, so Quick Render is used"
+            if layer.graph.last_error:
+                text += " - " + layer.graph.last_error
+        self.nodes_info.set(text)
+
+    # ---------------------------------------------------------- node editor
+    def open_node_editor(self):
+        window = getattr(self, "node_window", None)
+        if window is not None:
+            try:
+                if window.winfo_exists():
+                    window.deiconify()
+                    window.lift()
+                    self.refresh_node_editor()
+                    return
+            except tk.TclError:
+                pass
+            self.node_window = None
+        window = tk.Toplevel(self)
+        window.title("Node Editor")
+        window.geometry("980x660")
+        window.minsize(680, 440)
+        window.configure(bg=self.colors["bg"])
+        window.protocol("WM_DELETE_WINDOW", self.close_node_editor)
+        self.node_window = window
+        self.node_selected = None
+        self.node_drag = None
+        self.node_link = None
+        self.node_temp_line = None
+        self.node_before = None
+
+        toolbar = ttk.Frame(window, padding=(8, 6))
+        toolbar.pack(fill="x")
+        add_button = ttk.Menubutton(toolbar, text="Add node")
+        menu = tk.Menu(add_button, tearoff=False)
+        for key in NODE_ORDER:
+            menu.add_command(label=NODE_TYPES[key]["label"],
+                             command=lambda name=key: self.add_graph_node(name))
+        add_button["menu"] = menu
+        add_button.pack(side="left")
+        ttk.Button(toolbar, text="Duplicate node",
+                   command=self.duplicate_selected_graph_node).pack(
+                       side="left", padx=4)
+        ttk.Button(toolbar, text="Delete node",
+                   command=self.delete_selected_graph_node).pack(side="left",
+                                                                 padx=4)
+        ttk.Button(toolbar, text="Frame",
+                   command=self.frame_graph).pack(side="left")
+        self.node_mode_label = ttk.Label(toolbar, text="")
+        self.node_mode_label.pack(side="right")
+        ttk.Button(toolbar, text="Quick Render",
+                   command=lambda: self.set_layer_render_mode(RENDER_QUICK)
+                   ).pack(side="right", padx=6)
+
+        body = ttk.Frame(window)
+        body.pack(fill="both", expand=True)
+        canvas_frame = ttk.Frame(body)
+        canvas_frame.pack(side="left", fill="both", expand=True)
+        self.node_canvas = tk.Canvas(canvas_frame, bg="#171a20",
+                                     highlightthickness=0, bd=0)
+        xscroll = ttk.Scrollbar(canvas_frame, orient="horizontal",
+                                command=self.node_canvas.xview)
+        yscroll = ttk.Scrollbar(canvas_frame, orient="vertical",
+                                command=self.node_canvas.yview)
+        self.node_canvas.configure(xscrollcommand=xscroll.set,
+                                   yscrollcommand=yscroll.set)
+        self.node_canvas.grid(row=0, column=0, sticky="nsew")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
+
+        props = ttk.Frame(body, padding=(8, 6), width=250)
+        props.pack(side="right", fill="y")
+        props.pack_propagate(False)
+        ttk.Label(props, text="Selected node").pack(anchor="w")
+        self.node_props = ttk.Frame(props)
+        self.node_props.pack(fill="both", expand=True)
+        self.node_status = tk.StringVar(value="")
+        ttk.Label(window, textvariable=self.node_status, foreground="#8ab4f8",
+                  padding=(8, 3)).pack(fill="x")
+
+        canvas = self.node_canvas
+        canvas.bind("<ButtonPress-1>", self.on_node_press)
+        canvas.bind("<B1-Motion>", self.on_node_motion)
+        canvas.bind("<ButtonRelease-1>", self.on_node_release)
+        canvas.bind("<ButtonPress-3>", self.on_node_context)
+        canvas.bind("<Motion>", self.on_node_hover)
+        canvas.bind("<MouseWheel>", self.on_node_wheel)
+        self.refresh_node_editor()
+
+    def close_node_editor(self):
+        window = getattr(self, "node_window", None)
+        self.node_window = None
+        self.node_drag = None
+        self.node_link = None
+        self.node_before = None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+    def on_node_wheel(self, event):
+        self.node_canvas.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
+
+    def refresh_node_editor(self):
+        window = getattr(self, "node_window", None)
+        if window is None:
+            return
+        try:
+            if not window.winfo_exists():
+                self.node_window = None
+                return
+        except tk.TclError:
+            self.node_window = None
+            return
+        layer = self.doc.active_layer
+        window.title("Node Editor - %s" % layer.name)
+        self.node_mode_label.config(
+            text=RENDER_LABELS.get(layer.render_mode, ""))
+        self._draw_graph()
+        self.refresh_node_props()
+
+    def _draw_graph(self):
+        canvas = getattr(self, "node_canvas", None)
+        if canvas is None:
+            return
+        graph = self.doc.active_layer.graph
+        canvas.delete("all")
+        if not graph.nodes:
+            canvas.create_text(
+                50, 50, anchor="nw", fill="#9aa3b2",
+                font=("Segoe UI", 11),
+                text="No nodes yet. Use Add node, or switch the layer to "
+                     "Complex Render for a starter graph.")
+            canvas.configure(scrollregion=(0, 0, 640, 360))
+            return
+        for index, link in enumerate(graph.links):
+            source = graph.nodes.get(link["from"])
+            target = graph.nodes.get(link["to"])
+            if source is None or target is None:
+                continue
+            sx, sy = self.node_port_pos(source, "out", link["from_port"])
+            tx, ty = self.node_port_pos(target, "in", link["to_port"])
+            span = max(50, abs(tx - sx) * 0.45)
+            canvas.create_line(sx, sy, sx + span, sy, tx - span, ty, tx, ty,
+                               smooth=True, splinesteps=18, width=2,
+                               fill="#6f9cf5",
+                               tags=("graph_link", "link:%d" % index))
+        for node in sorted(graph.nodes.values(), key=lambda item: item.id):
+            self._draw_graph_node(node)
+        box = canvas.bbox("all") or (0, 0, 640, 360)
+        # Redrawing after a click must not jump the view: a socket press
+        # redraws the selection, and a moving release would then miss.
+        view_left = canvas.canvasx(0)
+        view_top = canvas.canvasy(0)
+        left, top = box[0] - 40, box[1] - 40
+        # Keep a couple of screens of free space so a redraw can hold the
+        # current scroll position instead of clamping it back to the graph.
+        screen_w = max(canvas.winfo_width(), 640)
+        screen_h = max(canvas.winfo_height(), 420)
+        right = max(box[2] + 170, left + screen_w * 2)
+        bottom = max(box[3] + 140, top + screen_h * 2)
+        canvas.configure(scrollregion=(left, top, right, bottom))
+        canvas.xview_moveto(max(0.0, min(1.0, (view_left - left)
+                                        / max(1.0, right - left))))
+        canvas.yview_moveto(max(0.0, min(1.0, (view_top - top)
+                                        / max(1.0, bottom - top))))
+        if graph.last_error:
+            self.node_status.set(graph.last_error)
+        else:
+            self.node_status.set(
+                "Drag any socket onto another to connect. Right-click a "
+                "node to duplicate it, a socket for its micro logic gate, "
+                "or a wire to delete it. Binary gates show a B input.")
+
+    def node_layout(self, node):
+        spec = NODE_TYPES[node.type]
+        rows = max(1, len(node_inputs(node)), len(node_outputs(node)))
+        return (node.x, node.y, 190, 34 + rows * 22 + 16)
+
+    def _gate_geometry(self, node, side, name):
+        """Canvas positions for a micro gate's body and patch sockets."""
+        x, y, width, _height = self.node_layout(node)
+        ports = node_inputs(node) if side == "in" else node_outputs(node)
+        names = [port_name for port_name, _kind in ports]
+        try:
+            index = names.index(name)
+        except ValueError:
+            index = 0
+        py = y + 36 + index * 22
+        if side == "out":
+            left = x + width + 10
+            right = left + 22
+            return {"left": left, "right": right, "y": py,
+                    "a": (x + width, py),
+                    "b": (left + 2, py - 12),
+                    "out": (right + 14, py)}
+        right = x - 10
+        left = right - 22
+        return {"left": left, "right": right, "y": py,
+                "a": (left - 8, py),
+                "b": (left + 2, py - 12),
+                "out": (x, py)}
+
+    def node_port_pos(self, node, side, port_name):
+        info = gate_input_info(port_name)
+        if info is not None:
+            gate_side, source_name = info
+            if node.params.get("@gate:%s:%s" % (gate_side, source_name)) \
+                    in MICRO_GATES:
+                return self._gate_geometry(node, gate_side,
+                                           source_name)["b"]
+        gate = node.params.get("@gate:%s:%s" % (side, port_name))
+        if gate in MICRO_GATES:
+            geometry = self._gate_geometry(node, side, port_name)
+            return geometry["out"] if side == "out" else geometry["a"]
+        ports = node_inputs(node) if side == "in" else node_outputs(node)
+        names = [name for name, _kind in ports]
+        try:
+            index = names.index(port_name)
+        except ValueError:
+            index = 0
+        x, y, width, _height = self.node_layout(node)
+        return (x if side == "in" else x + width, y + 36 + index * 22)
+
+    def node_summary(self, node):
+        spec = NODE_TYPES[node.type]
+        for param in spec["params"]:
+            if param["kind"] == "choice":
+                value = node.params.get(param["name"], param["default"])
+                return param["labels"].get(value, str(value))
+            try:
+                if param["name"] == "color":
+                    return color_text(parse_color(node.params.get("color")))
+                if param["name"] == "value":
+                    return "%g" % float(node.params.get("value", 0))
+                if param["name"] == "shift":
+                    return "%g deg" % float(node.params.get("shift", 0))
+                if param["name"] == "scale":
+                    return "s%g" % float(node.params.get("scale", 0))
+            except (TypeError, ValueError):
+                return ""
+            if param["name"] == "code":
+                return "code"
+        return ""
+
+    def _draw_graph_node(self, node):
+        canvas = self.node_canvas
+        spec = NODE_TYPES[node.type]
+        x, y, width, height = self.node_layout(node)
+        selected = node.id == getattr(self, "node_selected", None)
+        outline = "#7fb2ff" if selected else "#3a4150"
+        tags = ("graph_node", "node:%d" % node.id)
+        canvas.create_rectangle(x, y, x + width, y + height,
+                                fill="#242833", outline=outline,
+                                width=2 if selected else 1, tags=tags)
+        canvas.create_rectangle(x, y, x + width, y + 27,
+                                fill="#313747", outline="", tags=tags)
+        canvas.create_text(x + 9, y + 14, anchor="w", text=spec["label"],
+                           fill="#f0f3ff", font=("Segoe UI", 9, "bold"),
+                           tags=tags)
+        summary = self.node_summary(node)
+        if summary:
+            canvas.create_text(x + width - 9, y + 14, anchor="e",
+                               text=summary, fill="#aab6d4",
+                               font=("Segoe UI", 8), tags=tags)
+        graph = self.doc.active_layer.graph
+        for index, (name, kind) in enumerate(node_inputs(node)):
+            py = y + 36 + index * 22
+            colour = "#f0b45c" if kind == COLOR else "#78d6a0"
+            gate = node.params.get("@gate:in:" + name)
+            if gate in MICRO_GATES:
+                self._draw_micro_gate(canvas, node, "in", name, kind, gate)
+            else:
+                canvas.create_oval(x - 5, py - 5, x + 5, py + 5,
+                                   fill=colour, outline="",
+                                   tags=("graph_port",
+                                         "port:%d:in:%s" % (node.id, name)))
+            wires = len(graph.links_into(node.id, name))
+            label = name if wires < 2 else "%s (%d)" % (name, wires)
+            canvas.create_text(x + 10, py, anchor="w", text=label,
+                               fill="#d6dcea", font=("Segoe UI", 8),
+                               tags=tags)
+        for index, (name, kind) in enumerate(node_outputs(node)):
+            py = y + 36 + index * 22
+            colour = "#f0b45c" if kind == COLOR else "#78d6a0"
+            gate = node.params.get("@gate:out:" + name)
+            if gate in MICRO_GATES:
+                self._draw_micro_gate(canvas, node, "out", name, kind, gate)
+            else:
+                canvas.create_oval(x + width - 5, py - 5, x + width + 5,
+                                   py + 5, fill=colour, outline="",
+                                   tags=("graph_port",
+                                         "port:%d:out:%s" % (node.id, name)))
+            canvas.create_text(x + width - 10, py, anchor="e", text=name,
+                               fill="#d6dcea", font=("Segoe UI", 8),
+                               tags=tags)
+        canvas.create_text(x + 9, y + height - 9, anchor="w",
+                           text=spec["hint"], fill="#6f7890",
+                           font=("Segoe UI", 7), tags=tags)
+
+    def _event_xy(self, event):
+        canvas = self.node_canvas
+        return canvas.canvasx(event.x), canvas.canvasy(event.y)
+
+    def _draw_micro_gate(self, canvas, node, side, name, kind, mode):
+        """Draw a compact logic gate attached to one socket.
+
+        Output gates have a patch socket after the gate; input gates feed the
+        node through their own output socket.  Binary gates expose a small B
+        input above the body, so every gate type has both operands.
+        """
+        geometry = self._gate_geometry(node, side, name)
+        left, right, py = (geometry["left"], geometry["right"],
+                           geometry["y"])
+        colour = "#f0b45c" if kind == COLOR else "#78d6a0"
+        highlight = "#e5b0ff"
+        outline = "#2b1740"
+        negated = mode in ("nand", "nor", "xnor")
+        curved = mode in ("or", "nor", "xor", "xnor")
+        if side == "out":
+            canvas.create_line(geometry["a"][0], py, left, py,
+                               fill="#d18cff", width=1)
+        else:
+            canvas.create_line(geometry["a"][0], py, left, py,
+                               fill="#d18cff", width=1)
+            canvas.create_line(right, py, geometry["out"][0], py,
+                               fill="#d18cff", width=1)
+        if mode == "not":
+            body = [(left, py - 8), (left, py + 8), (right - 2, py)]
+            canvas.create_polygon(body, fill=highlight, outline=outline,
+                                  width=1)
+        elif curved:
+            body = [(left, py - 8), (left + 10, py - 8), (right, py),
+                    (left + 10, py + 8), (left, py + 8), (left + 7, py)]
+            canvas.create_polygon(body, fill=highlight, outline=outline,
+                                  width=1)
+            if mode in ("xor", "xnor"):
+                canvas.create_line(left - 3, py - 10, left + 4, py,
+                                   left - 3, py + 10, smooth=True,
+                                   fill=highlight, width=1)
+        else:
+            body = [(left, py - 8), (left + 13, py - 8), (right, py),
+                    (left + 13, py + 8), (left, py + 8)]
+            canvas.create_polygon(body, fill=highlight, outline=outline,
+                                  width=1)
+        symbol = {"and": "&", "nand": "&", "or": ">=1",
+                  "nor": ">=1", "xor": "=1", "xnor": "=1",
+                  "not": "1"}[mode]
+        canvas.create_text(left + 10, py, text=symbol, fill="#1a1020",
+                           font=("Segoe UI", 5, "bold"))
+        output_x = right
+        if negated:
+            canvas.create_oval(right, py - 3, right + 6, py + 3,
+                               fill=highlight, outline=outline, width=1)
+            output_x = right + 6
+        if side == "out":
+            out_x, out_y = geometry["out"]
+            canvas.create_line(output_x, py, out_x - 5, out_y,
+                               fill="#d18cff", width=1)
+            canvas.create_oval(out_x - 5, out_y - 5, out_x + 5, out_y + 5,
+                               fill=colour, outline="",
+                               tags=("graph_port",
+                                     "port:%d:out:%s" % (node.id, name)))
+        else:
+            out_x, out_y = geometry["out"]
+            canvas.create_oval(out_x - 5, out_y - 5, out_x + 5, out_y + 5,
+                               fill=colour, outline="")
+            ax, ay = geometry["a"]
+            canvas.create_oval(ax - 5, ay - 5, ax + 5, ay + 5,
+                               fill=colour, outline="",
+                               tags=("graph_port",
+                                     "port:%d:in:%s" % (node.id, name)))
+        if mode != "not":
+            bx, by = geometry["b"]
+            canvas.create_line(bx, by + 3, left + 2, py - 8,
+                               fill="#d18cff", width=1)
+            canvas.create_oval(bx - 4, by - 4, bx + 4, by + 4,
+                               fill=colour, outline="",
+                               tags=("graph_port",
+                                     "port:%d:in:%s" % (
+                                         node.id, gate_input_name(side,
+                                                                  name))))
+
+    def _node_tags(self, event):
+        canvas = self.node_canvas
+        x, y = self._event_xy(event)
+        items = canvas.find_overlapping(x - 8, y - 8, x + 8, y + 8)
+        tags = []
+        for item in reversed(items):
+            tags.extend(canvas.gettags(item))
+        return tags
+
+    def _node_port_at(self, event):
+        for tag in self._node_tags(event):
+            if tag.startswith("port:"):
+                _prefix, node_id, side, name = tag.split(":", 3)
+                return int(node_id), side, name
+        return None
+
+    def _segment_distance(self, px, py, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        length = dx * dx + dy * dy
+        if not length:
+            return ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+        t = ((px - x1) * dx + (py - y1) * dy) / float(length)
+        t = max(0.0, min(1.0, t))
+        return ((px - (x1 + t * dx)) ** 2
+                + (py - (y1 + t * dy)) ** 2) ** 0.5
+
+    def _link_at(self, event):
+        """Index of the connection whose curve is under the pointer."""
+        canvas = self.node_canvas
+        x, y = self._event_xy(event)
+        best_index, best = None, 12.0
+        for item in canvas.find_withtag("graph_link"):
+            tags = canvas.gettags(item)
+            tag = next((entry for entry in tags
+                        if entry.startswith("link:")), None)
+            coords = canvas.coords(item)
+            if tag is None or len(coords) < 4:
+                continue
+            distance = min(
+                self._segment_distance(x, y, coords[index], coords[index + 1],
+                                       coords[index + 2], coords[index + 3])
+                for index in range(0, len(coords) - 2, 2))
+            if distance < best:
+                best = distance
+                best_index = int(tag.split(":", 1)[1])
+        return best_index
+
+    def _connection_for_release(self, start, event):
+        """Resolve a dropped wire to (from_id, from_port, to_id, to_port)."""
+        graph = self.doc.active_layer.graph
+        node = graph.nodes.get(start["id"])
+        if node is None:
+            return None
+        side = start["side"]
+        ports = (node_outputs(node) if side == "out"
+                 else node_all_inputs(node))
+        if not any(name == start["port"] for name, _kind in ports):
+            return None
+        target_port = self._node_port_at(event)
+        if target_port is not None:
+            target_id, target_side, port = target_port
+            target = graph.nodes.get(target_id)
+            if target is None or target_id == node.id:
+                return None
+            target_ports = (node_all_inputs(target)
+                            if target_side == "in" else node_outputs(target))
+            if not any(name == port for name, _kind in target_ports):
+                return None
+            if side == "out" and target_side == "in":
+                return (node.id, start["port"], target_id, port)
+            if side == "in" and target_side == "out":
+                return (target_id, port, node.id, start["port"])
+            return None
+        # Dropping anywhere on a node picks its first receiving socket, so
+        # wiring does not demand pixel-perfect aim.
+        node_tag = next((tag for tag in self._node_tags(event)
+                         if tag.startswith("node:")), None)
+        if node_tag is None:
+            return None
+        target_id = int(node_tag.split(":", 1)[1])
+        target = graph.nodes.get(target_id)
+        if target is None or target_id == node.id:
+            return None
+        target_ports = (node_all_inputs(target) if side == "out"
+                        else node_outputs(target))
+        if not target_ports:
+            return None
+        port = target_ports[0][0]
+        if side == "out":
+            return (node.id, start["port"], target_id, port)
+        return (target_id, port, node.id, start["port"])
+
+    def on_node_hover(self, event):
+        if self.node_link is not None or self.node_drag is not None:
+            return
+        active = (self._node_port_at(event) is not None
+                  or self._link_at(event) is not None)
+        wanted = "hand2" if active else ""
+        if self.node_canvas["cursor"] != wanted:
+            self.node_canvas.configure(cursor=wanted)
+
+    def on_node_press(self, event):
+        canvas = self.node_canvas
+        canvas.focus_set()
+        x, y = self._event_xy(event)
+        port = self._node_port_at(event)
+        if port is not None:
+            node = self.doc.active_layer.graph.nodes.get(port[0])
+            if node is not None:
+                side, name = port[1], port[2]
+                px, py = self.node_port_pos(node, side, name)
+                self.node_selected = port[0]
+                self._draw_graph()
+                self.refresh_node_props()
+                self.node_link = {"id": port[0], "side": side,
+                                  "port": name, "sx": px, "sy": py}
+                self.node_temp_line = canvas.create_line(
+                    px, py, x, y, fill="#7fb2ff", width=2, dash=(5, 3))
+                return
+        tags = self._node_tags(event)
+        node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
+        if node_tag is not None:
+            node_id = int(node_tag.split(":", 1)[1])
+            node = self.doc.active_layer.graph.nodes.get(node_id)
+            self.node_selected = node_id
+            if node is not None:
+                self.node_drag = {"id": node_id, "dx": x - node.x,
+                                  "dy": y - node.y, "moved": False}
+                self.node_before = self.doc.begin()
+            self._draw_graph()
+            self.refresh_node_props()
+            return
+        self.node_selected = None
+        self._draw_graph()
+        self.refresh_node_props()
+
+    def on_node_motion(self, event):
+        canvas = self.node_canvas
+        x, y = self._event_xy(event)
+        if self.node_link is not None:
+            canvas.coords(self.node_temp_line, self.node_link["sx"],
+                          self.node_link["sy"], x, y)
+            return
+        if self.node_drag is not None:
+            node = self.doc.active_layer.graph.nodes.get(self.node_drag["id"])
+            if node is None:
+                return
+            node.x = max(0.0, x - self.node_drag["dx"])
+            node.y = max(0.0, y - self.node_drag["dy"])
+            self.node_drag["moved"] = True
+            self._draw_graph()
+
+    def on_node_release(self, event):
+        if self.node_link is not None:
+            link = self.node_link
+            self.node_link = None
+            if self.node_temp_line is not None:
+                self.node_canvas.delete(self.node_temp_line)
+                self.node_temp_line = None
+            connection = self._connection_for_release(link, event)
+            if connection is None:
+                self.refresh_node_editor()
+                self.node_status.set(
+                    "Those sockets cannot be connected. Drop an output on "
+                    "an input, or an input on an output, without a cycle.")
+                return
+            if not self.connect_graph_ports(*connection):
+                self.refresh_node_editor()
+                self.node_status.set(
+                    "That connection would create a cycle.")
+                return
+            self.refresh_node_editor()
+            return
+        if self.node_drag is not None:
+            drag = self.node_drag
+            self.node_drag = None
+            if drag["moved"] and self.node_before is not None:
+                self.doc.commit(self.node_before)
+            self.node_before = None
+            self._draw_graph()
+
+    def on_node_context(self, event):
+        port = self._node_port_at(event)
+        if port is not None:
+            self._socket_context(port, event)
+            return
+        node_tag = next((tag for tag in self._node_tags(event)
+                         if tag.startswith("node:")), None)
+        if node_tag is not None:
+            node_id = int(node_tag.split(":", 1)[1])
+            menu = tk.Menu(self.node_window, tearoff=False)
+            menu.add_command(label="Duplicate node",
+                             command=lambda: self.duplicate_graph_node(node_id))
+            menu.add_separator()
+            menu.add_command(label="Delete node",
+                             command=lambda: self.delete_graph_node(node_id))
+            menu.add_command(label="Disconnect inputs",
+                             command=lambda: self.disconnect_graph_node(
+                                 node_id))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
+        # Right-clicking a free-standing wire deletes it immediately.
+        index = self._link_at(event)
+        if index is not None:
+            self.delete_graph_link(index)
+            return
+
+    def _socket_context(self, port, event):
+        node_id, side, name = port
+        node = self.doc.active_layer.graph.nodes.get(node_id)
+        if node is None:
+            return
+        if is_gate_input(name):
+            menu = tk.Menu(self.node_window, tearoff=False)
+            menu.add_command(label="Micro gate B input", state="disabled")
+            menu.add_separator()
+            menu.add_command(
+                label="Disconnect B wire",
+                command=lambda: self.disconnect_graph_socket(
+                    node_id, "in", name))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
+        key = "@gate:%s:%s" % (side, name)
+        active = node.params.get(key)
+        mode = tk.StringVar(
+            value=active if active in MICRO_GATES else "none")
+        menu = tk.Menu(self.node_window, tearoff=False)
+        menu.add_command(label="Socket: %s" % name, state="disabled")
+        menu.add_separator()
+        menu.add_radiobutton(label="No micro gate", variable=mode,
+                             value="none",
+                             command=lambda: self.set_socket_gate(
+                                 node, key, "none"))
+        for gate in MICRO_GATES:
+            label = "Micro %s gate" % MICRO_GATE_LABELS[gate]
+            menu.add_radiobutton(
+                label=label, variable=mode, value=gate,
+                command=lambda gate=gate: self.set_socket_gate(
+                    node, key, gate))
+        menu.add_separator()
+        menu.add_command(
+            label="Disconnect wires",
+            command=lambda: self.disconnect_graph_socket(node_id, side, name))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def set_socket_gate(self, node, key, mode):
+        wanted = mode if mode in MICRO_GATES else None
+        if node.params.get(key) == wanted:
+            return
+        parts = key.split(":", 2)
+        side = parts[1] if len(parts) == 3 else ""
+        name = parts[2] if len(parts) == 3 else ""
+        if is_gate_input(name):
+            return
+        before = self.doc.begin()
+        if wanted is None:
+            node.params.pop(key, None)
+        else:
+            node.params[key] = wanted
+        graph = self.doc.active_layer.graph
+        if side in ("in", "out") and name:
+            # NOT has no second operand, so a B wire cannot stay attached
+            # when a binary gate becomes NOT or is removed.
+            if wanted in (None, "not"):
+                graph.unlink_input(node.id, gate_input_name(side, name))
+            graph._invalidate()
+        self.doc.commit(before)
+        self._node_changed()
+        self.refresh_node_props()
+
+    def disconnect_graph_socket(self, node_id, side, name):
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        changed = False
+        if side == "in":
+            changed = graph.unlink_input(node_id, name)
+        else:
+            for link in list(graph.links):
+                if (link["from"] == node_id
+                        and link["from_port"] == name):
+                    changed = graph.unlink(
+                        link["from"], link["from_port"],
+                        link["to"], link["to_port"]) or changed
+        if not is_gate_input(name):
+            changed = graph.unlink_input(
+                node_id, gate_input_name(side, name)) or changed
+        if changed:
+            self.doc.commit(before)
+            self.layers_changed()
+            self.refresh_node_editor()
+
+    def frame_graph(self):
+        canvas = getattr(self, "node_canvas", None)
+        if canvas is None:
+            return
+        box = canvas.bbox("all")
+        if box:
+            canvas.xview_moveto(0.0)
+            canvas.yview_moveto(0.0)
+
+    def add_graph_node(self, node_type):
+        if node_type not in NODE_TYPES:
+            return None
+        layer = self.doc.active_layer
+        if layer.render_mode != RENDER_COMPLEX:
+            self.set_layer_render_mode(RENDER_COMPLEX)
+            layer = self.doc.active_layer
+        x, y = 60.0, 60.0
+        canvas = getattr(self, "node_canvas", None)
+        if canvas is not None:
+            try:
+                x = canvas.canvasx(80)
+                y = canvas.canvasy(90)
+            except tk.TclError:
+                pass
+        count = len(layer.graph.nodes)
+        x += (count % 5) * 26
+        y += (count % 4) * 26
+        before = self.doc.begin()
+        node = layer.graph.add_node(node_type, x, y)
+        self.doc.commit(before)
+        self.node_selected = node.id
+        self.layers_changed()
+        return node
+
+    def duplicate_selected_graph_node(self):
+        if getattr(self, "node_selected", None) is not None:
+            self.duplicate_graph_node(self.node_selected)
+
+    def duplicate_graph_node(self, node_id):
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        copy = graph.duplicate_node(node_id)
+        if copy is None:
+            return None
+        self.doc.commit(before)
+        self.node_selected = copy.id
+        self.layers_changed()
+        self.refresh_node_editor()
+        return copy
+
+    def delete_selected_graph_node(self):
+        if getattr(self, "node_selected", None) is not None:
+            self.delete_graph_node(self.node_selected)
+
+    def delete_graph_node(self, node_id):
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        if not graph.remove_node(node_id):
+            return
+        self.doc.commit(before)
+        if getattr(self, "node_selected", None) == node_id:
+            self.node_selected = None
+        self.layers_changed()
+
+    def connect_graph_ports(self, from_id, from_port, to_id, to_port):
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        if not graph.link(from_id, from_port, to_id, to_port):
+            if hasattr(self, "node_status"):
+                self.node_status.set(
+                    "That connection would create a cycle.")
+            return False
+        self.doc.commit(before)
+        self.layers_changed()
+        return True
+
+    def delete_graph_link(self, index):
+        graph = self.doc.active_layer.graph
+        if index < 0 or index >= len(graph.links):
+            return
+        link = graph.links[index]
+        before = self.doc.begin()
+        if not graph.unlink(link["from"], link["from_port"],
+                            link["to"], link["to_port"]):
+            return
+        self.doc.commit(before)
+        self.layers_changed()
+
+    def disconnect_graph_node(self, node_id):
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        changed = False
+        for link in list(graph.links):
+            if link["to"] == node_id:
+                changed = graph.unlink_input(node_id, link["to_port"]) or changed
+        if changed:
+            self.doc.commit(before)
+            self.layers_changed()
+
+    def refresh_node_props(self):
+        frame = getattr(self, "node_props", None)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        graph = self.doc.active_layer.graph
+        selected = getattr(self, "node_selected", None)
+        node = graph.nodes.get(selected) if selected is not None else None
+        if node is None:
+            ttk.Label(frame, text="Select a node to edit its parameters.",
+                      foreground="#777", wraplength=220,
+                      justify="left").pack(anchor="w")
+            return
+        spec = NODE_TYPES[node.type]
+        ttk.Label(frame, text=spec["label"],
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(frame, text=spec["hint"], foreground="#777",
+                  wraplength=220, justify="left").pack(anchor="w",
+                                                       pady=(0, 6))
+        for param in spec["params"]:
+            self._build_node_param(frame, node, param)
+        ttk.Separator(frame).pack(fill="x", pady=6)
+        ttk.Label(frame, text="Inputs", foreground="#777").pack(anchor="w")
+        for name, _kind in node_inputs(node):
+            links = graph.links_into(node.id, name)
+            if not links:
+                text = "%s: default" % name
+            elif len(links) == 1:
+                link = links[0]
+                source = graph.nodes.get(link["from"])
+                text = "%s <- %s.%s" % (
+                    name, NODE_TYPES[source.type]["label"] if source else "?",
+                    link["from_port"])
+            else:
+                names = []
+                for link in links:
+                    source = graph.nodes.get(link["from"])
+                    names.append("%s.%s" % (
+                        NODE_TYPES[source.type]["label"] if source else "?",
+                        link["from_port"]))
+                text = "%s <- %d wires: %s" % (name, len(links),
+                                               ", ".join(names))
+            gate = node.params.get("@gate:in:" + name)
+            if gate in MICRO_GATES:
+                text += "  [%s]" % MICRO_GATE_LABELS[gate]
+            ttk.Label(frame, text=text, wraplength=220,
+                      justify="left").pack(anchor="w")
+        self._build_micro_gates(frame, node)
+        if spec["outputs"]:
+            ttk.Separator(frame).pack(fill="x", pady=6)
+            ttk.Label(frame, text="Outputs", foreground="#777").pack(
+                anchor="w")
+            self._build_output_count(frame, node)
+
+    def _build_micro_gates(self, frame, node):
+        """List configured socket gates with type and B-wire controls."""
+        graph = self.doc.active_layer.graph
+        entries = node_micro_gates(node)
+        if not entries:
+            return
+        ttk.Separator(frame).pack(fill="x", pady=6)
+        ttk.Label(frame, text="Micro gates", foreground="#777").pack(
+            anchor="w")
+        values = ("No gate",) + tuple(MICRO_GATE_LABELS[gate]
+                                      for gate in MICRO_GATES)
+        for side, name, mode in entries:
+            card = ttk.Frame(frame)
+            card.pack(fill="x", pady=(4, 0))
+            title = "%s %s" % ("Input" if side == "in" else "Output",
+                                name)
+            ttk.Label(card, text=title,
+                      font=("Segoe UI", 8, "bold")).pack(anchor="w")
+            var = tk.StringVar(
+                value=MICRO_GATE_LABELS.get(mode, mode.upper()))
+            box = ttk.Combobox(card, textvariable=var, values=values,
+                               state="readonly", width=12)
+            box.pack(anchor="w", fill="x")
+            box.bind(
+                "<<ComboboxSelected>>",
+                lambda event=None, node=node, side=side, name=name,
+                       var=var: self.set_inspector_gate(
+                           node, side, name, var.get()))
+            if mode == "not":
+                continue
+            b_port = gate_input_name(side, name)
+            links = graph.links_into(node.id, b_port)
+            if not links:
+                b_text = "B input: unconnected (all ones)"
+            elif len(links) == 1:
+                link = links[0]
+                source = graph.nodes.get(link["from"])
+                b_text = "B input <- %s.%s" % (
+                    NODE_TYPES[source.type]["label"] if source else "?",
+                    link["from_port"])
+            else:
+                names = []
+                for link in links:
+                    source = graph.nodes.get(link["from"])
+                    names.append("%s.%s" % (
+                        NODE_TYPES[source.type]["label"] if source else "?",
+                        link["from_port"]))
+                b_text = "B input <- %d wires: %s" % (
+                    len(links), ", ".join(names))
+            ttk.Label(card, text=b_text, foreground="#8a94a8",
+                      wraplength=220, justify="left").pack(anchor="w")
+            if links:
+                ttk.Button(
+                    card, text="Disconnect B wire",
+                    command=lambda node=node, side=side, name=name:
+                    self.disconnect_micro_gate_b(node, side, name)
+                ).pack(anchor="w", pady=(2, 0))
+
+    def set_inspector_gate(self, node, side, name, label):
+        mode = next((gate for gate in MICRO_GATES
+                     if MICRO_GATE_LABELS[gate] == label), None)
+        self.set_socket_gate(node, "@gate:%s:%s" % (side, name),
+                             mode or "none")
+
+    def disconnect_micro_gate_b(self, node, side, name):
+        """Drop the B wire from one micro gate without removing the gate."""
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        if not graph.unlink_input(node.id, gate_input_name(side, name)):
+            return False
+        self.doc.commit(before)
+        self._node_changed()
+        self.refresh_node_props()
+        return True
+
+    def _build_node_param(self, frame, node, param):
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Label(row, text=param["label"]).pack(anchor="w")
+        name = param["name"]
+        if param["kind"] == "choice":
+            labels = [param["labels"][key] for key in param["choices"]]
+            var = tk.StringVar(
+                value=param["labels"].get(node.params.get(name),
+                                          labels[0] if labels else ""))
+            box = ttk.Combobox(row, textvariable=var, values=labels,
+                               state="readonly")
+            box.pack(fill="x")
+
+            def apply_choice(event=None, var=var, param=param, node=node):
+                value = next((key for key in param["choices"]
+                              if param["labels"].get(key) == var.get()),
+                             param["default"])
+                self.set_node_param(node, param["name"], value)
+                if param["name"] == "interpolation":
+                    self.refresh_node_props()
+            box.bind("<<ComboboxSelected>>", apply_choice)
+        elif param["kind"] == "number":
+            var = tk.StringVar(value=str(node.params.get(name,
+                                                         param["default"])))
+            if param["min"] is None or param["max"] is None:
+                widget = ttk.Entry(row, textvariable=var)
+            else:
+                widget = ttk.Spinbox(row, from_=param["min"],
+                                     to=param["max"],
+                                     increment=param["step"],
+                                     textvariable=var)
+            widget.pack(fill="x")
+
+            def apply_number(event=None, var=var, param=param, node=node):
+                self.set_node_param(node, param["name"],
+                                    self._node_number(var.get(), param))
+            widget.bind("<Return>", apply_number)
+            widget.bind("<FocusOut>", apply_number)
+        elif param["kind"] == "count":
+            self._build_count_param(row, node, param)
+        elif param["kind"] == "gradient":
+            self._build_gradient_param(row, node, param)
+        elif param["kind"] == "text":
+            text = tk.Text(row, height=6, width=24, font=("Consolas", 9))
+            text.insert("1.0", str(node.params.get(name, param["default"])))
+            text.pack(fill="x")
+
+            def apply_text(node=node, name=name, widget=text):
+                self.set_node_param(node, name,
+                                    widget.get("1.0", "end-1c"))
+            ttk.Button(row, text="Apply code", command=apply_text).pack(
+                anchor="e", pady=(2, 0))
+        elif param["kind"] == "color":
+            colour = parse_color(node.params.get(name, param["default"]))
+            button = tk.Button(
+                row, text=color_text(colour),
+                bg="#%02X%02X%02X" % colour[:3],
+                fg="#111" if sum(colour[:3]) > 380 else "#fff",
+                command=lambda: self.pick_node_color(node, param))
+            button.pack(fill="x")
+
+    def _build_output_count(self, frame, node):
+        base = NODE_TYPES[node.type]["outputs"]
+        if not base:
+            return
+        maximum = len(base) if len(base) > 1 else 8
+        count = len(node_outputs(node))
+        line = ttk.Frame(frame)
+        line.pack(fill="x")
+        ttk.Button(line, text="-", width=2,
+                   state="normal" if count > 1 else "disabled",
+                   command=lambda: self._set_node_outputs(
+                       node, count - 1)).pack(side="left")
+        ttk.Label(line, text="%d of %d" % (count, maximum)).pack(
+            side="left", padx=6)
+        ttk.Button(line, text="+ Add output",
+                   state="normal" if count < maximum else "disabled",
+                   command=lambda: self._set_node_outputs(
+                       node, count + 1)).pack(side="left")
+
+    def _set_node_outputs(self, node, count):
+        base = NODE_TYPES[node.type]["outputs"]
+        if not base:
+            return
+        maximum = len(base) if len(base) > 1 else 8
+        count = max(1, min(maximum, int(count)))
+        if count == len(node_outputs(node)):
+            return
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        node.params["outputs"] = count
+        visible = set(name for name, _kind in node_outputs(node))
+        for link in list(graph.links):
+            if (link["from"] == node.id
+                    and link["from_port"] not in visible):
+                graph.unlink(link["from"], link["from_port"],
+                             link["to"], link["to_port"])
+        self.doc.commit(before)
+        self._node_changed()
+        self.refresh_node_props()
+
+    def _build_count_param(self, frame, node, param):
+        try:
+            count = int(node.params.get(param["name"],
+                                        param["default"]) or 0)
+        except (TypeError, ValueError):
+            count = param["default"]
+        count = max(param["min"], min(param["max"], count))
+        line = ttk.Frame(frame)
+        line.pack(fill="x")
+        ttk.Button(line, text="-", width=2,
+                   state="normal" if count > param["min"] else "disabled",
+                   command=lambda: self._set_value_inputs(
+                       node, count - 1)).pack(side="left")
+        ttk.Label(line, text="%d of %d" % (count, param["max"])).pack(
+            side="left", padx=6)
+        ttk.Button(line, text="+ Add input",
+                   state="normal" if count < param["max"] else "disabled",
+                   command=lambda: self._set_value_inputs(
+                       node, count + 1)).pack(side="left")
+
+    def _set_value_inputs(self, node, count):
+        names = [name for name, _kind in NODE_TYPES["value"]["inputs"]]
+        count = max(0, min(len(names), int(count)))
+        try:
+            current = int(node.params.get("inputs", 0))
+        except (TypeError, ValueError):
+            current = 0
+        if count == current:
+            return
+        graph = self.doc.active_layer.graph
+        before = self.doc.begin()
+        node.params["inputs"] = count
+        for name in names[count:]:
+            graph.unlink_input(node.id, name)
+        self.doc.commit(before)
+        self._node_changed()
+        self.refresh_node_props()
+
+    def _build_gradient_param(self, frame, node, param):
+        text = node.params.get(param["name"], param["default"])
+        stops = list(parse_gradient(text))
+        interpolation = node.param("interpolation")
+        preview = tk.Canvas(frame, width=220, height=26, bg="#101216",
+                            highlightthickness=1,
+                            highlightbackground="#3a4150")
+        preview.pack(fill="x", pady=(2, 4))
+        self._draw_gradient_preview(preview, stops, interpolation)
+        preset_line = ttk.Frame(frame)
+        preset_line.pack(fill="x", pady=(0, 4))
+        ttk.Label(preset_line, text="Preset").pack(side="left", padx=(0, 4))
+        normalized = gradient_text(parse_gradient(text))
+        preset_labels = ["Custom"] + [label for label, _value
+                                      in GRADIENT_PRESETS]
+        selected = next(
+            (label for label, value in GRADIENT_PRESETS
+             if gradient_text(parse_gradient(value)) == normalized),
+            "Custom")
+        preset_var = tk.StringVar(value=selected)
+        preset_box = ttk.Combobox(preset_line, textvariable=preset_var,
+                                  values=preset_labels, state="readonly",
+                                  width=14)
+        preset_box.pack(side="left", fill="x", expand=True)
+
+        def apply_preset(event=None, var=preset_var, node=node, param=param):
+            value = next((value for label, value in GRADIENT_PRESETS
+                          if label == var.get()), None)
+            if value is None:
+                return
+            self.set_node_param(node, param["name"], value)
+            self.refresh_node_props()
+        preset_box.bind("<<ComboboxSelected>>", apply_preset)
+        ttk.Button(preset_line, text="Reverse",
+                   command=lambda: self._reverse_gradient(
+                       node, param)).pack(side="left", padx=(4, 0))
+        for index, (position, rgba) in enumerate(stops):
+            line = ttk.Frame(frame)
+            line.pack(fill="x", pady=1)
+            position_var = tk.StringVar(value="%g" % round(position, 3))
+            spin = ttk.Spinbox(line, from_=0.0, to=1.0, increment=0.05,
+                               width=5, textvariable=position_var)
+            spin.pack(side="left")
+
+            def apply_position(event=None, index=index, var=position_var,
+                               node=node, param=param, preview=preview):
+                try:
+                    position = max(0.0, min(1.0, float(var.get())))
+                except (TypeError, ValueError):
+                    return
+                current = list(parse_gradient(
+                    node.params.get(param["name"], param["default"])))
+                if index >= len(current):
+                    return
+                current[index] = (position, current[index][1])
+                self._set_gradient_stops(node, param, current)
+                self._draw_gradient_preview(preview, current,
+                                            node.param("interpolation"))
+            spin.bind("<Return>", apply_position)
+            spin.bind("<FocusOut>", apply_position)
+
+            red, green, blue, _alpha = rgba
+            colour_button = tk.Button(
+                line, text=color_text(rgba)[:6], width=7,
+                bg="#%02X%02X%02X" % (red, green, blue),
+                fg="#111" if red + green + blue > 380 else "#fff",
+                command=lambda index=index: self._pick_gradient_stop(
+                    node, param, index))
+            colour_button.pack(side="left", padx=(4, 2))
+            ttk.Button(line, text="x", width=2,
+                       command=lambda index=index: self._remove_gradient_stop(
+                           node, param, index)).pack(side="left")
+        ttk.Button(frame, text="Add stop",
+                   command=lambda: self._add_gradient_stop(node, param)).pack(
+            anchor="w", pady=(3, 0))
+
+    def _draw_gradient_preview(self, canvas, stops, interpolation="linear"):
+        canvas.delete("all")
+        text = gradient_text(stops)
+        steps = 110
+        width, height = 220, 26
+        for index in range(steps):
+            amount = index / float(steps - 1)
+            rgba = gradient_color(text, amount, interpolation)
+            canvas.create_rectangle(
+                width * index / float(steps), 0,
+                width * (index + 1) / float(steps), height,
+                fill="#%02X%02X%02X" % rgba[:3], outline="")
+
+    def _set_gradient_stops(self, node, param, stops):
+        self.set_node_param(node, param["name"], gradient_text(stops))
+
+    def _reverse_gradient(self, node, param):
+        text = node.params.get(param["name"], param["default"])
+        self.set_node_param(node, param["name"], reverse_gradient(text))
+        self.refresh_node_props()
+
+    def _pick_gradient_stop(self, node, param, index):
+        stops = list(parse_gradient(node.params.get(param["name"],
+                                                   param["default"])))
+        if index >= len(stops):
+            return
+        current = stops[index][1]
+        _rgb, chosen = colorchooser.askcolor(
+            color="#%02X%02X%02X" % current[:3], parent=self.node_window,
+            title="Gradient stop")
+        if not chosen:
+            return
+        stops[index] = (stops[index][0],
+                        parse_color(chosen.lstrip("#") + "FF"))
+        self._set_gradient_stops(node, param, stops)
+        self.refresh_node_props()
+
+    def _add_gradient_stop(self, node, param):
+        stops = list(parse_gradient(node.params.get(param["name"],
+                                                   param["default"])))
+        gaps = [(stops[index + 1][0] - stops[index][0], index)
+                for index in range(len(stops) - 1)]
+        if gaps:
+            _gap, index = max(gaps)
+            position = (stops[index][0] + stops[index + 1][0]) / 2.0
+        else:
+            position = 0.5
+        stops.append((position, gradient_color(
+            gradient_text(stops), position, node.param("interpolation"))))
+        self._set_gradient_stops(node, param, stops)
+        self.refresh_node_props()
+
+    def _remove_gradient_stop(self, node, param, index):
+        stops = list(parse_gradient(node.params.get(param["name"],
+                                                   param["default"])))
+        if len(stops) <= 1 or index >= len(stops):
+            return
+        del stops[index]
+        self._set_gradient_stops(node, param, stops)
+        self.refresh_node_props()
+
+    def _node_number(self, text, param):
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            value = float(param["default"])
+        if param["min"] is not None:
+            value = max(float(param["min"]), value)
+        if param["max"] is not None:
+            value = min(float(param["max"]), value)
+        if float(param["step"]).is_integer():
+            return int(round(value))
+        return value
+
+    def pick_node_color(self, node, param):
+        current = parse_color(node.params.get(param["name"],
+                                             param["default"]))
+        _rgb, chosen = colorchooser.askcolor(
+            color="#%02X%02X%02X" % current[:3], parent=self.node_window,
+            title="Node colour")
+        if not chosen:
+            return
+        self.set_node_param(node, param["name"],
+                            chosen.lstrip("#").upper() + "FF")
+
+    def set_node_param(self, node, name, value):
+        if node.params.get(name) == value:
+            return
+        before = self.doc.begin()
+        node.params[name] = value
+        self.doc.commit(before)
+        self._node_changed()
+
+    def _node_changed(self):
+        self.redraw()
+        self.refresh_status()
+        self.refresh_nodes_tab()
+        if getattr(self, "node_window", None) is not None:
+            self._draw_graph()
 
     def toggle_layer_visible(self):
         before = self.doc.begin()
@@ -9278,10 +10653,14 @@ class hex2pixApp(tk.Tk):
             "Alt+N / Alt+C   new layer / copy layer\n"
             "Alt+Delete      delete the active layer\n"
             "Alt+Up/Alt+Down restack the active layer\n"
-            "Layers tab      operation gate and blend mode,\n"
+            "Layers tab      Render: Quick or Complex (node graph),\n"
+            "                operation gate and blend mode,\n"
             "                New / Copy / Delete / Raise / Lower; the\n"
             "                Opacity slider blends the active layer;\n"
             "                drag a row to restack, double-click shows/hides\n"
+            "Nodes tab       Complex Render: open the graph editor and\n"
+            "                wire Operation, Gate, Blend, Perlin, Hue,\n"
+            "                Color Ramp, Mask, Apply Mask and other nodes into Output\n"
             "F9              record the keys you press\n"
             "F5              play the recording back (Escape stops)\n"
             "F11             toggle fullscreen (Escape leaves it)\n"
@@ -9910,8 +11289,8 @@ def run_selftest(out_path=None):
                         test_dither, test_editor_features, test_effects,
                         test_filters,
                         test_formats, test_icons, test_integrations,
-                        test_macro, test_model, test_palette, test_pattern,
-                        test_project, test_shapes, test_textfont,
+                        test_macro, test_model, test_nodes, test_palette,
+                        test_pattern, test_project, test_shapes, test_textfont,
                         test_transform_session)
 
     loader = unittest.TestLoader()
@@ -9928,6 +11307,7 @@ def run_selftest(out_path=None):
         loader.loadTestsFromModule(test_dither),
         loader.loadTestsFromModule(test_filters),
         loader.loadTestsFromModule(test_project),
+        loader.loadTestsFromModule(test_nodes),
         loader.loadTestsFromModule(test_icons),
         loader.loadTestsFromModule(test_integrations),
         loader.loadTestsFromModule(test_editor_features),
@@ -10308,6 +11688,85 @@ def run_selftest(out_path=None):
         layer_ops_ok = (layer_ops_ok
                         and str(app.layer_op_box["state"]) == "readonly")
 
+        # Complex Render drives the layer from a node graph; switching back
+        # to Quick restores the dropdown path.
+        app.new_canvas(CanvasSpec(4, 4))
+        app.doc.layers[0].bitmap.fill((200, 0, 0, 255))
+        app.new_layer()
+        app.doc.layers[1].bitmap.fill((100, 0, 0, 255))
+        app.set_layer_render_mode(RENDER_COMPLEX)
+        nodes_ok = (app.doc.active_layer.render_mode == RENDER_COMPLEX
+                    and app.doc.active_layer.graph.is_active()
+                    and app.doc.flatten().rgba(0, 0) == (100, 0, 0, 255))
+        graph = app.doc.active_layer.graph
+        output_id = next(node.id for node in graph.nodes.values()
+                         if node.type == "output")
+        operation = graph.add_node("operation", 40, 220, {"mode": "add"})
+        app.connect_graph_ports(operation.id, "Color", output_id, "Color")
+        # Output now carries two wires: the layer (100,0,0) and the operation
+        # (255,0,0), so its colour input averages them.
+        nodes_ok = (nodes_ok
+                    and app.doc.flatten().rgba(0, 0) == (178, 0, 0, 255))
+        value = graph.add_node("value", 40, 240, {"value": 0.25})
+        app.open_node_editor()
+        app.update_idletasks()
+        app.node_selected = value.id
+        app.refresh_node_props()
+        app._set_node_outputs(value, 2)
+        nodes_ok = nodes_ok and len(node_outputs(value)) == 2
+        for gate in MICRO_GATES:
+            app.set_socket_gate(value, "@gate:out:Value", gate)
+            b_tag = "port:%d:in:%s" % (value.id,
+                                        gate_input_name("out", "Value"))
+            b_sockets = len(app.node_canvas.find_withtag(b_tag))
+            nodes_ok = (nodes_ok
+                        and value.params.get("@gate:out:Value") == gate
+                        and len(app.node_canvas.find_withtag(
+                            "port:%d:out:Value" % value.id)) == 1
+                        and b_sockets == (0 if gate == "not" else 1))
+        duplicate = app.duplicate_graph_node(value.id)
+        nodes_ok = (nodes_ok and duplicate is not None
+                    and duplicate.params == value.params
+                    and duplicate.x == value.x + 24
+                    and duplicate.y == value.y + 24)
+        app.node_selected = value.id
+        app.set_inspector_gate(value, "out", "Value", "NOR")
+        operand = graph.add_node("value", 40, 360, {"value": 0.75})
+        b_port = gate_input_name("out", "Value")
+        nodes_ok = (nodes_ok
+                    and value.params.get("@gate:out:Value") == "nor"
+                    and app.connect_graph_ports(operand.id, "Value",
+                                                value.id, b_port))
+        app.refresh_node_props()
+
+        def widget_texts(widget):
+            found = []
+            for child in widget.winfo_children():
+                try:
+                    text = child.cget("text")
+                except tk.TclError:
+                    text = ""
+                if text:
+                    found.append(str(text))
+                found.extend(widget_texts(child))
+            return found
+
+        props_text = widget_texts(app.node_props)
+        nodes_ok = (nodes_ok and "Micro gates" in props_text
+                    and "Disconnect B wire" in props_text
+                    and app.disconnect_micro_gate_b(value, "out", "Value"))
+        nodes_ok = (nodes_ok
+                    and not graph.links_into(value.id, b_port)
+                    and "Disconnect B wire" not in widget_texts(
+                        app.node_props))
+        app.set_socket_gate(value, "@gate:out:Value", "none")
+        nodes_ok = nodes_ok and "@gate:out:Value" not in value.params
+        app.close_node_editor()
+        app.set_layer_render_mode(RENDER_QUICK)
+        nodes_ok = (nodes_ok
+                    and app.doc.active_layer.render_mode == RENDER_QUICK
+                    and app.doc.flatten().rgba(0, 0) == (100, 0, 0, 255))
+
         old_tool = app.tool
         app.tool = "line"
         app.shape_anchor = (0, 0)
@@ -10425,6 +11884,10 @@ def run_selftest(out_path=None):
         tips_ok = tips_ok and app.brush_shape() == "custom"
         tips_ok = tips_ok and bool(brush_offsets(6, "custom"))
         app.brush_shape_var.set("Square")
+        # Earlier GUI checks leave a small, painted bitmap behind; start the
+        # pattern check from a clean canvas so the 3x3 dab fits and its
+        # transparent-neighbour assertion is about the dab, not leftovers.
+        app.new_canvas(CanvasSpec(8, 8))
         pattern_ok = app.pattern_size >= 1
         app.set_pattern_size(3)
         app.pattern_cells = [[(7, 8, 9, 255)] * 3 for _ in range(3)]
@@ -10454,7 +11917,8 @@ def run_selftest(out_path=None):
                       fullscreen_ok, left_scroll_ok, symmetry_ok, shape_ok,
                       gradient_ok, palette_ok, wheel_ok, quantize_ok,
                       dark_ok, light_ok, dockers_ok, overlay_ok,
-                      layer_keys_ok, group_ok, merged_ok, mouse_ok))
+                      layer_keys_ok, group_ok, merged_ok, layer_ops_ok,
+                      nodes_ok, mouse_ok))
         gui_ok = gui_ok and all((tabs_ok, dirty_ok, drop_ok, smear_ok,
                                  tips_ok, pattern_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
@@ -10467,7 +11931,7 @@ def run_selftest(out_path=None):
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
                      "palette=%s wheel=%s quantize=%s dark=%s light=%s "
                      "dockers=%s overlay=%s layer_keys=%s groups=%s "
-                     "merge=%s layer_options=%s mouse=%s"
+                     "merge=%s layer_options=%s nodes=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -10479,7 +11943,7 @@ def run_selftest(out_path=None):
                         gradient_ok, palette_ok, wheel_ok, quantize_ok,
                         dark_ok, light_ok, dockers_ok, overlay_ok,
                         layer_keys_ok, group_ok, merged_ok, layer_ops_ok,
-                        mouse_ok))
+                        nodes_ok, mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))

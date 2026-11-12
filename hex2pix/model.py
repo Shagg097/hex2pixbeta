@@ -11,6 +11,8 @@ tools (contiguous mask, polygon mask, similarity mask).
 
 import math
 
+from .nodes import NodeGraph, RENDER_COMPLEX, RENDER_QUICK
+
 # A pixel the block parser was told to skip ('.' / '-' / '_').
 # Compared by identity, never by value.
 SKIP = object()
@@ -1908,18 +1910,19 @@ class Layer(object):
     `op`, `gate` and `blend` are the layer's three separate option groups:
     the arithmetic operation, the bitwise gate and the blend mode. Each is
     "none" unless chosen; the blend applies first, then the operation, then
-    the gate.
+    the gate.  `render_mode` selects Quick Render, which uses those three
+    groups, or Complex Render, which runs `graph` instead.
     `alpha` is the layer's own opacity, which scales the strength of the
     result for every pixel. `group` names the layer's group, or is empty when
     it is ungrouped. `Document.layers[0]` is the bottom layer.
     """
 
     __slots__ = ("bitmap", "name", "op", "gate", "blend", "visible",
-                 "alpha", "group")
+                 "alpha", "group", "render_mode", "graph")
 
     def __init__(self, width, height, name="Layer 1", op="none",
                  visible=True, data=None, alpha=255, group="", blend="none",
-                 gate="none"):
+                 gate="none", render_mode=RENDER_QUICK, graph=None):
         self.bitmap = Bitmap(width, height, data)
         self.name = str(name)
         self.op = op if op in LAYER_OPS else "none"
@@ -1928,21 +1931,32 @@ class Layer(object):
         self.visible = bool(visible)
         self.alpha = clamp(int(alpha), 0, 255)
         self.group = str(group or "")
+        self.render_mode = (render_mode if render_mode in (RENDER_QUICK,
+                                                          RENDER_COMPLEX)
+                            else RENDER_QUICK)
+        self.graph = graph if isinstance(graph, NodeGraph) else NodeGraph()
 
     def __repr__(self):
         return "Layer(%r, %s, %s, %s)" % (self.name, self.op, self.gate,
                                           self.blend)
 
     def copy(self):
+        graph = (NodeGraph.from_state(self.graph.to_state())
+                 if self.graph.nodes else NodeGraph())
         return Layer(self.bitmap.width, self.bitmap.height, self.name, self.op,
                      self.visible, bytes(self.bitmap.data), self.alpha,
-                     self.group, self.blend, self.gate)
+                     self.group, self.blend, self.gate, self.render_mode,
+                     graph)
 
     def to_state(self):
-        return {"name": self.name, "op": self.op, "gate": self.gate,
-                "blend": self.blend, "visible": self.visible,
-                "alpha": self.alpha, "group": self.group,
-                "data": bytes(self.bitmap.data)}
+        state = {"name": self.name, "op": self.op, "gate": self.gate,
+                 "blend": self.blend, "visible": self.visible,
+                 "alpha": self.alpha, "group": self.group,
+                 "render_mode": self.render_mode,
+                 "data": bytes(self.bitmap.data)}
+        if self.graph.nodes:
+            state["graph"] = self.graph.to_state()
+        return state
 
     @classmethod
     def from_state(cls, state, width, height):
@@ -1963,10 +1977,13 @@ class Layer(object):
                 op = "none"
         if blend == "normal":
             blend = "none"
+        graph_state = state.get("graph")
+        graph = (NodeGraph.from_state(graph_state)
+                 if isinstance(graph_state, dict) else None)
         return cls(width, height, state.get("name", "Layer"), op,
                    state.get("visible", True), state.get("data"),
                    state.get("alpha", 255), state.get("group", ""), blend,
-                   gate)
+                   gate, state.get("render_mode", RENDER_QUICK), graph)
 
 
 def composite_layers(layers, rect=None, frame=None, groups=None):
@@ -1994,6 +2011,14 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
         op = layer.op
         gate = layer.gate
         blend = layer.blend
+        graph = None
+        passthrough = False
+        if getattr(layer, "render_mode", RENDER_QUICK) == RENDER_COMPLEX:
+            candidate = getattr(layer, "graph", None)
+            if candidate is not None and candidate.is_active():
+                graph = candidate
+                passthrough = candidate.is_passthrough()
+                graph.last_error = ""
         opacity = clamp(int(layer.alpha), 0, 255)
         group = groups.get(layer.group) if groups and layer.group else None
         if group is not None:
@@ -2008,6 +2033,35 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
             for col in range(w):
                 s = start + col * 4
                 d = dest_row + col * 4
+                if graph is not None:
+                    if passthrough:
+                        rendered = (src[s], src[s + 1], src[s + 2],
+                                    src[s + 3])
+                    else:
+                        rendered = graph.eval_pixel(
+                            x + col, y + row,
+                            (src[s], src[s + 1], src[s + 2], src[s + 3]),
+                            (dst[d], dst[d + 1], dst[d + 2], dst[d + 3]),
+                            fw, fh)
+                    above = rendered[3]
+                    if not above:
+                        continue
+                    if opacity < 255:
+                        above = above * opacity // 255
+                        if not above:
+                            continue
+                    below = dst[d + 3]
+                    if not below:
+                        dst[d:d + 3] = rendered[:3]
+                        dst[d + 3] = above
+                        continue
+                    dst[d] = combine(dst[d], rendered[0], "normal", above)
+                    dst[d + 1] = combine(dst[d + 1], rendered[1], "normal",
+                                         above)
+                    dst[d + 2] = combine(dst[d + 2], rendered[2], "normal",
+                                         above)
+                    dst[d + 3] = below + (255 - below) * above // 255
+                    continue
                 above = src[s + 3]
                 if not above:
                     continue
@@ -2901,7 +2955,9 @@ class Document(object):
     def flatten(self, rect=None):
         """Composite the visible layers, or one rectangle, into a Bitmap."""
         if (self.layer_count == 1 and self.layers[0].visible
-                and self.layers[0].alpha >= 255 and not self.layers[0].group):
+                and self.layers[0].alpha >= 255 and not self.layers[0].group
+                and getattr(self.layers[0], "render_mode", RENDER_QUICK)
+                != RENDER_COMPLEX):
             bitmap = self.layers[0].bitmap
             return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
         return composite_layers(self.layers, rect, (self.width, self.height),
@@ -3025,6 +3081,10 @@ class Document(object):
         merged = composite_layers([below, above], None,
                                   (self.width, self.height), self.group_map())
         below.bitmap = merged
+        # The composite is baked into the pixels now, so the merged layer is a
+        # plain bitmap: clear the node graph rather than running it twice.
+        below.render_mode = RENDER_QUICK
+        below.graph = NodeGraph()
         # The opacity is baked into the pixels now, so clear it to avoid
         # scaling the merged result a second time.
         below.alpha = 255
@@ -3043,7 +3103,8 @@ class Document(object):
                                   {name: group})
         result = Layer(self.width, self.height, group.name,
                        layers[0].op, True, bytes(merged.data),
-                       blend=layers[0].blend, gate=layers[0].gate)
+                       blend=layers[0].blend, gate=layers[0].gate,
+                       render_mode=RENDER_QUICK)
         for index in reversed(members):
             del self.layers[index]
         self.layers.insert(members[0], result)
