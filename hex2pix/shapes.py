@@ -17,13 +17,16 @@ from .model import HexError, clamp
 
 POLYGON_KINDS = ("triangle", "diamond", "star", "arrow")
 SHAPE_KINDS = ("line", "rect", "ellipse") + POLYGON_KINDS
+ARROW_HEAD_SHAPES = ("triangle", "barbed")
 
 
 def shape_color(foreground, background, use_background=False):
-    """The colour a shape tool paints with.
+    """The stroke colour for line and curve tools.
 
     The Background toggle swaps the foreground colour for the background one,
-    so a shape can carve into existing artwork instead of adding to it.
+    so a line can carve into existing artwork instead of adding to it. Preset
+    filled shapes keep their outline in the foreground and use the background
+    colour for the interior only.
     """
     return background if use_background else foreground
 
@@ -106,30 +109,76 @@ def custom_brush_from_text(text):
     return set_custom_brush(rows)
 
 
+def custom_tip_rows(bitmap, max_size=32):
+    """Turn a bitmap's visible pixels into custom brush-tip rows.
+
+    A cell is filled when any visible pixel falls inside it. Artwork larger
+    than `max_size` is sampled down as a whole, preserving its proportions
+    instead of cropping the right or bottom edge.
+    """
+    max_size = max(1, int(max_size))
+    width = getattr(bitmap, "width", 0)
+    height = getattr(bitmap, "height", 0)
+    if width < 1 or height < 1:
+        return []
+    if max(width, height) <= max_size:
+        columns = width
+        rows_count = height
+    else:
+        scale = max(width, height) / float(max_size)
+        columns = max(1, int(width / scale + 0.5))
+        rows_count = max(1, int(height / scale + 0.5))
+    data = bitmap.data
+    rows = []
+    for y in range(rows_count):
+        top = y * height // rows_count
+        bottom = (y + 1) * height // rows_count
+        row = []
+        for x in range(columns):
+            left = x * width // columns
+            right = (x + 1) * width // columns
+            filled = False
+            for py in range(top, bottom):
+                base = py * width
+                for px in range(left, right):
+                    if data[(base + px) * 4 + 3]:
+                        filled = True
+                        break
+                if filled:
+                    break
+            row.append(1 if filled else 0)
+        rows.append(row)
+    return rows
+
+
 def _custom_offsets(size):
-    """Scale the custom tip onto a `size` x `size` brush box.
+    """Scale the custom tip into a `size` x `size` brush box.
 
     Each box cell takes every grid cell it covers, so a thin tip still shows
-    up when the tool's Size is smaller than the 9x9 grid. Sampling a single
-    grid cell per box cell used to miss thin tips at common sizes, which made
-    the tool quietly fall back to a square.
+    up when the tool's Size is smaller than the tip's own grid. Rectangular
+    tips keep their proportions instead of being stretched into a square.
     """
     mask = custom_brush()
     rows = len(mask)
     columns = max(len(row) for row in mask) if rows else 0
     if not rows or not columns:
         return []
-    half = size // 2
+    span = max(rows, columns)
+    box_rows = max(1, min(size, (size * rows + span // 2) // span))
+    box_columns = max(1, min(size, (size * columns + span // 2) // span))
+    left = -(box_columns // 2)
+    top = -(box_rows // 2)
     offsets = []
-    for dy in range(-half, size - half):
-        y0 = (dy + half) * rows // size
-        y1 = min(rows, ((dy + half + 1) * rows + size - 1) // size)
-        for dx in range(-half, size - half):
-            x0 = (dx + half) * columns // size
-            x1 = min(columns, ((dx + half + 1) * columns + size - 1) // size)
+    for oy in range(box_rows):
+        y0 = oy * rows // box_rows
+        y1 = min(rows, max(y0 + 1, (oy + 1) * rows // box_rows))
+        for ox in range(box_columns):
+            x0 = ox * columns // box_columns
+            x1 = min(columns, max(x0 + 1,
+                                  (ox + 1) * columns // box_columns))
             if any(x < len(mask[y]) and mask[y][x]
                    for y in range(y0, y1) for x in range(x0, x1)):
-                offsets.append((dx, dy))
+                offsets.append((left + ox, top + oy))
     return offsets
 
 
@@ -205,35 +254,91 @@ def _clip_range(low, high, limit):
     return low, high
 
 
-def _polygon_vertices(kind, x0, y0, x1, y1):
-    """Corner points of a preset polygon inside the drag box."""
+def _arrow_vertices(x0, y0, x1, y1, head_shape="triangle", body_size=50.0,
+                    head_size=45.0):
+    """Corner points of a right-pointing arrow inside the drag box.
+
+    `body_size` is the shaft thickness and `head_size` is the head length, both
+    percentages of the box. A barbed head cuts a V-notch into the back of the
+    head; a triangle head keeps the straight back.
+    """
+    xa, xb = sorted((int(x0), int(x1)))
+    ya, yb = sorted((int(y0), int(y1)))
+    cy = (ya + yb) / 2.0
+    width = float(xb - xa)
+    height = float(yb - ya)
+    try:
+        body = float(body_size)
+    except (TypeError, ValueError):
+        body = 50.0
+    body = max(10.0, min(90.0, body)) / 100.0
+    try:
+        head = float(head_size)
+    except (TypeError, ValueError):
+        head = 45.0
+    head = max(10.0, min(90.0, head)) / 100.0
+    shoulder = cy - height * body / 2.0
+    lower = cy + height * body / 2.0
+    head_start = max(float(xa), xb - width * head)
+    shape = str(head_shape or "").lower()
+    if shape not in ARROW_HEAD_SHAPES:
+        shape = "triangle"
+    notch = 0.0
+    if shape == "barbed":
+        notch = min(width * 0.25, (xb - head_start) * 0.35)
+    neck = min(float(xb), head_start + notch)
+    return [(float(xa), shoulder), (neck, shoulder),
+            (head_start, float(ya)), (float(xb), cy),
+            (head_start, float(yb)), (neck, lower),
+            (float(xa), lower)]
+
+
+def _polygon_vertices(kind, x0, y0, x1, y1, points=None, angle=0.0,
+                      depth=None, head_shape="triangle", body_size=50.0,
+                      head_size=45.0):
+    """Corner points of a preset polygon inside the drag box.
+
+    Triangle, diamond and star share `points`, `angle` and `depth`. `points`
+    counts the outer points, `angle` rotates them clockwise in degrees, and
+    `depth` is the inner radius as a percentage of the outer radius. At 100%
+    depth the result is a regular polygon; lower values pull alternate
+    vertices inward into star points. The arrow uses its own head, body and
+    head-size options.
+    """
     xa, xb = sorted((int(x0), int(x1)))
     ya, yb = sorted((int(y0), int(y1)))
     cx = (xa + xb) / 2.0
     cy = (ya + yb) / 2.0
     width = float(xb - xa)
     height = float(yb - ya)
-    if kind == "triangle":
-        return [(cx, float(ya)), (float(xb), float(yb)),
-                (float(xa), float(yb))]
-    if kind == "diamond":
-        return [(cx, float(ya)), (float(xb), cy), (cx, float(yb)),
-                (float(xa), cy)]
-    if kind == "star":
-        points = []
-        for index in range(10):
-            angle = -math.pi / 2.0 + index * math.pi / 5.0
-            reach = 1.0 if index % 2 == 0 else 0.382
-            points.append((cx + math.cos(angle) * width / 2.0 * reach,
-                           cy + math.sin(angle) * height / 2.0 * reach))
-        return points
-    # Arrow: a right-pointing shaft with a triangular head.
-    head = xa + width * 0.55
-    shoulder = ya + height * 0.25
-    lower = yb - height * 0.25
-    return [(float(xa), shoulder), (head, shoulder), (head, float(ya)),
-            (float(xb), cy), (head, float(yb)), (head, lower),
-            (float(xa), lower)]
+    if kind == "arrow":
+        return _arrow_vertices(x0, y0, x1, y1, head_shape, body_size,
+                               head_size)
+    default_count = {"triangle": 3, "diamond": 4}.get(kind, 5)
+    try:
+        count = int(points)
+    except (TypeError, ValueError):
+        count = default_count
+    count = max(3, min(24, count))
+    try:
+        spin = math.radians(float(angle))
+    except (TypeError, ValueError):
+        spin = 0.0
+    if depth is None:
+        depth = 100.0 if kind in ("triangle", "diamond") else 38.2
+    try:
+        depth = max(1.0, min(100.0, float(depth))) / 100.0
+    except (TypeError, ValueError):
+        depth = 1.0 if kind in ("triangle", "diamond") else 0.382
+    regular = depth >= 1.0
+    step = (2.0 if regular else 1.0) * math.pi / count
+    vertices = []
+    for index in range(count if regular else count * 2):
+        theta = -math.pi / 2.0 + spin + index * step
+        reach = 1.0 if regular or index % 2 == 0 else depth
+        vertices.append((cx + math.cos(theta) * width / 2.0 * reach,
+                         cy + math.sin(theta) * height / 2.0 * reach))
+    return vertices
 
 
 def _polygon_rows(vertices):
@@ -260,8 +365,11 @@ def _polygon_rows(vertices):
     return rows
 
 
-def _polygon_points(kind, x0, y0, x1, y1, fill, bounds):
-    vertices = _polygon_vertices(kind, x0, y0, x1, y1)
+def _polygon_points(kind, x0, y0, x1, y1, fill, bounds, points=None,
+                    angle=0.0, depth=None, head_shape="triangle",
+                    body_size=50.0, head_size=45.0):
+    vertices = _polygon_vertices(kind, x0, y0, x1, y1, points, angle, depth,
+                                 head_shape, body_size, head_size)
     points = []
     if fill:
         for y, first, last in _polygon_rows(vertices):
@@ -286,19 +394,25 @@ def _polygon_points(kind, x0, y0, x1, y1, fill, bounds):
     return points
 
 
-def shape_points(kind, x0, y0, x1, y1, fill=False, bounds=None):
+def shape_points(kind, x0, y0, x1, y1, fill=False, bounds=None,
+                 points=None, angle=0.0, depth=None, head_shape="triangle",
+                 body_size=50.0, head_size=45.0):
     """The pixels a line, rectangle, ellipse or preset polygon covers.
 
     The endpoints may sit outside the canvas, so a drag can run past the edge
     and keep the shape it describes. `bounds` is the canvas (width, height);
     it only limits how much of the shape is walked, not its geometry, so an
-    ellipse whose box starts off-canvas keeps its curvature.
+    ellipse whose box starts off-canvas keeps its curvature. Triangle,
+    diamond and star use the polygon options; arrow uses the head options;
+    other shapes ignore both sets.
     """
     kind = kind if kind in SHAPE_KINDS else "rect"
     if kind == "line":
         return _bresenham(x0, y0, x1, y1)
     if kind in POLYGON_KINDS:
-        return _polygon_points(kind, x0, y0, x1, y1, fill, bounds)
+        return _polygon_points(kind, x0, y0, x1, y1, fill, bounds, points,
+                               angle, depth, head_shape, body_size,
+                               head_size)
     points = []
     if kind == "rect":
         xa, xb = sorted((int(x0), int(x1)))
@@ -443,6 +557,55 @@ def stamp_pattern(bitmap, mask, x, y, cells, axes=""):
     return painted
 
 
+def paint_pattern_dab(bitmap, mask, x, y, size, cells, shape="square",
+                      axes="", fallback=None, seen=None):
+    """Paint a brush dab using the Pattern grid for the output colours.
+
+    The brush's own size and tip choose the pixels; the pattern is sampled by
+    canvas position, so its colours continue across dabs. `None` cells use
+    `fallback` instead of punching holes, which keeps the tip shape intact.
+    """
+    height = len(cells)
+    width = max([len(row) for row in cells] or [0])
+    if not height or not width:
+        return 0
+    if seen is None:
+        seen = set()
+    painted = 0
+    for mx, my in mirror_points(x, y, bitmap.width, bitmap.height, axes):
+        for dx, dy in brush_offsets(size, shape):
+            px, py = mx + dx, my + dy
+            if (px, py) in seen:
+                continue
+            seen.add((px, py))
+            row = cells[py % height]
+            column = px % width
+            color = row[column] if column < len(row) else None
+            if color is None:
+                color = fallback
+            if color is None:
+                continue
+            painted += _plot(bitmap, mask, px, py, color)
+    return painted
+
+
+def paint_pattern_stroke(bitmap, mask, x0, y0, x1, y1, size, cells,
+                         shape="square", axes="", fallback=None):
+    """Paint a line of pattern-coloured dabs with the brush's own tip."""
+    centers = set()
+    seen = set()
+    painted = 0
+    for x, y in _bresenham(int(x0), int(y0), int(x1), int(y1)):
+        for mx, my in mirror_points(x, y, bitmap.width, bitmap.height, axes):
+            if (mx, my) in centers:
+                continue
+            centers.add((mx, my))
+            painted += paint_pattern_dab(
+                bitmap, mask, mx, my, size, cells, shape, "", fallback,
+                seen=seen)
+    return painted
+
+
 def paint_points(bitmap, mask, points, color, axes=""):
     """Paint arbitrary pixels, mirrored and inside the mask."""
     painted = 0
@@ -563,10 +726,46 @@ def stamp_text(bitmap, mask, x, y, text, color, scale=1, spacing=1,
     return paint_points(bitmap, mask, points, color, axes)
 
 
+def _fill_mask_holes(filled, width, left, top, right, bottom):
+    """Fill transparent pockets enclosed by a mask inside its bounding box."""
+    box_width = right - left + 1
+    box_height = bottom - top + 1
+    outside = bytearray(box_width * box_height)
+    stack = []
+    for x in range(left, right + 1):
+        stack.append((x, top))
+        stack.append((x, bottom))
+    for y in range(top, bottom + 1):
+        stack.append((left, y))
+        stack.append((right, y))
+    while stack:
+        x, y = stack.pop()
+        if not (left <= x <= right and top <= y <= bottom):
+            continue
+        box_index = (y - top) * box_width + (x - left)
+        if outside[box_index] or filled[y * width + x]:
+            continue
+        outside[box_index] = 1
+        stack.extend(((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)))
+    for y in range(top, bottom + 1):
+        for x in range(left, right + 1):
+            index = y * width + x
+            box_index = (y - top) * box_width + (x - left)
+            if not filled[index] and not outside[box_index]:
+                filled[index] = 1
+
+
 def paint_shape(bitmap, mask, kind, x0, y0, x1, y1, size, color,
-                fill=False, shape="square", axes=""):
-    """Paint a line, rectangle or ellipse, mirrored and with a brush width."""
-    painted = 0
+                fill=False, shape="square", axes="", points=None,
+                angle=0.0, depth=None, head_shape="triangle",
+                body_size=50.0, head_size=45.0, fill_color=None):
+    """Paint a shape, mirrored and with a brush width.
+
+    With `fill` and a `fill_color`, the shape and its outline are rasterized
+    into one solid mask, transparent pockets are closed, and the interior is
+    painted with `fill_color`. The outline is then painted with `color`, so
+    the fill cannot leak through it or leave holes.
+    """
     pairs = [(x0, y0, x1, y1)]
     width, height = bitmap.width, bitmap.height
     if "x" in axes:
@@ -576,16 +775,85 @@ def paint_shape(bitmap, mask, kind, x0, y0, x1, y1, size, color,
     if "x" in axes and "y" in axes:
         pairs.append((width - 1 - x0, height - 1 - y0,
                       width - 1 - x1, height - 1 - y1))
-    centers = set()
-    seen = set()
-    for ax0, ay0, ax1, ay1 in pairs:
-        for x, y in shape_points(kind, ax0, ay0, ax1, ay1, fill,
-                                 bounds=(width, height)):
-            if (x, y) in centers:
-                continue
-            centers.add((x, y))
-            painted += paint_dab(bitmap, mask, x, y, size, color, shape,
-                                 seen=seen)
+    painted = 0
+    if fill and fill_color is not None:
+        filled = bytearray(width * height)
+        left, top = width, height
+        right = bottom = -1
+        for pass_fill in (True, False):
+            for ax0, ay0, ax1, ay1 in pairs:
+                for x, y in shape_points(kind, ax0, ay0, ax1, ay1, pass_fill,
+                                         bounds=(width, height),
+                                         points=points, angle=angle,
+                                         depth=depth, head_shape=head_shape,
+                                         body_size=body_size,
+                                         head_size=head_size):
+                    if not (0 <= x < width and 0 <= y < height):
+                        continue
+                    filled[y * width + x] = 1
+                    left = min(left, x)
+                    top = min(top, y)
+                    right = max(right, x)
+                    bottom = max(bottom, y)
+        if right < left:
+            return 0
+        _fill_mask_holes(filled, width, left, top, right, bottom)
+        for y in range(top, bottom + 1):
+            for x in range(left, right + 1):
+                index = y * width + x
+                if filled[index]:
+                    painted += _plot(bitmap, mask, x, y, fill_color)
+        seen = set()
+        for y in range(top, bottom + 1):
+            for x in range(left, right + 1):
+                index = y * width + x
+                if not filled[index]:
+                    continue
+                if (x > 0 and x < width - 1 and y > 0 and y < height - 1
+                        and filled[index - 1] and filled[index + 1]
+                        and filled[index - width]
+                        and filled[index + width]):
+                    continue
+                painted += _plot(bitmap, mask, x, y, color)
+                painted += paint_dab(bitmap, mask, x, y, size, color, shape,
+                                     seen=seen)
+        for x, y in seen:
+            if 0 <= x < width and 0 <= y < height:
+                filled[y * width + x] = 1
+                left = min(left, x)
+                top = min(top, y)
+                right = max(right, x)
+                bottom = max(bottom, y)
+        pad = max(1, size)
+        pad_left = max(0, left - pad)
+        pad_top = max(0, top - pad)
+        pad_right = min(width - 1, right + pad)
+        pad_bottom = min(height - 1, bottom + pad)
+        before = filled[:]
+        _fill_mask_holes(filled, width, pad_left, pad_top, pad_right,
+                         pad_bottom)
+        for y in range(pad_top, pad_bottom + 1):
+            for x in range(pad_left, pad_right + 1):
+                index = y * width + x
+                if filled[index] and not before[index]:
+                    painted += _plot(bitmap, mask, x, y, fill_color)
+        return painted
+    passes = [(fill, color)]
+    for pass_fill, pass_color in passes:
+        centers = set()
+        seen = set()
+        for ax0, ay0, ax1, ay1 in pairs:
+            for x, y in shape_points(kind, ax0, ay0, ax1, ay1, pass_fill,
+                                     bounds=(width, height),
+                                     points=points, angle=angle, depth=depth,
+                                     head_shape=head_shape,
+                                     body_size=body_size,
+                                     head_size=head_size):
+                if (x, y) in centers:
+                    continue
+                centers.add((x, y))
+                painted += paint_dab(bitmap, mask, x, y, size, pass_color,
+                                     shape, seen=seen)
     return painted
 
 

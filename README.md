@@ -264,9 +264,11 @@ panel; `0` means an exact byte match.
 
 **Move / Scale** turns a selection into a floating piece. Drag inside it to
 move, `Shift`+drag to scale from the opposite corner, or `Ctrl`+drag to rotate
-in 15° steps. **Smooth edges** is off by default for exact nearest-neighbour
-pixels; turn it on in the tool options to soften rotated and fractionally
-scaled edges with partial-transparent pixels.
+rotate. Rotation uses **CleanEdge** by default: each destination pixel takes
+its colour from cleanEdge's quadrant slices, so a turned outline is redrawn
+as a clean line instead of breaking into dashes. The **Algorithm** menu also
+offers RotSprite, Nearest and Transpose 90, and **Smooth edges** is a separate
+toggle that blends the rotated edges instead.
 Scaling keeps the piece's proportions and holds the opposite
 corner still, so a drag can neither squash the artwork nor flip it, and
 rotation only starts once the pointer leaves the middle, so grabbing the

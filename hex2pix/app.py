@@ -35,11 +35,11 @@ from .effects import (blur_area, blur_stroke, content_mask, contour_mask,
                       smear_area, spray_area, shuffle_area, shuffle_stroke,
                       spray_stroke)
 from .shapes import (brush_offsets, custom_brush, custom_brush_from_text,
-                     custom_brush_text, gradient_fill, line_points,
+                     custom_brush_text, custom_tip_rows, gradient_fill,
                      mirror_points, paint_curve, paint_dab, paint_mask,
-                     paint_points, paint_shape, paint_stroke, set_custom_brush,
-                     shape_color,
-                     stamp_pattern, stamp_text)
+                     paint_pattern_dab, paint_pattern_stroke, paint_points,
+                     paint_shape, paint_stroke, set_custom_brush, shape_color,
+                     stamp_text)
 from .canvas import (ANCHOR_CODES, ANCHOR_LABELS, MAX_SIDE, UNITS, CanvasSpec,
                      apply_spec_to_document, physical_size, px_per_unit,
                      scale_image)
@@ -55,6 +55,7 @@ from .model import (
     place_block, rotate90,
     box_from_quad, quad_centre, quad_from_box, quad_handles,
     quad_move_corner, quad_rotate, quad_scale, quad_shear, quad_translate,
+    ROTSPRITE_SIMILAR, TRANSFORM_ALGORITHMS, snap_quad_to_pixel_grid,
     warp_piece,
     RotationDrag, rotate_piece, scale_box, selected_bytes,
     selection_ellipse_mask,
@@ -73,10 +74,13 @@ TOOLS = (
     ("shape_rect", "Rectangle", "r", "Drag a rectangle, outline or filled"),
     ("shape_ellipse", "Ellipse", "u", "Drag an ellipse, outline or filled"),
     ("shape_triangle", "Triangle", "",
-     "Drag a triangle, outline or filled"),
-    ("shape_diamond", "Diamond", "", "Drag a diamond, outline or filled"),
-    ("shape_star", "Star", "", "Drag a star, outline or filled"),
-    ("shape_arrow", "Arrow", "", "Drag an arrow, outline or filled"),
+     "Drag a triangle; Points, Angle and Depth shape it"),
+    ("shape_diamond", "Diamond", "",
+     "Drag a diamond; Points, Angle and Depth shape it"),
+    ("shape_star", "Star", "",
+     "Drag a star; Points, Angle and Depth shape it"),
+    ("shape_arrow", "Arrow", "",
+     "Drag an arrow; Head shape, Body and Head sizes"),
     ("gradient", "Gradient", "v", "Drag a linear, radial or palette gradient"),
     ("pattern", "Line pattern", "l", "Fill lines with the pattern, row by row"),
     ("structure", "Structure fill", "k", "Fill with a mirrored structural pattern"),
@@ -104,6 +108,7 @@ PAINT_TOOLS = ("pencil", "eraser")
 SHAPE_TOOLS = ("line", "curve", "shape_rect", "shape_ellipse",
                "shape_triangle", "shape_diamond", "shape_star",
                "shape_arrow")
+FILL_SHAPES = ("rect", "ellipse", "triangle", "diamond", "star", "arrow")
 
 # The palette is a grid of dropdown folders; related tools share a button.
 TOOL_GROUPS = (
@@ -158,7 +163,10 @@ MAX_PIXELS = 12000000
 MIN_ZOOM = 1e-9           # keeps Tk's coordinate maths finite on huge canvases
 ZOOM_OUT_FACTOR = 50000.0  # furthest zoom out: 1 : (longer side x this)
 MAX_ZOOM = 64.0
-ROTATE_SNAP = 15.0
+ROTATE_SNAP = 1.0
+QUARTER_MAGNET = 3.0
+ROTSPRITE_SCALES = ("Auto", "2x", "4x", "8x")
+ROTSPRITE_SCALE_VALUES = {"Auto": 0, "2x": 2, "4x": 4, "8x": 8}
 SYMMETRY_LABELS = {"": "Off", "x": "X", "y": "Y", "xy": "XY"}
 SYMMETRY_VALUES = {"Off": "", "X": "x", "Y": "y", "XY": "xy"}
 SEL_MODE_LABELS = {"replace": "Replace", "add": "Add",
@@ -177,6 +185,15 @@ def _bounded(value, low, high, default):
     """An int from a widget variable, clamped to its range."""
     try:
         value = int(value)
+    except (tk.TclError, TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def _float_bounded(value, low, high, default):
+    """A float from a widget variable, clamped to its range."""
+    try:
+        value = float(value)
     except (tk.TclError, TypeError, ValueError):
         return default
     return max(low, min(high, value))
@@ -996,6 +1013,7 @@ class DocumentTab(object):
 
 BRUSH_TIPS = ("Square", "Circle", "Custom")
 BRUSH_TIP_SIZE = 9
+BRUSH_TIP_MAX = 24
 
 
 class BrushShapeDialog(tk.Toplevel):
@@ -1004,11 +1022,20 @@ class BrushShapeDialog(tk.Toplevel):
     def __init__(self, parent, rows=None):
         tk.Toplevel.__init__(self, parent)
         self.result = None
-        self.size = BRUSH_TIP_SIZE
-        rows = [list(row) for row in (rows or [])]
-        self.cells = [[1 if y < len(rows) and x < len(rows[y]) and rows[y][x]
-                       else 0 for x in range(self.size)]
-                      for y in range(self.size)]
+        saved = [[1 if cell else 0 for cell in row]
+                 for row in (rows or []) if row]
+        if saved:
+            self.width = max(1, min(BRUSH_TIP_MAX,
+                                    max(len(row) for row in saved)))
+            self.height = max(1, min(BRUSH_TIP_MAX, len(saved)))
+        else:
+            self.width = BRUSH_TIP_SIZE
+            self.height = BRUSH_TIP_SIZE
+        self.cells = [[1 if y < len(saved) and x < len(saved[y])
+                       and saved[y][x] else 0 for x in range(self.width)]
+                      for y in range(self.height)]
+        self.width_var = tk.IntVar(value=self.width)
+        self.height_var = tk.IntVar(value=self.height)
         self.title("Custom brush tip")
         self.transient(parent)
         self.resizable(False, False)
@@ -1016,20 +1043,26 @@ class BrushShapeDialog(tk.Toplevel):
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="Click cells to shape the brush tip; an "
                              "empty tip is ignored.").pack(anchor="w",
-                                                           pady=(0, 8))
-        grid = ttk.Frame(body)
-        grid.pack()
+                                                           pady=(0, 6))
+        size_row = ttk.Frame(body)
+        size_row.pack(anchor="w", pady=(0, 8))
+        ttk.Label(size_row, text="Canvas").pack(side="left")
+        ttk.Label(size_row, text="W").pack(side="left", padx=(8, 3))
+        width_spin = ttk.Spinbox(size_row, from_=1, to=BRUSH_TIP_MAX,
+                                 width=4, textvariable=self.width_var,
+                                 command=self.apply_size)
+        width_spin.pack(side="left")
+        ttk.Label(size_row, text="H").pack(side="left", padx=(8, 3))
+        height_spin = ttk.Spinbox(size_row, from_=1, to=BRUSH_TIP_MAX,
+                                  width=4, textvariable=self.height_var,
+                                  command=self.apply_size)
+        height_spin.pack(side="left")
+        width_spin.bind("<Return>", self.apply_size)
+        height_spin.bind("<Return>", self.apply_size)
+        self.grid_frame = ttk.Frame(body)
+        self.grid_frame.pack()
         self.buttons = []
-        for y in range(self.size):
-            row = []
-            for x in range(self.size):
-                button = tk.Button(grid, width=2, height=1, bd=0,
-                                   bg="#20242b", fg="#cfd6e4",
-                                   activebackground="#3daee9",
-                                   command=lambda x=x, y=y: self.toggle(x, y))
-                button.grid(row=y, column=x, padx=1, pady=1)
-                row.append(button)
-            self.buttons.append(row)
+        self._build_grid()
         actions = ttk.Frame(body)
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(actions, text="Clear", command=self.clear).pack(side="left")
@@ -1040,11 +1073,59 @@ class BrushShapeDialog(tk.Toplevel):
         ttk.Button(actions, text="OK",
                    command=self.accept).pack(side="right", padx=6)
         self.bind("<Escape>", lambda event: self.cancel())
-        self.paint()
         try:
             self.grab_set()
         except tk.TclError:
             pass
+
+    def _build_grid(self):
+        for child in self.grid_frame.winfo_children():
+            child.destroy()
+        self.buttons = []
+        for y in range(self.height):
+            row = []
+            for x in range(self.width):
+                button = tk.Button(self.grid_frame, width=2, height=1, bd=0,
+                                   bg="#20242b", fg="#cfd6e4",
+                                   activebackground="#3daee9",
+                                   command=lambda x=x, y=y: self.toggle(x, y))
+                button.grid(row=y, column=x, padx=1, pady=1)
+                row.append(button)
+            self.buttons.append(row)
+        self.paint()
+
+    def apply_size(self, event=None):
+        """Resize the drawing grid, keeping the existing cells centred."""
+        try:
+            width = int(self.width_var.get())
+            height = int(self.height_var.get())
+        except (tk.TclError, ValueError):
+            width = self.width
+            height = self.height
+        width = max(1, min(BRUSH_TIP_MAX, width))
+        height = max(1, min(BRUSH_TIP_MAX, height))
+        self.width_var.set(width)
+        self.height_var.set(height)
+        if width == self.width and height == self.height:
+            return
+        old = self.cells
+        old_height = len(old)
+        old_width = len(old[0]) if old_height else 0
+        left = (width - old_width) // 2
+        top = (height - old_height) // 2
+        cells = [[0] * width for _ in range(height)]
+        for y in range(old_height):
+            target_y = y + top
+            if not 0 <= target_y < height:
+                continue
+            for x in range(old_width):
+                target_x = x + left
+                if 0 <= target_x < width:
+                    cells[target_y][target_x] = old[y][x]
+        self.width = width
+        self.height = height
+        self.cells = cells
+        self._build_grid()
 
     def paint(self):
         for y, row in enumerate(self.buttons):
@@ -1057,14 +1138,15 @@ class BrushShapeDialog(tk.Toplevel):
         self.paint()
 
     def clear(self):
-        self.cells = [[0] * self.size for _ in range(self.size)]
+        self.cells = [[0] * self.width for _ in range(self.height)]
         self.paint()
 
     def fill(self):
-        self.cells = [[1] * self.size for _ in range(self.size)]
+        self.cells = [[1] * self.width for _ in range(self.height)]
         self.paint()
 
     def accept(self):
+        self.apply_size()
         if not any(cell for row in self.cells for cell in row):
             return
         self.result = [list(row) for row in self.cells]
@@ -1351,6 +1433,9 @@ class hex2pixApp(tk.Tk):
         self.transform_handle_index = None
         self.transform_perspective = False
         self.transform_smooth = False
+        self.transform_algorithm = "CleanEdge"
+        self.rotsprite_scale = 0
+        self.rotsprite_similar = int(ROTSPRITE_SIMILAR)
         self.layer_alpha_before = None
         self.layer_alpha_dirty = False
         self._layer_alpha_syncing = False
@@ -3214,6 +3299,9 @@ class hex2pixApp(tk.Tk):
         self.rotate_snap_var = tk.IntVar(value=int(ROTATE_SNAP))
         self.transform_perspective_var = tk.BooleanVar(value=False)
         self.transform_smooth_var = tk.BooleanVar(value=False)
+        self.transform_algorithm_var = tk.StringVar(value="CleanEdge")
+        self.rotsprite_scale_var = tk.StringVar(value="Auto")
+        self.rotsprite_similar_var = tk.IntVar(value=int(ROTSPRITE_SIMILAR))
         self.blur_size_var = tk.IntVar(value=4)
         self.blur_amount_var = tk.DoubleVar(value=1.0)
         self.blur_amount_text = tk.StringVar(value="1")
@@ -3243,6 +3331,24 @@ class hex2pixApp(tk.Tk):
         self.curve_bend_var = tk.IntVar(value=30)
         self.curve_vectors_var = tk.IntVar(value=1)
         self.curve_direction_var = tk.StringVar(value="Left")
+        self.polygon_points_vars = {
+            "triangle": tk.IntVar(value=3),
+            "diamond": tk.IntVar(value=4),
+            "star": tk.IntVar(value=5),
+        }
+        self.polygon_angle_vars = {
+            "triangle": tk.IntVar(value=0),
+            "diamond": tk.IntVar(value=0),
+            "star": tk.IntVar(value=0),
+        }
+        self.polygon_depth_vars = {
+            "triangle": tk.DoubleVar(value=100.0),
+            "diamond": tk.DoubleVar(value=100.0),
+            "star": tk.DoubleVar(value=38.2),
+        }
+        self.arrow_head_shape_var = tk.StringVar(value="Triangle")
+        self.arrow_body_var = tk.DoubleVar(value=50.0)
+        self.arrow_head_var = tk.DoubleVar(value=45.0)
         self.contour_width_var = tk.IntVar(value=1)
         self.contour_side_var = tk.StringVar(value="Outside")
         self.contour_connect_var = tk.StringVar(value="4")
@@ -3419,17 +3525,42 @@ class hex2pixApp(tk.Tk):
     def _options_shape_ellipse(self):
         self._options_shape()
 
-    def _options_shape_triangle(self):
+    def _options_polygon_preset(self, kind):
         self._options_shape()
+        self._option_label("Points")
+        self._option_spin(self.polygon_points_vars[kind], 3, 24, width=3,
+                          command=self.shape_options_changed)
+        self._option_label("Angle")
+        self._option_spin(self.polygon_angle_vars[kind], -180, 180, width=4,
+                          command=self.shape_options_changed)
+        self._option_label("Depth")
+        self._option_spin(self.polygon_depth_vars[kind], 1, 100, width=5,
+                          command=self.shape_options_changed)
+        self._option_label("%", (2, 2))
+
+    def _options_shape_triangle(self):
+        self._options_polygon_preset("triangle")
 
     def _options_shape_diamond(self):
-        self._options_shape()
+        self._options_polygon_preset("diamond")
 
     def _options_shape_star(self):
-        self._options_shape()
+        self._options_polygon_preset("star")
 
     def _options_shape_arrow(self):
         self._options_shape()
+        self._option_label("Shape")
+        self._option_combo(self.arrow_head_shape_var,
+                           ("Triangle", "Barbed"), 8,
+                           command=self.shape_options_changed)
+        self._option_label("Body")
+        self._option_spin(self.arrow_body_var, 10, 90, width=4,
+                          command=self.shape_options_changed)
+        self._option_label("%", (2, 2))
+        self._option_label("Head")
+        self._option_spin(self.arrow_head_var, 10, 90, width=4,
+                          command=self.shape_options_changed)
+        self._option_label("%", (2, 2))
 
     def _options_gradient(self):
         self._option_check("Radial", self.gradient_radial_var,
@@ -3677,8 +3808,20 @@ class hex2pixApp(tk.Tk):
         self._option_label("deg")
         self._option_check("Perspective nodes", self.transform_perspective_var,
                            self.apply_transform_perspective, padx=(10, 0))
+        self._option_label("Algorithm")
+        self._option_combo(self.transform_algorithm_var,
+                           TRANSFORM_ALGORITHMS, 13,
+                           command=self.apply_transform_algorithm)
         self._option_check("Smooth edges", self.transform_smooth_var,
-                           self.apply_transform_smooth, padx=(10, 0))
+                           self.apply_transform_smooth)
+        self.rotsprite_scale_var.set(self._rotsprite_scale_label())
+        self._option_label("Upscale")
+        self._option_combo(self.rotsprite_scale_var, ROTSPRITE_SCALES, 5,
+                           command=self.apply_rotsprite_scale)
+        self.rotsprite_similar_var.set(self.rotsprite_similar)
+        self._option_label("Similar")
+        self._option_spin(self.rotsprite_similar_var, 0, 255, width=3,
+                          command=self.apply_rotsprite_similar)
         self._option_label("Corner scales, edge shears, top rotates", (14, 2))
 
     def _options_hand(self):
@@ -3709,10 +3852,41 @@ class hex2pixApp(tk.Tk):
         self.transform_perspective = bool(self.transform_perspective_var.get())
         self.request_redraw()
 
+    def _rotsprite_scale_label(self):
+        for label, value in ROTSPRITE_SCALE_VALUES.items():
+            if value == self.rotsprite_scale:
+                return label
+        return "Auto"
+
+    def apply_rotsprite_scale(self):
+        value = self.rotsprite_scale_var.get()
+        self.rotsprite_scale = max(0, int(ROTSPRITE_SCALE_VALUES.get(value,
+                                                                  0)))
+        self.refresh_transform_preview()
+
+    def apply_rotsprite_similar(self):
+        try:
+            value = int(self.rotsprite_similar_var.get())
+        except (tk.TclError, ValueError):
+            return
+        self.rotsprite_similar = max(0, min(255, value))
+        self.refresh_transform_preview()
+
+    def apply_transform_algorithm(self):
+        value = self.transform_algorithm_var.get()
+        self.transform_algorithm = (value if value in TRANSFORM_ALGORITHMS
+                                    else "CleanEdge")
+        self.refresh_transform_preview()
+
     def apply_transform_smooth(self):
+        """Smooth edges is a toggle of its own, not a menu entry."""
         self.transform_smooth = bool(self.transform_smooth_var.get())
+        self.refresh_transform_preview()
+
+    def refresh_transform_preview(self):
+        """Resample the live piece after a sampler option changed."""
         quad = getattr(self, "transform_quad", None)
-        if (self.transform_base is not None
+        if (getattr(self, "transform_base", None) is not None
                 and self.transform_piece is not None
                 and quad is not None):
             self._render_transform_quad(quad)
@@ -4411,7 +4585,14 @@ class hex2pixApp(tk.Tk):
                         mode = "perspective"
                     else:
                         mode = "scale"
-            self.begin_transform(free_x, free_y, mode)
+            if mode == "rotate":
+                # A rotation has to track the pointer at sub-cell
+                # resolution, or the angle advances one whole cell at a
+                # time and the piece visibly lags the mouse.
+                grab_x, grab_y = self.pointer_at(event)
+            else:
+                grab_x, grab_y = free_x, free_y
+            self.begin_transform(grab_x, grab_y, mode)
         elif tool == "hand":
             self.begin_pan(event)
         self.request_redraw()
@@ -4493,7 +4674,10 @@ class hex2pixApp(tk.Tk):
                     mode = "scale"
                 elif state & 0x0004:
                     mode = "rotate"
-            self.apply_transform(free_x, free_y, mode)
+            if mode == "rotate":
+                self.apply_transform(*self.pointer_at(event), mode)
+            else:
+                self.apply_transform(free_x, free_y, mode)
         self.request_redraw()
         self.refresh_status()
 
@@ -4723,9 +4907,7 @@ class hex2pixApp(tk.Tk):
     def paint_at(self, x, y, tool, color=None):
         if tool == "pencil" and self.brush_pattern():
             painted = self.pattern_dab(x, y)
-            self._mark_dirty(x, y, x, y,
-                             max(self.pattern_width, self.pattern_height) // 2
-                             + 1)
+            self._mark_dirty(x, y, x, y)
             return painted
         color = color if color is not None else self.fg
         if tool == "eraser":
@@ -4769,18 +4951,20 @@ class hex2pixApp(tk.Tk):
         return painted
 
     def pattern_dab(self, x, y):
-        """Stamp the Pattern grid as a tip, centred on (x, y)."""
+        """Paint the brush tip using the Pattern grid's colours."""
         cells = [[None if color is None else self.limit_color(color)
                   for color in row] for row in self.pattern_cells]
-        return stamp_pattern(self.doc.bitmap, self.doc.mask(), x, y, cells,
-                             self.symmetry)
+        return paint_pattern_dab(
+            self.doc.bitmap, self.doc.mask(), x, y, self.brush, cells,
+            self.brush_shape(), self.symmetry, self.limit_color(self.fg))
 
     def pattern_stroke(self, x0, y0, x1, y1):
-        """Stamp the pattern tip along a pencil drag."""
-        painted = 0
-        for x, y in line_points(x0, y0, x1, y1):
-            painted += self.pattern_dab(x, y)
-        return painted
+        """Paint a pencil drag with pattern colours inside the brush tip."""
+        cells = [[None if color is None else self.limit_color(color)
+                  for color in row] for row in self.pattern_cells]
+        return paint_pattern_stroke(
+            self.doc.bitmap, self.doc.mask(), x0, y0, x1, y1, self.brush,
+            cells, self.brush_shape(), self.symmetry, self.limit_color(self.fg))
 
     def stamp_text_at(self, x, y):
         """Stamp the Text option with its top-left corner at (x, y)."""
@@ -4933,6 +5117,15 @@ class hex2pixApp(tk.Tk):
         self.redraw()
 
     # ---------------------------------------------------------- move / scale
+    def rotate_dead_zone(self):
+        """How close to the centre a rotate grab is ignored, in cells.
+
+        A fixed six screen pixels: measured in cells it grew with the zoom
+        and could swallow the rotate handle of a small selection entirely.
+        """
+        zoom = float(vars(self).get("zoom") or 1.0)
+        return max(0.1, 6.0 / max(0.01, zoom))
+
     def begin_transform(self, x, y, mode="move"):
         """Pick the selected pixels up for a node drag.
 
@@ -4987,7 +5180,8 @@ class hex2pixApp(tk.Tk):
         self.transform_edge = None
         self.transform_fixed = None
         self.transform_rotation = RotationDrag(
-            quad_centre(self.transform_start_quad), (x, y))
+            quad_centre(self.transform_start_quad), (x, y),
+            min_radius=self.rotate_dead_zone())
         if mode in ("scale", "perspective"):
             corner = (self.transform_handle_index
                       if self.transform_handle_kind == "corner"
@@ -5005,7 +5199,11 @@ class hex2pixApp(tk.Tk):
     def apply_transform(self, x, y, mode=None):
         """Rebuild the layer from the quad the current drag describes."""
         if (self.transform_piece is None or self.transform_base is None
-                or self.transform_start_quad is None):
+                or self.transform_start_quad is None
+                or self.transform_grab is None):
+            # A drag that never started (a click outside the selection, or
+            # a pointer event after the drag ended) has no anchor to
+            # measure from; ignoring it beats crashing mid-gesture.
             return
         if mode is True:
             mode = "scale"
@@ -5030,8 +5228,19 @@ class hex2pixApp(tk.Tk):
         elif mode == "rotate":
             snap = max(1, int(getattr(self, "rotate_snap", ROTATE_SNAP)))
             angle = self.transform_rotation.update((x, y), snap)
+            quarter = 90.0 * round(angle / 90.0)
+            if abs(angle - quarter) <= QUARTER_MAGNET:
+                # Quarter turns are the ones that must stay crisp: land on
+                # them exactly so the piece keeps whole-pixel edges instead
+                # of smearing a half pixel over every row and column.
+                angle = quarter % 360.0
             self.transform_angle = angle
             quad = quad_rotate(start, self.transform_rotation.centre, angle)
+            if abs(angle - 90.0 * round(angle / 90.0)) < 1e-9:
+                # Quarter turns have exact pixel-grid bounds. Snapping avoids
+                # a half-pixel centre that would repeat one source edge and
+                # drop the other after a non-square selection turns.
+                quad = snap_quad_to_pixel_grid(quad)
         elif mode == "shear":
             edge = self.transform_edge
             if edge is None:
@@ -5055,7 +5264,12 @@ class hex2pixApp(tk.Tk):
         # that was already rotated must not stamp the unrotated source back.
         left, top, warped = warp_piece(
             self.transform_piece, quad, self.doc.width, self.doc.height,
-            smooth=bool(getattr(self, "transform_smooth", True)))
+            smooth=bool(getattr(self, "transform_smooth", False)),
+            mode=("Smooth" if vars(self).get("transform_smooth")
+                  else str(vars(self).get("transform_algorithm")
+                           or "CleanEdge")),
+            rotsprite_scale=vars(self).get("rotsprite_scale") or None,
+            rotsprite_similar=vars(self).get("rotsprite_similar"))
         origin = (left, top)
         stamp_bitmap(self.doc.bitmap, warped, origin)
         self.doc.limit_pixels()
@@ -5354,7 +5568,7 @@ class hex2pixApp(tk.Tk):
             pass
 
     def brush_pattern(self):
-        """True when the pencil should stamp the Pattern grid as its tip."""
+        """True when the pencil should use the Pattern grid's colours."""
         try:
             enabled = bool(self.brush_pattern_var.get())
         except (AttributeError, tk.TclError):
@@ -5369,13 +5583,16 @@ class hex2pixApp(tk.Tk):
             self.symmetry_option_var.set(
                 SYMMETRY_LABELS.get(self.symmetry, "Off"))
 
-    def shape_paint_color(self):
-        """Shape tools paint in BG instead of FG when Background is on."""
+    def shape_background_enabled(self):
+        """True when the Background option is checked."""
         try:
-            enabled = bool(self.shape_bg_var.get())
+            return bool(self.shape_bg_var.get())
         except (AttributeError, tk.TclError):
-            enabled = False
-        return shape_color(self.fg, self.bg, enabled)
+            return False
+
+    def shape_paint_color(self):
+        """The stroke colour for line and curve tools."""
+        return shape_color(self.fg, self.bg, self.shape_background_enabled())
 
     def begin_shape(self, x, y):
         self.shape_before = self.doc.begin()
@@ -5419,10 +5636,22 @@ class hex2pixApp(tk.Tk):
         else:
             kind = (self.tool[len("shape_"):]
                     if self.tool.startswith("shape_") else self.tool)
+            fill_color = None
+            if kind in FILL_SHAPES:
+                color = self.limit_color(self.fg)
+                if self.shape_background_enabled():
+                    fill_color = self.limit_color(self.bg)
             paint_shape(self.doc.bitmap, self.doc.mask(), kind,
                         self.shape_anchor[0], self.shape_anchor[1], x, y,
                         self.brush, color, bool(self.shape_filled.get()),
-                        self.brush_shape(), self.symmetry)
+                        self.brush_shape(), self.symmetry,
+                        points=self.polygon_points(kind),
+                        angle=self.polygon_angle(kind),
+                        depth=self.polygon_depth(kind),
+                        head_shape=self.arrow_head_shape(),
+                        body_size=self.arrow_body(),
+                        head_size=self.arrow_head(),
+                        fill_color=fill_color)
         self.refresh_bytes()
         self.request_redraw()
 
@@ -5845,6 +6074,26 @@ class hex2pixApp(tk.Tk):
         self.show_pattern_docker()
         self.pattern_info.set("pattern loaded from %d,%d %dx%d"
                               % (left, top, width, height))
+
+    def copy_selection_to_custom_tip(self):
+        """Capture the visible pixels of the selection as a custom tip."""
+        selected = self._selection_piece()
+        if selected is None:
+            return
+        (left, top, width, height), piece = selected
+        rows = custom_tip_rows(piece, BRUSH_TIP_MAX)
+        if not rows or not any(cell for row in rows for cell in row):
+            self.report_error("The selection has no visible pixels to copy.")
+            return
+        set_custom_brush(rows)
+        try:
+            self.settings.set("custom_brush", custom_brush_text())
+        except (OSError, ValueError):
+            pass
+        self.brush_shape_var.set("Custom")
+        self.export_info.set("custom tip copied from %d,%d %dx%d as %dx%d"
+                             % (left, top, width, height,
+                                len(rows[0]), len(rows)))
 
     @staticmethod
     def _pattern_cell(piece, x, y, step, width, height):
@@ -6415,6 +6664,42 @@ class hex2pixApp(tk.Tk):
     def curve_direction(self):
         value = str(self.curve_direction_var.get()).lower()
         return value if value in ("left", "right", "alternate") else "left"
+
+    def polygon_points(self, kind):
+        default = {"triangle": 3, "diamond": 4}.get(kind, 5)
+        var = getattr(self, "polygon_points_vars", {}).get(kind)
+        return _bounded(var.get() if var is not None else default, 3, 24,
+                        default)
+
+    def polygon_angle(self, kind):
+        var = getattr(self, "polygon_angle_vars", {}).get(kind)
+        return _bounded(var.get() if var is not None else 0, -180, 180, 0)
+
+    def polygon_depth(self, kind):
+        default = 100.0 if kind in ("triangle", "diamond") else 38.2
+        var = getattr(self, "polygon_depth_vars", {}).get(kind)
+        return _float_bounded(var.get() if var is not None else default,
+                              1.0, 100.0, default)
+
+    def arrow_head_shape(self):
+        var = getattr(self, "arrow_head_shape_var", None)
+        value = str(var.get()).lower() if var is not None else "triangle"
+        return value if value in ("triangle", "barbed") else "triangle"
+
+    def arrow_body(self):
+        var = getattr(self, "arrow_body_var", None)
+        return _float_bounded(var.get() if var is not None else 50.0,
+                              10.0, 90.0, 50.0)
+
+    def arrow_head(self):
+        var = getattr(self, "arrow_head_var", None)
+        return _float_bounded(var.get() if var is not None else 45.0,
+                              10.0, 90.0, 45.0)
+
+    def shape_options_changed(self):
+        """Redraw a live shape preview when its options change."""
+        if self.shape_anchor is not None and self.shape_base is not None:
+            self.apply_shape(self.cursor[0], self.cursor[1])
 
     def contour_width(self):
         return _bounded(self.contour_width_var.get(), 1, 8, 1)
@@ -8055,6 +8340,8 @@ class hex2pixApp(tk.Tk):
                          command=self.copy_selection_to_clipboard)
         menu.add_command(label="Copy to pattern",
                          command=self.pattern_from_selection)
+        menu.add_command(label="Copy to custom tip",
+                         command=self.copy_selection_to_custom_tip)
         self._selection_menu = menu
         return menu
 
@@ -10095,14 +10382,18 @@ def run_selftest(out_path=None):
         app.brush_shape_var.set("Square")
         pattern_ok = app.pattern_size >= 1
         app.set_pattern_size(3)
-        app.pattern_cells[0][0] = (7, 8, 9, 255)
+        app.pattern_cells = [[(7, 8, 9, 255)] * 3 for _ in range(3)]
+        app.brush = 3
+        app.brush_var.set(3)
+        app.brush_shape_var.set("Circle")
         app.brush_pattern_var.set(True)
         painted = app.pattern_dab(2, 2)
-        pattern_ok = (pattern_ok and app.brush_pattern() and painted >= 1
-                      and app.doc.active_layer.bitmap.rgba(1, 1)
-                      == (7, 8, 9, 255))
+        pattern_ok = (pattern_ok and app.brush_pattern() and painted == 5
+                      and app.doc.active_layer.bitmap.rgba(2, 1)
+                      == (7, 8, 9, 255)
+                      and app.doc.active_layer.bitmap.rgba(1, 1)[3] == 0)
         app.brush_pattern_var.set(False)
-        app.pattern_cells[0][0] = None
+        app.brush_shape_var.set("Square")
         lines.append("tabs=%s dirty=%s drop=%s sliders=%s tips=%s pattern=%s"
                      % (tabs_ok, dirty_ok, drop_ok, smear_ok, tips_ok,
                         pattern_ok))
