@@ -31,6 +31,7 @@ USER_AGENT = "hex2pix/%s" % __version__
 
 DEFAULT_SETTINGS = {
     "check_updates": True,
+    "debug_tools": False,
     "skipped_version": "",
     "custom_brush": "",
     "text_font": "Pixel 5x7",
