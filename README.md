@@ -789,7 +789,7 @@ python38-32\python.exe -m unittest discover -s hex2pix/tests -t .
 python38-32\python.exe run_hex2pix.py --selftest
 ```
 
-The first command runs **551 unit tests** covering the model, canvas geometry,
+The first command runs **701 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -825,7 +825,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              551 unit tests
+│  └─ tests/              701 unit tests
 └─ docs/                   logo and editor screenshot; logo source in logo/
 ```
 
