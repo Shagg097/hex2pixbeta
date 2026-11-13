@@ -800,9 +800,14 @@ def load_project(path):
                 header = json.loads(raw_header.decode("utf-8"))
             except (UnicodeDecodeError, ValueError) as exc:
                 raise HexError("damaged project header: %s" % exc)
+            if not isinstance(header, dict):
+                raise HexError("damaged project header")
             if header.get("format") != PROJECT_FORMAT:
                 raise HexError("not a hex2pix project file")
-            version = int(header.get("version", 0))
+            try:
+                version = int(header.get("version", 0))
+            except (TypeError, ValueError, OverflowError):
+                raise HexError("project has an invalid format version")
             if version > PROJECT_VERSION:
                 raise HexError("this project needs a newer hex2pix "
                                "(format version %d)" % version)
@@ -814,7 +819,12 @@ def load_project(path):
             if width <= 0 or height <= 0:
                 raise HexError("project has no canvas size")
             layers = []
-            for index, entry in enumerate(header.get("layers") or []):
+            raw_layers = header.get("layers") or []
+            if not isinstance(raw_layers, list):
+                raise HexError("project has an invalid layer list")
+            for index, entry in enumerate(raw_layers):
+                if not isinstance(entry, dict):
+                    raise HexError("project has an invalid layer entry")
                 name = entry.get("data") or "layers/%03d.rgba" % index
                 try:
                     data = archive.read(name)
@@ -829,8 +839,13 @@ def load_project(path):
                     state, width, height))
             if not layers:
                 raise HexError("project has no layers")
-            document = Document(width, height, path=path,
-                                ppi=float(header.get("ppi", 72.0)),
+            try:
+                ppi = float(header.get("ppi", 72.0))
+            except (TypeError, ValueError, OverflowError):
+                ppi = 72.0
+            if not math.isfinite(ppi) or ppi <= 0:
+                ppi = 72.0
+            document = Document(width, height, path=path, ppi=ppi,
                                 color_mode=header.get("color_mode", "RGB"),
                                 alpha=header.get("alpha", True))
             document.layers = layers
@@ -842,12 +857,18 @@ def load_project(path):
                 if layer.group and layer.group not in known:
                     document.groups.append(LayerGroup(layer.group))
                     known.add(layer.group)
-            document.layer_index = clamp(int(header.get("active_layer", 0)), 0,
-                                         len(layers) - 1)
+            try:
+                active_layer = int(header.get("active_layer", 0))
+            except (TypeError, ValueError, OverflowError):
+                active_layer = 0
+            document.layer_index = clamp(active_layer, 0, len(layers) - 1)
             document.display_format = str(header.get("display_format", "png"))
             matte = header.get("matte")
             if isinstance(matte, (list, tuple)) and len(matte) == 3:
-                document.matte = tuple(clamp(int(v), 0, 255) for v in matte)
+                try:
+                    document.matte = tuple(clamp(int(v), 0, 255) for v in matte)
+                except (TypeError, ValueError, OverflowError):
+                    pass
             working = header.get("working")
             if working is not None:
                 if not isinstance(working, dict):
@@ -869,5 +890,12 @@ def load_project(path):
         raise HexError("not a hex2pix project: %s" % os.path.basename(path))
     except OSError as exc:
         raise HexError("could not read the project: %s" % exc)
+    except HexError:
+        raise
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError,
+            RuntimeError, NotImplementedError, EOFError) as exc:
+        # A damaged project should be a normal load error, not a traceback
+        # from the Open project callback.
+        raise HexError("damaged project: %s" % (exc or type(exc).__name__))
     return ProjectFile(document, header.get("extras"))
 

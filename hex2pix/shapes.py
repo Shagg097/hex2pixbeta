@@ -10,6 +10,7 @@ Pure Python, no tkinter, so the geometry is unit-testable.
 """
 
 import math
+from functools import lru_cache
 
 from .bitmapfont import text_points
 from .dither import apply_gradient_dither
@@ -182,14 +183,13 @@ def _custom_offsets(size):
     return offsets
 
 
-def brush_offsets(size, shape="square"):
-    """Pixel offsets relative to the brush centre."""
-    size = max(1, int(size))
-    if shape == "custom":
-        offsets = _custom_offsets(size)
-        if offsets:
-            return offsets
-        shape = "square"
+@lru_cache(maxsize=512)
+def _tip_offsets(size, shape):
+    """The square or circle tip, built once per size and shape.
+
+    A stroke asks for the same tip on every dab, and a large tip is hundreds
+    of offsets, so rebuilding it per dab was pure overhead.
+    """
     half = size // 2
     offsets = []
     for dy in range(-half, size - half):
@@ -198,7 +198,20 @@ def brush_offsets(size, shape="square"):
                 if dx * dx + dy * dy > half * half:
                     continue
             offsets.append((dx, dy))
-    return offsets
+    return tuple(offsets)
+
+
+def brush_offsets(size, shape="square"):
+    """Pixel offsets relative to the brush centre."""
+    size = max(1, int(size))
+    if shape == "custom":
+        offsets = _custom_offsets(size)
+        if offsets:
+            return offsets
+        shape = "square"
+    if shape not in ("square", "circle"):
+        shape = "square"
+    return list(_tip_offsets(size, shape))
 
 
 def _bresenham(x0, y0, x1, y1):
