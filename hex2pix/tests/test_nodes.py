@@ -1,6 +1,7 @@
 """Tests for the Complex Render node graph."""
 
 import unittest
+from unittest import mock
 
 from hex2pix import model, nodes
 from hex2pix.model import Document, Layer
@@ -73,23 +74,146 @@ class NodeGraphTests(unittest.TestCase):
         self.assertEqual(evaluate(graph, below=(0, 0, 0, 255)),
                          (76, 76, 76, 255))
 
-    def test_several_links_per_input_and_cycles_are_rejected(self):
+    def test_several_links_per_input_and_duplicate_wires_are_allowed(self):
         graph = nodes.NodeGraph()
         layer = graph.add_node("layer")
         other = graph.add_node("constant")
         output = graph.add_node("output")
         self.assertTrue(graph.link(layer.id, "Color", output.id, "Color"))
         self.assertTrue(graph.link(other.id, "Color", output.id, "Color"))
+        self.assertTrue(graph.link(layer.id, "Color", output.id, "Color"))
+        self.assertEqual(len(graph.links), 3)
+        self.assertEqual(len(graph.links_into(output.id, "Color")), 3)
+        self.assertTrue(graph.unlink(layer.id, "Color", output.id, "Color"))
         self.assertEqual(len(graph.links), 2)
         self.assertEqual(len(graph.links_into(output.id, "Color")), 2)
-        self.assertFalse(graph.link(layer.id, "Color", output.id, "Color"))
         self.assertTrue(graph.unlink(layer.id, "Color", output.id, "Color"))
         self.assertEqual(len(graph.links), 1)
+        self.assertFalse(graph.unlink(layer.id, "Color", output.id, "Color"))
 
-        first = graph.add_node("operation")
-        second = graph.add_node("operation")
+    def test_cycles_and_self_links_are_allowed_and_safe(self):
+        graph = nodes.NodeGraph()
+        first = graph.add_node("operation", params={"mode": "add"})
+        second = graph.add_node("operation", params={"mode": "add"})
+        output = graph.add_node("output")
         self.assertTrue(graph.link(first.id, "Color", second.id, "A"))
-        self.assertFalse(graph.link(second.id, "Color", first.id, "A"))
+        self.assertTrue(graph.link(second.id, "Color", first.id, "A"))
+        self.assertTrue(graph.link(first.id, "Color", first.id, "B"))
+        self.assertTrue(graph.link(second.id, "Color", output.id, "Color"))
+        result = evaluate(graph, below=BLUE)
+        self.assertEqual(len(result), 4)
+        self.assertEqual(graph.last_error, "")
+
+    def test_self_link_does_not_use_the_fast_chain(self):
+        graph = nodes.NodeGraph()
+        operation = graph.add_node("operation", params={"mode": "add"})
+        output = graph.add_node("output")
+        self.assertTrue(graph.link(operation.id, "Color", operation.id, "A"))
+        self.assertTrue(graph.link(operation.id, "Color", output.id,
+                                   "Color"))
+        self.assertEqual(evaluate(graph, layer=RED, below=BLUE),
+                         (255, 0, 255, 255))
+        self.assertEqual(graph.last_error, "")
+
+    def test_reverse_layout_is_saved_with_the_node(self):
+        graph = nodes.NodeGraph()
+        node = graph.add_node("math")
+        self.assertFalse(nodes.node_reversed(node))
+        node.params["@reverse"] = True
+        self.assertTrue(nodes.node_reversed(node))
+        restored = nodes.NodeGraph.from_state(graph.to_state())
+        self.assertTrue(nodes.node_reversed(restored.nodes[node.id]))
+
+    def test_reversed_gate_turns_its_output_into_the_input(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        gate = graph.add_node("gate", params={"mode": "or"})
+        output = graph.add_node("output")
+        gate.params["@reverse"] = True
+
+        self.assertEqual([name for name, _kind in nodes.node_inputs(gate)],
+                         ["Color"])
+        self.assertEqual([name for name, _kind in nodes.node_outputs(gate)],
+                         ["A", "B"])
+        self.assertEqual(dict(nodes.node_output_sources(gate)),
+                         {"A": "Color", "B": "Color"})
+
+        self.assertTrue(graph.link(layer.id, "Color", gate.id, "Color"))
+        self.assertTrue(graph.link(gate.id, "A", output.id, "Color"))
+        self.assertEqual(evaluate(graph, layer=(10, 20, 30, 200),
+                                  below=(0, 0, 0, 0)),
+                         (10, 20, 30, 200))
+        self.assertEqual(graph.last_error, "")
+
+    def test_reversed_gate_keeps_color_left_and_ab_right(self):
+        from hex2pix.app import hex2pixApp
+
+        graph = nodes.NodeGraph()
+        gate = graph.add_node("gate", params={"mode": "nand"})
+        self.assertEqual(hex2pixApp._visual_side(None, gate, "in"), "left")
+        self.assertEqual(hex2pixApp._visual_side(None, gate, "out"), "right")
+
+        gate.params["@reverse"] = True
+        self.assertEqual(hex2pixApp._visual_side(None, gate, "in"), "left")
+        self.assertEqual(hex2pixApp._visual_side(None, gate, "out"), "right")
+        self.assertEqual(hex2pixApp._port_y(None, gate, "in", 1, 0),
+                         gate.y + 50)
+        self.assertEqual(
+            [hex2pixApp._port_y(None, gate, "out", 2, index)
+             for index in range(2)],
+            [gate.y + 36, gate.y + 58])
+
+    def test_reversed_operation_matches_the_normal_operation(self):
+        normal = nodes.NodeGraph()
+        layer = normal.add_node("layer")
+        operation = normal.add_node("operation", params={"mode": "add"})
+        output = normal.add_node("output")
+        normal.link(layer.id, "Color", operation.id, "A")
+        normal.link(operation.id, "Color", output.id, "Color")
+
+        reversed_graph = nodes.NodeGraph()
+        layer = reversed_graph.add_node("layer")
+        operation = reversed_graph.add_node("operation", params={"mode": "add"})
+        output = reversed_graph.add_node("output")
+        operation.params["@reverse"] = True
+        reversed_graph.link(layer.id, "Color", operation.id, "Color")
+        reversed_graph.link(operation.id, "A", output.id, "Color")
+
+        self.assertEqual(evaluate(normal, layer=RED, below=BLUE),
+                         evaluate(reversed_graph, layer=RED, below=BLUE))
+        self.assertEqual(reversed_graph.last_error, "")
+
+    def test_micro_gate_follows_a_reversed_input(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        gate = graph.add_node("gate", params={"mode": "or"})
+        output = graph.add_node("output")
+        gate.params["@reverse"] = True
+        gate.params["@gate:in:Color"] = "nand"
+
+        self.assertTrue(graph.link(layer.id, "Color", gate.id, "Color"))
+        self.assertTrue(graph.link(gate.id, "A", output.id, "Color"))
+        self.assertEqual(evaluate(graph, layer=(10, 20, 30, 200),
+                                  below=(0, 0, 0, 0)),
+                         (245, 235, 225, 200))
+        self.assertEqual(graph.last_error, "")
+
+    def test_reversed_nand_gate_keeps_nand_logic(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        gate = graph.add_node("gate", params={"mode": "nand"})
+        output = graph.add_node("output")
+        gate.params["@reverse"] = True
+
+        self.assertTrue(graph.link(layer.id, "Color", gate.id, "Color"))
+        self.assertTrue(graph.link(gate.id, "A", output.id, "Color"))
+        self.assertEqual(evaluate(graph, layer=(10, 20, 30, 255),
+                                  below=(10, 20, 30, 255)),
+                         (245, 235, 225, 255))
+        self.assertEqual(evaluate(graph, layer=(10, 20, 30, 255),
+                                  below=(0, 0, 0, 0)),
+                         (255, 255, 255, 255))
+        self.assertEqual(graph.last_error, "")
 
     def test_connected_output_wins_over_an_unwired_duplicate(self):
         graph = nodes.NodeGraph()
@@ -100,6 +224,61 @@ class NodeGraphTests(unittest.TestCase):
         self.assertTrue(graph.is_active())
         self.assertEqual(evaluate(graph, layer=(10, 20, 30, 128)),
                          (10, 20, 30, 128))
+
+    def test_output_exposes_every_value_socket(self):
+        graph = nodes.NodeGraph()
+        output = graph.add_node("output")
+        self.assertEqual(
+            [name for name, _kind in nodes.node_inputs(output)],
+            ["Color", "Value", "Red", "Green", "Blue", "Alpha", "Opacity",
+             "Hue", "Saturation", "HSL Saturation", "Brightness",
+             "Lightness", "Luminance", "Gamma", "Chroma"])
+
+    def test_output_only_renders_connected_inputs(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        output = graph.add_node("output")
+        self.assertFalse(graph.is_active())
+        self.assertEqual(evaluate(graph, layer=(10, 20, 30, 128)),
+                         nodes.TRANSPARENT)
+
+        self.assertTrue(graph.link(layer.id, "Green", output.id, "Green"))
+        self.assertTrue(graph.is_active())
+        self.assertEqual(evaluate(graph, layer=(10, 20, 30, 128)),
+                         (0, 20, 0, 128))
+
+        graph.unlink_input(output.id, "Green")
+        value = graph.add_node("value", params={"value": 0.5})
+        graph.link(value.id, "Value", output.id, "Value")
+        self.assertEqual(evaluate(graph), (128, 128, 128, 255))
+
+    def test_output_channel_sockets_compose_and_tint_values(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        output = graph.add_node("output")
+        graph.link(layer.id, "Blue", output.id, "Blue")
+        graph.link(layer.id, "Red", output.id, "Red")
+        self.assertEqual(evaluate(graph, layer=(100, 150, 200, 128)),
+                         (100, 0, 200, 128))
+
+        graph.link(layer.id, "Green", output.id, "Green")
+        self.assertEqual(evaluate(graph, layer=(100, 150, 200, 128)),
+                         (100, 150, 200, 128))
+        self.assertEqual(evaluate(graph, layer=(100, 150, 200, 64)),
+                         (100, 150, 200, 64))
+
+        graph = nodes.NodeGraph()
+        value = graph.add_node("value", params={"value": 0.5})
+        output = graph.add_node("output")
+        graph.link(value.id, "Value", output.id, "Red")
+        self.assertEqual(evaluate(graph), (128, 0, 0, 255))
+
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        output = graph.add_node("output")
+        graph.link(layer.id, "Green", output.id, "Value")
+        self.assertEqual(evaluate(graph, layer=(10, 150, 30, 128)),
+                         (150, 150, 150, 255))
 
     def test_multiple_wires_average_colours_and_sum_numbers(self):
         graph = nodes.NodeGraph()
@@ -203,6 +382,86 @@ class NodeGraphTests(unittest.TestCase):
         old = nodes.Node.from_state({"id": 99, "type": "value",
                                      "params": {"value": 0.5}})
         self.assertEqual(len(nodes.node_inputs(old)), 8)
+
+    def test_wire_splitter_joins_its_inputs_and_fans_out(self):
+        graph = nodes.NodeGraph()
+        splitter = graph.add_node("splitter")
+        output = graph.add_node("output")
+        self.assertEqual(nodes.node_inputs(splitter), (("A", nodes.WIRE),))
+        self.assertEqual([name for name, _kind in nodes.node_outputs(splitter)],
+                         ["Wire", "Wire 2", "Wire 3"])
+        self.assertEqual(dict(nodes.node_outputs(splitter))["Wire 2"],
+                         nodes.WIRE)
+
+        layer = graph.add_node("layer")
+        graph.link(layer.id, "Color", splitter.id, "A")
+        graph.link(splitter.id, "Wire 2", output.id, "Color")
+        self.assertEqual(evaluate(graph), RED)
+
+        splitter.params["inputs"] = 2
+        blue = graph.add_node("constant", params={"color": "0000FFFF"})
+        graph.link(blue.id, "Color", splitter.id, "B")
+        self.assertEqual(evaluate(graph), (128, 0, 128, 255))
+        splitter.params["inputs"] = 1
+        self.assertEqual(evaluate(graph), RED)
+
+    def test_wire_joiner_sums_numbers_and_can_duplicate_outputs(self):
+        graph = nodes.NodeGraph()
+        joiner = graph.add_node("joiner")
+        first = graph.add_node("value", params={"value": 0.25})
+        second = graph.add_node("value", params={"value": 0.5})
+        output = graph.add_node("output")
+        self.assertEqual(len(nodes.node_inputs(joiner)), 2)
+        graph.link(first.id, "Value", joiner.id, "A")
+        graph.link(second.id, "Value", joiner.id, "B")
+        joiner.params["outputs"] = 2
+        graph.link(joiner.id, "Wire 2", output.id, "Color")
+        self.assertEqual(evaluate(graph), (191, 191, 191, 255))
+
+    def test_wire_router_pairs_inputs_and_outputs(self):
+        graph = nodes.NodeGraph()
+        router = graph.add_node("router")
+        layer = graph.add_node("layer")
+        blue = graph.add_node("constant", params={"color": "0000FFFF"})
+        output = graph.add_node("output")
+        self.assertEqual([name for name, _kind in nodes.node_inputs(router)],
+                         ["A", "B"])
+        self.assertEqual([name for name, _kind in nodes.node_outputs(router)],
+                         ["Out 1", "Out 2"])
+        graph.link(layer.id, "Color", router.id, "A")
+        graph.link(blue.id, "Color", router.id, "B")
+        graph.link(router.id, "Out 1", output.id, "Color")
+        self.assertEqual(evaluate(graph), RED)
+        graph.unlink(router.id, "Out 1", output.id, "Color")
+        graph.link(router.id, "Out 2", output.id, "Color")
+        self.assertEqual(evaluate(graph), BLUE)
+
+        # Counts are adjustable, and unused trailing sockets disappear.
+        router.params["inputs"] = 3
+        router.params["outputs"] = 3
+        self.assertEqual([name for name, _kind in nodes.node_inputs(router)],
+                         ["A", "B", "C"])
+        self.assertEqual([name for name, _kind in nodes.node_outputs(router)],
+                         ["Out 1", "Out 2", "Out 3"])
+        router.params["outputs"] = 1
+        self.assertEqual([name for name, _kind in nodes.node_outputs(router)],
+                         ["Out 1"])
+
+    def test_wire_node_counts_survive_state_round_trips(self):
+        graph = nodes.NodeGraph()
+        splitter = graph.add_node("splitter", params={"inputs": 3})
+        splitter.params["outputs"] = 5
+        joiner = graph.add_node("joiner", params={"inputs": 4})
+        joiner.params["outputs"] = 2
+        router = graph.add_node("router", params={"inputs": 5})
+        router.params["outputs"] = 6
+        loaded = nodes.NodeGraph.from_state(graph.to_state())
+        self.assertEqual(len(nodes.node_inputs(loaded.nodes[splitter.id])), 3)
+        self.assertEqual(len(nodes.node_outputs(loaded.nodes[splitter.id])), 5)
+        self.assertEqual(len(nodes.node_inputs(loaded.nodes[joiner.id])), 4)
+        self.assertEqual(len(nodes.node_outputs(loaded.nodes[joiner.id])), 2)
+        self.assertEqual(len(nodes.node_inputs(loaded.nodes[router.id])), 5)
+        self.assertEqual(len(nodes.node_outputs(loaded.nodes[router.id])), 6)
 
     def test_ramp_maps_values_and_hue_through_a_gradient(self):
         graph = nodes.NodeGraph()
@@ -549,6 +808,37 @@ class NodeGraphTests(unittest.TestCase):
                                       below=(200, 0, 0, 255)), expected,
                              (node_type, mode))
 
+    def test_disconnected_nodes_keep_a_direct_output_passthrough(self):
+        graph = nodes.NodeGraph.starter()
+        graph.add_node("hue")
+        self.assertTrue(graph.is_direct_passthrough())
+        self.assertFalse(graph.is_passthrough())
+
+    def test_long_hue_chain_does_not_hit_the_recursion_limit(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        previous = layer
+        for _index in range(1100):
+            hue = graph.add_node("hue")
+            graph.link(previous.id, "Color", hue.id, "Color")
+            previous = hue
+        output = graph.add_node("output")
+        graph.link(previous.id, "Color", output.id, "Color")
+        result = evaluate(graph)
+        self.assertEqual(len(result), 4)
+        self.assertEqual(result[3], 255)
+
+    def test_gate_nodes_keep_their_wire_colour(self):
+        graph = nodes.NodeGraph()
+        gate = graph.add_node("gate", params={"mode": "xor"})
+        self.assertEqual(gate.params.get("color"),
+                         nodes.GATE_COLOR_DEFAULT)
+        gate.params["color"] = "20C0FF"
+        restored = nodes.NodeGraph.from_state(graph.to_state())
+        restored_gate = next(node for node in restored.nodes.values()
+                             if node.type == "gate")
+        self.assertEqual(restored_gate.params.get("color"), "20C0FF")
+
     def test_hue_shift_node_can_be_driven_by_a_value_node(self):
         graph = nodes.NodeGraph()
         hue = graph.add_node("hue")
@@ -637,6 +927,63 @@ class NodeGraphTests(unittest.TestCase):
 
 
 class ComplexRenderTests(unittest.TestCase):
+    def test_hue_chain_flattens_through_the_fast_path(self):
+        document = Document(2, 1)
+        document.layers[0].bitmap.set_rgba(0, 0, (200, 10, 20, 255))
+        document.layers[0].bitmap.set_rgba(1, 0, (20, 80, 200, 128))
+        document.layers[0].render_mode = model.RENDER_COMPLEX
+        graph = nodes.NodeGraph.starter()
+        layer = next(node for node in graph.nodes.values()
+                     if node.type == "layer")
+        output = next(node for node in graph.nodes.values()
+                      if node.type == "output")
+        hue = graph.add_node("hue")
+        graph.unlink_input(output.id, "Color")
+        graph.link(layer.id, "Color", hue.id, "Color")
+        graph.link(hue.id, "Color", output.id, "Color")
+        document.layers[0].graph = graph
+        flattened = document.flatten()
+        self.assertEqual(flattened.rgba(0, 0),
+                         nodes.hue_shift((200, 10, 20, 255), 30))
+        self.assertEqual(flattened.rgba(1, 0),
+                         nodes.hue_shift((20, 80, 200, 128), 30))
+
+    def test_branched_complex_graph_fast_path_matches_evaluator(self):
+        document = Document(2, 1)
+        document.layers[0].bitmap.set_rgba(0, 0, (200, 10, 20, 255))
+        document.layers[0].bitmap.set_rgba(1, 0, (20, 80, 200, 128))
+        document.layers[0].render_mode = model.RENDER_COMPLEX
+        graph = nodes.NodeGraph()
+        source = graph.add_node("layer_source",
+                                params={"layer": document.layers[0].name})
+        hue = graph.add_node("hue")
+        operation = graph.add_node("operation", params={"mode": "add"})
+        output = graph.add_node("output")
+        graph.link(source.id, "Color", hue.id, "Color")
+        graph.link(source.id, "Color", operation.id, "A")
+        graph.link(hue.id, "Color", operation.id, "B")
+        graph.link(operation.id, "Color", output.id, "Color")
+        document.layers[0].graph = graph
+
+        fast = document.flatten()
+        self.assertIsNotNone(graph._fast_dag)
+        reference = bytes(fast.data)
+        graph._fast_dag = None
+        general = document.flatten()
+        self.assertEqual(bytes(general.data), reference)
+
+    def test_direct_complex_passthrough_avoids_graph_evaluation(self):
+        document = Document(2, 1)
+        document.layers[0].bitmap.set_rgba(0, 0, (1, 2, 3, 4))
+        document.layers[0].render_mode = model.RENDER_COMPLEX
+        graph = nodes.NodeGraph.starter()
+        graph.add_node("hue")
+        document.layers[0].graph = graph
+        with mock.patch.object(nodes.NodeGraph, "eval_pixel",
+                               side_effect=AssertionError(
+                                   "direct passthrough evaluated the graph")):
+            self.assertEqual(document.flatten().rgba(0, 0), (1, 2, 3, 4))
+
     def make_doc(self):
         document = Document(2, 1)
         document.layers[0].bitmap.set_rgba(0, 0, (200, 0, 0, 255))
@@ -695,6 +1042,84 @@ class ComplexRenderTests(unittest.TestCase):
         self.assertEqual(bitmap.rgba(0, 0), (0, 150, 0, 255))
         self.assertEqual(bitmap.rgba(1, 0), (0, 80, 0, 255))
 
+    def test_output_channel_fast_path_preserves_channels_and_values(self):
+        document = Document(2, 1)
+        layer = document.layers[0]
+        layer.bitmap.set_rgba(0, 0, (100, 150, 200, 128))
+        layer.bitmap.set_rgba(1, 0, (10, 20, 30, 255))
+        layer.render_mode = nodes.RENDER_COMPLEX
+        graph = nodes.NodeGraph()
+        source = graph.add_node("layer")
+        output = graph.add_node("output")
+        graph.link(source.id, "Red", output.id, "Red")
+        graph.link(source.id, "Green", output.id, "Green")
+        graph.link(source.id, "Blue", output.id, "Blue")
+        layer.graph = graph
+        bitmap = document.flatten()
+        self.assertEqual(bitmap.rgba(0, 0), (100, 150, 200, 128))
+        self.assertEqual(bitmap.rgba(1, 0), (10, 20, 30, 255))
+
+        graph.unlink_input(output.id, "Red")
+        graph.unlink_input(output.id, "Green")
+        graph.unlink_input(output.id, "Blue")
+        graph.link(source.id, "Green", output.id, "Value")
+        bitmap = document.flatten()
+        self.assertEqual(bitmap.rgba(0, 0), (150, 150, 150, 255))
+        self.assertEqual(bitmap.rgba(1, 0), (20, 20, 20, 255))
+
+    def test_layer_source_reads_any_layer_by_name(self):
+        document = Document(2, 1)
+        backdrop = document.layers[0]
+        backdrop.name = "Backdrop"
+        backdrop.bitmap.set_rgba(0, 0, (255, 0, 0, 255))
+        backdrop.bitmap.set_rgba(1, 0, (0, 255, 0, 255))
+        top = document.add_layer("Top")
+        top.bitmap.set_rgba(0, 0, (0, 0, 255, 255))
+        top.bitmap.set_rgba(1, 0, (0, 0, 255, 255))
+        top.render_mode = nodes.RENDER_COMPLEX
+        graph = nodes.NodeGraph()
+        source = graph.add_node("layer_source",
+                                params={"layer": "Backdrop"})
+        output = graph.add_node("output")
+        graph.link(source.id, "Color", output.id, "Color")
+        top.graph = graph
+        bitmap = document.flatten()
+        self.assertEqual(bitmap.rgba(0, 0), (255, 0, 0, 255))
+        self.assertEqual(bitmap.rgba(1, 0), (0, 255, 0, 255))
+
+    def test_group_source_composites_every_group_member(self):
+        document = Document(1, 1)
+        document.layers[0].name = "Backdrop"
+        document.layers[0].bitmap.set_rgba(0, 0, (255, 0, 0, 255))
+        middle = document.add_layer("Middle")
+        middle.bitmap.set_rgba(0, 0, (0, 255, 0, 255))
+        document.group_layer(0, "Paint")
+        document.group_layer(1, "Paint")
+        top = document.add_layer("Top")
+        top.bitmap.set_rgba(0, 0, (0, 0, 255, 255))
+        top.render_mode = nodes.RENDER_COMPLEX
+        graph = nodes.NodeGraph()
+        source = graph.add_node("group_source",
+                                params={"group": "Paint"})
+        output = graph.add_node("output")
+        graph.link(source.id, "Color", output.id, "Color")
+        top.graph = graph
+        self.assertEqual(document.flatten().rgba(0, 0), (0, 255, 0, 255))
+
+    def test_source_references_follow_layer_and_group_renames(self):
+        document = Document(1, 1)
+        document.layers[0].name = "Old layer"
+        document.group_layer(0, "Old group")
+        document.add_layer("Top")
+        layer_source = document.active_layer.graph.add_node(
+            "layer_source", params={"layer": "Old layer"})
+        group_source = document.active_layer.graph.add_node(
+            "group_source", params={"group": "Old group"})
+        self.assertTrue(document.rename_layer(0, "New layer"))
+        self.assertTrue(document.rename_group("Old group", "New group"))
+        self.assertEqual(layer_source.params["layer"], "New layer")
+        self.assertEqual(group_source.params["group"], "New group")
+
     def test_operation_node_reads_the_stack_below(self):
         document = self.make_doc()
         layer = document.layers[1]
@@ -728,6 +1153,16 @@ class ComplexRenderTests(unittest.TestCase):
         layer.render_mode = nodes.RENDER_COMPLEX
         layer.graph = nodes.NodeGraph()
         self.assertEqual(document.flatten().rgba(0, 0), (255, 0, 0, 255))
+
+    def test_unconnected_output_node_makes_the_layer_transparent(self):
+        document = Document(1, 1)
+        document.layers[0].bitmap.set_rgba(0, 0, (255, 0, 0, 255))
+        document.layers[0].render_mode = nodes.RENDER_COMPLEX
+        graph = nodes.NodeGraph()
+        graph.add_node("layer")
+        graph.add_node("output")
+        document.layers[0].graph = graph
+        self.assertEqual(document.flatten().rgba(0, 0), nodes.TRANSPARENT)
 
     def test_layer_state_roundtrip_keeps_the_graph(self):
         layer = Layer(2, 1)
@@ -767,6 +1202,43 @@ class ComplexRenderTests(unittest.TestCase):
         document.merge_down()
         self.assertEqual(document.layers[0].render_mode, nodes.RENDER_QUICK)
         self.assertFalse(document.layers[0].graph.nodes)
+
+    def test_graph_undo_is_lightweight_and_restores_graph_only(self):
+        document = Document(3, 2)
+        layer = document.layers[0]
+        layer.bitmap.set_rgba(0, 0, (12, 34, 56, 78))
+        layer.render_mode = nodes.RENDER_COMPLEX
+        layer.graph = nodes.NodeGraph.starter()
+        with mock.patch.object(Document, "state",
+                               side_effect=AssertionError(
+                                   "graph edit copied layer pixels")):
+            before = document.begin_graph()
+            added = layer.graph.add_node("hue")
+            document.commit_graph(before)
+            self.assertEqual(document.undo._undo[-1][0].get("__kind__"),
+                             "graph")
+            self.assertTrue(document.undo_last())
+            self.assertNotIn(added.id, layer.graph.nodes)
+            self.assertTrue(document.redo_last())
+            self.assertIn(added.id, layer.graph.nodes)
+        self.assertEqual(layer.bitmap.rgba(0, 0), (12, 34, 56, 78))
+
+    def test_a_graph_error_stops_after_the_first_pixel(self):
+        graph = nodes.NodeGraph()
+        layer = graph.add_node("layer")
+        value = graph.add_node("value")
+        output = graph.add_node("output")
+        graph.link(layer.id, "Color", output.id, "Color")
+        graph.link(value.id, "Value", output.id, "Alpha")
+        graph.begin_frame()
+        with mock.patch.object(nodes.NodeGraph, "_eval_node",
+                               side_effect=ValueError("bad graph")) as broken:
+            self.assertEqual(graph.eval_pixel(0, 0, RED, BLUE, 8, 8),
+                             nodes.TRANSPARENT)
+            self.assertEqual(graph.eval_pixel(1, 0, RED, BLUE, 8, 8),
+                             nodes.TRANSPARENT)
+        self.assertEqual(broken.call_count, 1)
+        self.assertIn("bad graph", graph.last_error)
 
 
 class NodeMathTests(unittest.TestCase):

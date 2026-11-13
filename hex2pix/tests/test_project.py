@@ -117,6 +117,52 @@ class ProjectTest(unittest.TestCase):
         loaded = formats.load_project(self.path).document
         self.assertFalse(loaded.selection.active)
 
+    def raw_project(self, header, data=b"\x00\x00\x00\xff"):
+        with zipfile.ZipFile(self.path, "w") as archive:
+            archive.writestr("project.json", json.dumps(header))
+            archive.writestr("layers/000.rgba", data)
+
+    def raw_header(self):
+        return {
+            "format": formats.PROJECT_FORMAT,
+            "version": formats.PROJECT_VERSION,
+            "width": 1,
+            "height": 1,
+            "ppi": 72,
+            "layers": [{"name": "L", "data": "layers/000.rgba",
+                        "op": "none", "gate": "none", "blend": "none"}],
+        }
+
+    def test_bad_resolution_falls_back(self):
+        header = self.raw_header()
+        header["ppi"] = "not-a-number"
+        self.raw_project(header)
+        loaded = formats.load_project(self.path).document
+        self.assertEqual(loaded.ppi, 72.0)
+
+    def test_invalid_layer_list_is_reported(self):
+        header = self.raw_header()
+        header["layers"] = "not a list"
+        self.raw_project(header)
+        with self.assertRaises(HexError):
+            formats.load_project(self.path)
+
+    def test_damaged_graph_geometry_is_sanitized(self):
+        header = self.raw_header()
+        header["layers"][0]["graph"] = {
+            "next_id": "bad",
+            "nodes": [{"id": 1, "type": ["bad"], "x": "bad",
+                       "y": None, "params": []}],
+            "links": [{"from": "bad", "from_port": [], "to": 1,
+                       "to_port": "Color"}],
+        }
+        self.raw_project(header)
+        loaded = formats.load_project(self.path).document
+        node = loaded.layers[0].graph.nodes[1]
+        self.assertEqual(node.type, "layer")
+        self.assertEqual((node.x, node.y), (40.0, 40.0))
+        self.assertEqual(loaded.layers[0].graph.next_id, 2)
+
     def test_extension_detection(self):
         self.assertTrue(formats.is_project_path("C:/art/thing.H2P"))
         self.assertFalse(formats.is_project_path("thing.png"))

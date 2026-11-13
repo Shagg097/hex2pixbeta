@@ -72,6 +72,19 @@ HEX_DIGITS = set("0123456789abcdefABCDEF")
 
 MATTE_WHITE = (255, 255, 255)
 
+# Selection masks hold 0 or 255, so a byte translation table inverts a whole
+# canvas in one C-level pass instead of a Python loop over every byte.
+_INVERT_TABLE = bytes(255 - value for value in range(256))
+
+# Difference planes hold 0 for "same pixel" and 1 for "different", so this
+# table turns them back into the 0/255 masks the flood tools expect.
+_MATCH_TABLE = bytes(255 if value == 0 else 0 for value in range(256))
+
+# Whole-mask integer operations are one C call, but they allocate an integer
+# the size of the mask, so the very biggest canvases keep the plain byte loop
+# instead of spiking memory hundreds of megabytes.
+_BITMASK_LIMIT = 8 * 1024 * 1024
+
 
 class HexError(ValueError):
     """Raised for invalid hex colors, blocks or geometry."""
@@ -575,11 +588,12 @@ class Bitmap(object):
         self.data = bytearray(len(self.data))
 
     def fill(self, color):
-        for i in range(0, len(self.data), 4):
-            self.data[i] = color[0]
-            self.data[i + 1] = color[1]
-            self.data[i + 2] = color[2]
-            self.data[i + 3] = color[3]
+        """Flood every pixel with one colour, one row slice at a time."""
+        row = bytes(bytearray(color)) * self.width
+        stride = self.width * 4
+        data = self.data
+        for y in range(self.height):
+            data[y * stride:(y + 1) * stride] = row
 
     def rect_rgba(self, x, y, width, height):
         """A new Bitmap of one rectangle of this image (clipped)."""
@@ -595,15 +609,17 @@ class Bitmap(object):
 
 
 def flip_horizontal(bitmap):
+    """Mirror a bitmap left to right, reversing each channel plane."""
     out = Bitmap(bitmap.width, bitmap.height)
-    w, h = bitmap.width, bitmap.height
-    row = w * 4
-    for y in range(h):
-        src = bitmap.data[y * row:(y + 1) * row]
-        flipped = bytearray(row)
-        for x in range(w):
-            flipped[x * 4:(x + 1) * 4] = src[(w - 1 - x) * 4:(w - x) * 4]
-        out.data[y * row:(y + 1) * row] = flipped
+    width, height = bitmap.width, bitmap.height
+    row = width * 4
+    source = bitmap.data
+    dest = out.data
+    for y in range(height):
+        start = y * row
+        for channel in range(4):
+            dest[start + channel:start + row:4] = \
+                source[start + channel:start + row:4][::-1]
     return out
 
 
@@ -1986,6 +2002,172 @@ class Layer(object):
                    gate, state.get("render_mode", RENDER_QUICK), graph)
 
 
+def _composite_plain(dst, src, frame_width, width, height, x, y, opacity):
+    """Alpha-composite one layer that uses no operation, gate or blend.
+
+    This is the layer every document starts with, so most redraws spend
+    their time here.  It performs the same alpha-over as `combine_layer`,
+    inlined and in integers: no per-channel function calls and no float
+    maths.  Opaque source pixels and empty destination pixels copy straight
+    across, which is the bulk of a real stack.
+
+    `dst` is the stack below (and receives the result), `src` the layer's
+    pixels, and `opacity` the layer's 0..255 alpha.
+    """
+    stride = width * 4
+    opaque_layer = opacity >= 255
+    for row in range(height):
+        s = ((y + row) * frame_width + x) * 4
+        d = row * stride
+        # A clear row draws nothing and a fully opaque one covers the stack
+        # below, so the common case of pixel art stays a couple of C-level
+        # scans plus one row copy instead of a loop per pixel.
+        source_row = src[s:s + stride]
+        alphas = source_row[3::4]
+        if alphas.count(0) == width:
+            continue
+        if opaque_layer and alphas.count(255) == width:
+            dst[d:d + stride] = source_row
+            continue
+        end = s + stride
+        while s < end:
+            above = src[s + 3]
+            if above:
+                if opacity < 255:
+                    above = above * opacity // 255
+                if above:
+                    if above >= 255:
+                        dst[d] = src[s]
+                        dst[d + 1] = src[s + 1]
+                        dst[d + 2] = src[s + 2]
+                        dst[d + 3] = above
+                    else:
+                        below = dst[d + 3]
+                        if not below:
+                            dst[d] = src[s]
+                            dst[d + 1] = src[s + 1]
+                            dst[d + 2] = src[s + 2]
+                            dst[d + 3] = above
+                        else:
+                            base = dst[d]
+                            dst[d] = (2 * (base * 255
+                                           + (src[s] - base) * above)
+                                      + 255) // 510
+                            base = dst[d + 1]
+                            dst[d + 1] = (2 * (base * 255
+                                               + (src[s + 1] - base) * above)
+                                          + 255) // 510
+                            base = dst[d + 2]
+                            dst[d + 2] = (2 * (base * 255
+                                               + (src[s + 2] - base) * above)
+                                          + 255) // 510
+                            dst[d + 3] = below + (255 - below) * above // 255
+            s += 4
+            d += 4
+
+
+_OPTION_TABLES = {}
+
+
+def _option_table(op, gate, blend):
+    """A 64K lookup from a (below, above) channel pair to its result.
+
+    A layer's option groups work per channel and depend only on the two byte
+    values, so every pair a stack can meet is one table index instead of a
+    chain of function calls per pixel.  The table is built with the same
+    `combine_layer` the pixel loop used, so results stay identical, and it is
+    cached for the session: a document only ever uses a handful of
+    combinations.
+    """
+    key = (op, gate, blend)
+    table = _OPTION_TABLES.get(key)
+    if table is None:
+        values = bytearray(65536)
+        for below in range(256):
+            row = below << 8
+            for above in range(256):
+                values[row | above] = combine_layer(below, above, op, gate,
+                                                    blend, 255)
+        table = bytes(values)
+        _OPTION_TABLES[key] = table
+    return table
+
+
+def _composite_options(dst, src, frame_width, width, height, x, y, opacity,
+                       table):
+    """Composite a layer through its operation, gate and blend groups.
+
+    `table` is `_option_table`'s lookup for the layer's three groups, so the
+    per-pixel work is one table index and one alpha mix per channel instead
+    of three `combine_layer` calls.
+    """
+    stride = width * 4
+    for row in range(height):
+        s = ((y + row) * frame_width + x) * 4
+        d = row * stride
+        source_row = src[s:s + stride]
+        alphas = source_row[3::4]
+        if alphas.count(0) == width:
+            continue
+        end = s + stride
+        if opacity >= 255 and alphas.count(255) == width:
+            # Fully opaque row: no alpha to track, so the loop is three
+            # table reads and the covering alpha.
+            while s < end:
+                if dst[d + 3]:
+                    base = dst[d]
+                    dst[d] = table[(base << 8) | src[s]]
+                    base = dst[d + 1]
+                    dst[d + 1] = table[(base << 8) | src[s + 1]]
+                    base = dst[d + 2]
+                    dst[d + 2] = table[(base << 8) | src[s + 2]]
+                else:
+                    dst[d] = src[s]
+                    dst[d + 1] = src[s + 1]
+                    dst[d + 2] = src[s + 2]
+                dst[d + 3] = 255
+                s += 4
+                d += 4
+            continue
+        while s < end:
+            above = src[s + 3]
+            if above:
+                if opacity < 255:
+                    above = above * opacity // 255
+                if above:
+                    below = dst[d + 3]
+                    if not below:
+                        dst[d] = src[s]
+                        dst[d + 1] = src[s + 1]
+                        dst[d + 2] = src[s + 2]
+                        dst[d + 3] = above
+                    else:
+                        base = dst[d]
+                        value = table[(base << 8) | src[s]]
+                        if above < 255:
+                            value = (2 * (base * 255
+                                          + (value - base) * above)
+                                     + 255) // 510
+                        dst[d] = value
+                        base = dst[d + 1]
+                        value = table[(base << 8) | src[s + 1]]
+                        if above < 255:
+                            value = (2 * (base * 255
+                                          + (value - base) * above)
+                                     + 255) // 510
+                        dst[d + 1] = value
+                        base = dst[d + 2]
+                        value = table[(base << 8) | src[s + 2]]
+                        if above < 255:
+                            value = (2 * (base * 255
+                                          + (value - base) * above)
+                                     + 255) // 510
+                        dst[d + 2] = value
+                        dst[d + 3] = below + (255 - below) * above // 255
+            s += 4
+            d += 4
+
+
 def composite_layers(layers, rect=None, frame=None, groups=None):
     """Flatten the visible layers into one Bitmap.
 
@@ -2008,17 +2190,55 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
         if not layer.visible:
             continue
         src = layer.bitmap.data
+        src_width = fw
+        src_x = x
+        src_y = y
         op = layer.op
         gate = layer.gate
         blend = layer.blend
         graph = None
+        rendered_bitmap = None
+        # True when a compiled graph already produced this layer's pixels for
+        # the rectangle; the layer's quick-render op, gate and blend are then
+        # part of the graph's own job and must not be applied twice.
+        graph_pixels = False
         passthrough = False
         if getattr(layer, "render_mode", RENDER_QUICK) == RENDER_COMPLEX:
             candidate = getattr(layer, "graph", None)
             if candidate is not None and candidate.is_active():
                 graph = candidate
-                passthrough = candidate.is_passthrough()
+                passthrough = candidate.is_direct_passthrough()
                 graph.last_error = ""
+                if not passthrough:
+                    # Render only the requested rectangle: a spatial graph
+                    # would otherwise re-evaluate the whole canvas for every
+                    # small tile the canvas view asks for.
+                    rendered_bitmap = graph.render_hue_bitmap(layer.bitmap,
+                                                              (x, y, w, h))
+                    if rendered_bitmap is not None:
+                        src = rendered_bitmap.data
+                        src_width = rendered_bitmap.width
+                        src_x = src_y = 0
+                        graph = None
+                    else:
+                        graph.begin_frame(layers, groups, layer)
+                        # A graph that reads the stack below cannot be
+                        # rendered from a colour palette, but it can still be
+                        # rendered rectangle by rectangle and kept until the
+                        # graph, the pixels it reads or the stack under it
+                        # changes, which is what painting needs.
+                        rendered_bitmap = graph.render_below_bitmap(
+                            layer.bitmap, out, (x, y, w, h))
+                        if rendered_bitmap is not None:
+                            src = rendered_bitmap.data
+                            src_width = rendered_bitmap.width
+                            src_x = src_y = 0
+                            graph = None
+                            graph_pixels = True
+            elif candidate is not None and candidate.nodes:
+                # A complex graph with no connected Output input contributes
+                # nothing; only an empty graph falls back to Quick Render.
+                continue
         opacity = clamp(int(layer.alpha), 0, 255)
         group = groups.get(layer.group) if groups and layer.group else None
         if group is not None:
@@ -2027,42 +2247,37 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
             opacity = opacity * clamp(int(group.alpha), 0, 255) // 255
         if not opacity:
             continue
+        if graph is None or passthrough:
+            # A passthrough Output hands back the layer's own colour, so a
+            # Complex Render layer draws exactly what the quick composite
+            # would: plain alpha-over, ignoring the quick-only op and blend.
+            # Keeping it on the fast path matters, because the starter graph
+            # makes every freshly enabled Complex Render layer passthrough.
+            if (graph_pixels or passthrough
+                    or (op in ("none", "", None)
+                        and gate in ("none", "", None)
+                        and blend in ("none", "", None))):
+                _composite_plain(dst, src, src_width, w, h, src_x, src_y,
+                                 opacity)
+            else:
+                _composite_options(dst, src, src_width, w, h, src_x, src_y,
+                                   opacity, _option_table(op, gate, blend))
+            continue
         for row in range(h):
             start = ((y + row) * fw + x) * 4
             dest_row = row * w * 4
             for col in range(w):
                 s = start + col * 4
                 d = dest_row + col * 4
-                if graph is not None:
-                    if passthrough:
-                        rendered = (src[s], src[s + 1], src[s + 2],
-                                    src[s + 3])
-                    else:
-                        rendered = graph.eval_pixel(
-                            x + col, y + row,
-                            (src[s], src[s + 1], src[s + 2], src[s + 3]),
-                            (dst[d], dst[d + 1], dst[d + 2], dst[d + 3]),
-                            fw, fh)
-                    above = rendered[3]
-                    if not above:
-                        continue
-                    if opacity < 255:
-                        above = above * opacity // 255
-                        if not above:
-                            continue
-                    below = dst[d + 3]
-                    if not below:
-                        dst[d:d + 3] = rendered[:3]
-                        dst[d + 3] = above
-                        continue
-                    dst[d] = combine(dst[d], rendered[0], "normal", above)
-                    dst[d + 1] = combine(dst[d + 1], rendered[1], "normal",
-                                         above)
-                    dst[d + 2] = combine(dst[d + 2], rendered[2], "normal",
-                                         above)
-                    dst[d + 3] = below + (255 - below) * above // 255
-                    continue
-                above = src[s + 3]
+                # A node-graph layer: every pixel is evaluated by the graph.
+                # Passthrough graphs never reach here; they take the fast
+                # plain composite above.
+                rendered = graph.eval_pixel(
+                    x + col, y + row,
+                    (src[s], src[s + 1], src[s + 2], src[s + 3]),
+                    (dst[d], dst[d + 1], dst[d + 2], dst[d + 3]),
+                    fw, fh)
+                above = rendered[3]
                 if not above:
                     continue
                 if opacity < 255:
@@ -2071,16 +2286,16 @@ def composite_layers(layers, rect=None, frame=None, groups=None):
                         continue
                 below = dst[d + 3]
                 if not below:
-                    dst[d:d + 3] = src[s:s + 3]
+                    dst[d:d + 3] = rendered[:3]
                     dst[d + 3] = above
                     continue
-                dst[d] = combine_layer(dst[d], src[s], op, gate, blend,
-                                       above)
-                dst[d + 1] = combine_layer(dst[d + 1], src[s + 1], op, gate,
-                                           blend, above)
-                dst[d + 2] = combine_layer(dst[d + 2], src[s + 2], op, gate,
-                                           blend, above)
+                dst[d] = combine(dst[d], rendered[0], "normal", above)
+                dst[d + 1] = combine(dst[d + 1], rendered[1], "normal",
+                                     above)
+                dst[d + 2] = combine(dst[d + 2], rendered[2], "normal",
+                                     above)
                 dst[d + 3] = below + (255 - below) * above // 255
+
     return out
 
 
@@ -2101,7 +2316,7 @@ class Selection(object):
 
     def restore(self, data):
         self.mask = bytearray(data)
-        self.active = any(self.mask)
+        self.active = len(self.mask) > self.mask.count(0)
 
     def clear(self):
         self.mask = bytearray(self.width * self.height)
@@ -2112,8 +2327,8 @@ class Selection(object):
         self.active = True
 
     def invert(self):
-        self.mask = bytearray(255 - v for v in self.mask)
-        self.active = any(self.mask)
+        self.mask = bytearray(self.mask.translate(_INVERT_TABLE))
+        self.active = len(self.mask) > self.mask.count(0)
 
     def get(self, x, y):
         if x < 0 or y < 0 or x >= self.width or y >= self.height:
@@ -2121,33 +2336,44 @@ class Selection(object):
         return self.mask[y * self.width + x]
 
     def count(self):
-        return sum(1 for v in self.mask if v)
+        """How many pixels are selected.
+
+        Masks hold 0 or 255, so counting the unset bytes in C is the same
+        answer as walking every byte in Python, several hundred times
+        faster on a large canvas.
+        """
+        return len(self.mask) - self.mask.count(0)
 
     def bytes_count(self):
         return self.count() * 4
 
     def bounds(self):
-        """(x, y, w, h) of the selected area, or None when empty."""
+        """(x, y, w, h) of the selected area, or None when empty.
+
+        Each row is trimmed of its unset bytes in C, so only the selected
+        edges are ever read byte by byte.
+        """
         if not self.active:
             return None
         w = self.width
+        mask = self.mask
         top = None
         bottom = None
         left = w
         right = -1
         for y in range(self.height):
-            row = self.mask[y * w:(y + 1) * w]
-            if not any(row):
+            row = mask[y * w:(y + 1) * w]
+            end = len(row.rstrip(b"\x00"))
+            if not end:
                 continue
             if top is None:
                 top = y
             bottom = y
-            for x, v in enumerate(row):
-                if v:
-                    if x < left:
-                        left = x
-                    if x > right:
-                        right = x
+            start = len(row) - len(row.lstrip(b"\x00"))
+            if start < left:
+                left = start
+            if end - 1 > right:
+                right = end - 1
         if top is None:
             return None
         return (left, top, right - left + 1, bottom - top + 1)
@@ -2158,22 +2384,39 @@ class Selection(object):
             raise HexError("mask size mismatch")
         if mode == "replace":
             self.mask = bytearray(mask)
-        elif mode == "add":
-            self.mask = bytearray(
-                255 if (a or b) else 0 for a, b in zip(self.mask, mask))
-        elif mode == "subtract":
-            self.mask = bytearray(
-                a if not b else 0 for a, b in zip(self.mask, mask))
-        elif mode == "intersect":
-            self.mask = bytearray(
-                a if b else 0 for a, b in zip(self.mask, mask))
+        elif mode in ("add", "subtract", "intersect"):
+            if len(self.mask) <= _BITMASK_LIMIT:
+                # A 0/255 mask is a bit set, so one whole-mask integer
+                # operation replaces a per-byte Python loop and keeps a
+                # marquee drag on a large canvas responsive.
+                size = len(self.mask)
+                current = int.from_bytes(self.mask, "big")
+                other = int.from_bytes(bytes(mask), "big")
+                if mode == "add":
+                    current |= other
+                elif mode == "subtract":
+                    current &= ((1 << (8 * size)) - 1) ^ other
+                else:
+                    current &= other
+                self.mask = bytearray(current.to_bytes(size, "big"))
+            else:
+                self.mask = bytearray(_combine_masks(self.mask, mask, mode))
         else:
             raise HexError("unknown selection mode: %s" % mode)
-        self.active = any(self.mask)
+        self.active = len(self.mask) > self.mask.count(0)
 
     def mask_or_full(self):
         """The mask, or None when nothing is selected (meaning everything)."""
         return self.mask if self.active else None
+
+
+def _combine_masks(current, other, mode):
+    """Per-byte selection combine, for canvases too big for the bit trick."""
+    if mode == "add":
+        return (255 if (a or b) else 0 for a, b in zip(current, other))
+    if mode == "subtract":
+        return (a if not b else 0 for a, b in zip(current, other))
+    return (a if b else 0 for a, b in zip(current, other))
 
 
 def selection_rect_mask(width, height, x0, y0, x1, y1):
@@ -2391,6 +2634,87 @@ def clean_path(points, tolerance=0.5):
     return out
 
 
+def _scanline_spans(inside, visited, width, height, seed):
+    """Yield connected runs of matching pixels, marking each as visited.
+
+    A scanline flood fill: every seed is widened into a whole run, the run is
+    marked visited, and only the first pixel of each run above and below it
+    is queued.  A queue-per-pixel fill touches every neighbour four times;
+    this touches each pixel a couple of times and keeps the queue small.
+    `inside(index)` reports whether a pixel matches and `visited` is a byte
+    per pixel, set to 1 for every pixel the fill claims.
+    """
+    stack = [seed]
+    while stack:
+        index = stack.pop()
+        if visited[index] or not inside(index):
+            continue
+        y = index // width
+        row = y * width
+        left = index
+        while left > row and not visited[left - 1] and inside(left - 1):
+            left -= 1
+        right = index
+        limit = row + width - 1
+        while right < limit and not visited[right + 1] and inside(right + 1):
+            right += 1
+        for i in range(left, right + 1):
+            visited[i] = 1
+        # Columns are reported relative to the row, which is what callers use.
+        first, last = left - row, right - row
+        yield row, first, last
+        for ny in (y - 1, y + 1):
+            if ny < 0 or ny >= height:
+                continue
+            base = ny * width
+            column = first
+            while column <= last:
+                i = base + column
+                if not visited[i] and inside(i):
+                    stack.append(i)
+                    while column <= last and not visited[i] and inside(i):
+                        column += 1
+                        i += 1
+                else:
+                    column += 1
+
+
+def _match_mask(data, width, height, seed, tolerance=0, ignore_alpha=False):
+    """A 0/255 mask of the pixels whose channels are within `tolerance`.
+
+    Each colour plane is compared in one `translate` pass over the whole
+    image and the planes are OR-ed as integers, so testing a million pixels
+    costs a few C-level memory passes instead of a Python comparison per
+    pixel.  Both flood tools read their match test straight out of this
+    mask.
+    """
+    size = width * height
+    tol = abs(int(tolerance or 0))
+    channels = 3 if ignore_alpha else 4
+    if size > _BITMASK_LIMIT:
+        # Too big for the plane trick: compare pixel by pixel instead.
+        mask = bytearray(size)
+        for i in range(size):
+            base = i * 4
+            for channel in range(channels):
+                if abs(data[base + channel] - seed[channel]) > tol:
+                    break
+            else:
+                mask[i] = 255
+        return mask
+    total = 0
+    for channel in range(channels):
+        value = seed[channel]
+        low = max(0, value - tol)
+        high = min(255, value + tol)
+        table = bytes(0 if low <= level <= high else 1
+                      for level in range(256))
+        total |= int.from_bytes(data[channel::4].translate(table), "big")
+    if not total:
+        return bytearray(b"\xff" * size)
+    return bytearray(total.to_bytes(size, "big").translate(_MATCH_TABLE))
+
+
 def pick_related(bitmap, x, y, tolerance=0, ignore_alpha=False, contiguous=True):
     """Select pixel data related to the pixel at (x, y).
 
@@ -2402,47 +2726,15 @@ def pick_related(bitmap, x, y, tolerance=0, ignore_alpha=False, contiguous=True)
     mask = bytearray(width * height)
     if x < 0 or y < 0 or x >= width or y >= height:
         return mask
-    data = bitmap.data
-    seed = bitmap.rgba(x, y)
-    target = seed[:3] if ignore_alpha else seed
-    tol = int(tolerance or 0)
-
-    def related(i):
-        base = i * 4
-        if ignore_alpha:
-            return (abs(data[base] - target[0]) <= tol
-                    and abs(data[base + 1] - target[1]) <= tol
-                    and abs(data[base + 2] - target[2]) <= tol)
-        return (abs(data[base] - target[0]) <= tol
-                and abs(data[base + 1] - target[1]) <= tol
-                and abs(data[base + 2] - target[2]) <= tol
-                and abs(data[base + 3] - target[3]) <= tol)
-
+    match = _match_mask(bitmap.data, width, height, bitmap.rgba(x, y),
+                        tolerance, ignore_alpha)
     if not contiguous:
-        for i in range(width * height):
-            if related(i):
-                mask[i] = 255
-        return mask
-
-    from collections import deque
-
-    queue = deque()
+        return match
     start = y * width + x
-    mask[start] = 255
-    queue.append(start)
-    while queue:
-        i = queue.popleft()
-        cx = i % width
-        cy = i // width
-        for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
-            if nx < 0 or ny < 0 or nx >= width or ny >= height:
-                continue
-            j = ny * width + nx
-            if mask[j]:
-                continue
-            if related(j):
-                mask[j] = 255
-                queue.append(j)
+    visited = bytearray(width * height)
+    for row, left, right in _scanline_spans(match.__getitem__, visited,
+                                            width, height, start):
+        mask[row + left:row + right + 1] = b"\xff" * (right - left + 1)
     return mask
 
 
@@ -2524,28 +2816,29 @@ def flood_fill(bitmap, mask, x, y, color, tolerance=0, contiguous=True):
 
     if seed[:3] == color[:3] and seed[3] == color[3]:
         return 0
-    from collections import deque
-
-    seen = bytearray(width * height)
-    queue = deque([start])
-    seen[start] = 1
-    while queue:
-        i = queue.popleft()
-        put(i)
-        filled += 1
-        cx = i % width
-        cy = i // width
-        for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
-            if nx < 0 or ny < 0 or nx >= width or ny >= height:
-                continue
-            j = ny * width + nx
-            if seen[j]:
-                continue
-            if mask is not None and mask[j] == 0:
-                continue
-            if related(j):
-                seen[j] = 1
-                queue.append(j)
+    data = bitmap.data
+    match = _match_mask(data, width, height, seed, tol)
+    if mask is not None:
+        # AND-ing the two byte masks keeps the fill inside the selection
+        # without a Python check for every pixel it visits.
+        size = len(match)
+        if size <= _BITMASK_LIMIT:
+            match = bytearray(
+                (int.from_bytes(match, "big")
+                 & int.from_bytes(bytes(mask), "big")).to_bytes(size, "big"))
+        else:
+            match = bytearray(a if b else 0 for a, b in zip(match, mask))
+    visited = bytearray(width * height)
+    for row, left, right in _scanline_spans(match.__getitem__, visited,
+                                            width, height, start):
+        offset = row * 4
+        for x in range(left, right + 1):
+            base = offset + x * 4
+            data[base] = color[0]
+            data[base + 1] = color[1]
+            data[base + 2] = color[2]
+            data[base + 3] = color[3]
+        filled += right - left + 1
     return filled
 
 
@@ -2605,13 +2898,17 @@ def unique_colors(bitmap, mask=None):
     """Distinct RGB colors in the selection, sorted by luminance."""
     width, height = bitmap.width, bitmap.height
     data = bitmap.data
-    seen = {}
-    for i in _iter_selected(mask, width, height):
-        base = i * 4
-        key = (data[base], data[base + 1], data[base + 2])
-        if key not in seen:
-            seen[key] = luminance(*key)
-    return sorted(seen, key=lambda c: (seen[c], c))
+    if mask is None:
+        # Zipping the three colour planes builds the whole set at C speed:
+        # colours repeat in pixel art, so only the small result is walked.
+        colours = set(zip(data[0::4], data[1::4], data[2::4]))
+    else:
+        colours = set()
+        for i in _iter_selected(mask, width, height):
+            base = i * 4
+            colours.add((data[base], data[base + 1], data[base + 2]))
+    seen = {color: luminance(*color) for color in colours}
+    return sorted(colours, key=lambda c: (seen[c], c))
 
 
 def apply_ramp(bitmap, mask, shift):
@@ -2775,12 +3072,42 @@ class UndoStack(object):
     def _size(self, *states):
         total = 0
         for state in states:
+            if state.get("__kind__") in ("graph", "structure"):
+                total += int(state.get("_bytes", 0))
+                continue
             layers = state.get("layers")
             if layers:
                 total += sum(len(entry["data"]) for entry in layers)
             else:
                 total += len(state["data"])
         return total
+
+    def materialize(self, document):
+        """Replace lightweight structure states with full pixel snapshots.
+
+        A structure state only references layer objects.  That is safe while
+        the stack contains nothing but layer insertions/moves; before a pixel
+        edit can mutate those objects, preserve their pixels in ordinary undo
+        states.  This keeps a large image import cheap while preserving
+        normal undo behaviour for later drawing.
+        """
+        changed = False
+        for stack in (self._undo, self._redo):
+            for index, (before, after) in enumerate(list(stack)):
+                new_before = document.materialize_state(before)
+                new_after = document.materialize_state(after)
+                if new_before is not before or new_after is not after:
+                    stack[index] = (new_before, new_after)
+                    changed = True
+        if changed:
+            self._bytes = sum(self._size(*pair) for pair in self._undo)
+            self._trim()
+        return changed
+
+    def _trim(self):
+        while self._bytes > self.budget and len(self._undo) > 1:
+            old_before, old_after = self._undo.pop(0)
+            self._bytes -= self._size(old_before, old_after)
 
     def clear(self):
         self._undo = []
@@ -2792,9 +3119,7 @@ class UndoStack(object):
             return False
         self._undo.append((before, after))
         self._bytes += self._size(before, after)
-        while self._bytes > self.budget and len(self._undo) > 1:
-            old_before, old_after = self._undo.pop(0)
-            self._bytes -= self._size(old_before, old_after)
+        self._trim()
         self._redo = []
         return True
 
@@ -2809,7 +3134,7 @@ class UndoStack(object):
             return False
         before, after = self._undo.pop()
         self._bytes -= self._size(before, after)
-        self._redo.append((document.state(), after))
+        self._redo.append((document.state_like(after), after))
         document.restore(before)
         return True
 
@@ -2954,12 +3279,24 @@ class Document(object):
 
     def flatten(self, rect=None):
         """Composite the visible layers, or one rectangle, into a Bitmap."""
-        if (self.layer_count == 1 and self.layers[0].visible
-                and self.layers[0].alpha >= 255 and not self.layers[0].group
-                and getattr(self.layers[0], "render_mode", RENDER_QUICK)
-                != RENDER_COMPLEX):
-            bitmap = self.layers[0].bitmap
-            return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
+        layer = self.layers[0]
+        if (self.layer_count == 1 and layer.visible
+                and layer.alpha >= 255 and not layer.group):
+            bitmap = layer.bitmap
+            if getattr(layer, "render_mode", RENDER_QUICK) != RENDER_COMPLEX:
+                return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
+            graph = getattr(layer, "graph", None)
+            if graph is None or not graph.nodes:
+                return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
+            if not graph.is_active():
+                blank = Bitmap(layer.bitmap.width, layer.bitmap.height)
+                return blank.rect_rgba(*rect) if rect else blank
+            if graph.is_direct_passthrough():
+                return bitmap.rect_rgba(*rect) if rect else bitmap.copy()
+            graph.begin_frame(self.layers, self.group_map(), layer)
+            rendered = graph.render_chain_bitmap(bitmap, rect)
+            if rendered is not None:
+                return rendered
         return composite_layers(self.layers, rect, (self.width, self.height),
                                 self.group_map())
 
@@ -3045,6 +3382,10 @@ class Document(object):
         for layer in self.layers:
             if layer.group == old:
                 layer.group = new
+            for node in layer.graph.nodes.values():
+                if (node.type == "group_source"
+                        and node.params.get("group") == old):
+                    node.params["group"] = new
         return True
 
     def rename_layer(self, index=None, name=None):
@@ -3052,7 +3393,14 @@ class Document(object):
         name = str(name or "").strip()
         if index < 0 or index >= self.layer_count or not name:
             return False
+        old = self.layers[index].name
         self.layers[index].name = name
+        if old != name:
+            for layer in self.layers:
+                for node in layer.graph.nodes.values():
+                    if (node.type == "layer_source"
+                            and node.params.get("layer") == old):
+                        node.params["layer"] = name
         return True
 
     def remove_group(self, name, merge=False):
@@ -3162,19 +3510,151 @@ class Document(object):
 
     def state(self):
         """Everything an undo step has to restore, including the canvas size."""
+        layers = [layer.to_state() for layer in self.layers]
+        # `data` predates the layer list and is still read by older callers.
+        # Reuse the active layer's bytes instead of copying the same bitmap
+        # twice in every full undo snapshot.
+        data = layers[self.layer_index]["data"] if layers else b""
         return {
-            "data": bytes(self.bitmap.data),
+            "data": data,
             "width": self.width,
             "height": self.height,
             "ppi": self.ppi,
             "color_mode": self.color_mode,
             "alpha": self.alpha,
-            "layers": [layer.to_state() for layer in self.layers],
+            "layers": layers,
             "groups": [group.to_state() for group in self.groups],
             "layer_index": self.layer_index,
         }
 
+    def structure_state(self):
+        """A lightweight undo snapshot of the layer stack.
+
+        Layer insertion is a structural edit: it does not touch the pixels of
+        existing layers.  Holding references to those layers avoids copying
+        every bitmap in a large document just to add or remove a layer.  The
+        undo stack materializes the references before the first pixel edit.
+        """
+        return {
+            "__kind__": "structure",
+            "layers": tuple(self.layers),
+            "width": self.width,
+            "height": self.height,
+            "ppi": self.ppi,
+            "color_mode": self.color_mode,
+            "alpha": self.alpha,
+            "groups": [group.to_state() for group in self.groups],
+            "layer_index": self.layer_index,
+            "_bytes": 256 + 96 * self.layer_count,
+        }
+
+    def materialize_state(self, state):
+        """Turn a structure state into a normal full-document state."""
+        if (not isinstance(state, dict)
+                or state.get("__kind__") != "structure"):
+            return state
+        layers = list(state.get("layers") or ())
+        entries = [layer.to_state() for layer in layers]
+        try:
+            index = clamp(int(state.get("layer_index", 0)), 0,
+                          len(entries) - 1)
+        except (TypeError, ValueError):
+            index = 0
+        data = entries[index]["data"] if entries else b""
+        return {
+            "data": data,
+            "width": state.get("width", self.width),
+            "height": state.get("height", self.height),
+            "ppi": state.get("ppi", self.ppi),
+            "color_mode": state.get("color_mode", self.color_mode),
+            "alpha": state.get("alpha", self.alpha),
+            "layers": entries,
+            "groups": list(state.get("groups") or ()),
+            "layer_index": index,
+        }
+
+    def graph_state(self):
+        """A lightweight undo snapshot for graph-only edits.
+
+        Node parameter, wire and layout edits cannot touch the layer pixels,
+        so copying every bitmap for one of those undo steps made the editor
+        pause for seconds on a large document.  The marker keeps these
+        snapshots distinct from full document snapshots.
+        """
+        graphs = {}
+        size = 0
+        for index, layer in enumerate(self.layers):
+            state = layer.graph.to_state()
+            graphs[index] = state
+            size += 256 + 96 * (len(state["nodes"]) + len(state["links"]))
+        return {"__kind__": "graph", "graphs": graphs,
+                "layer_index": self.layer_index, "_bytes": size}
+
+    def begin_graph(self):
+        """Begin an undo step that only changes node graphs."""
+        return self.graph_state()
+
+    def commit_graph(self, before, after=None):
+        """Commit a graph-only undo step without touching the bitmaps."""
+        self.dirty = True
+        if after is None:
+            after = self.graph_state()
+        return self.undo.push(before, after)
+
+    def begin_structure(self):
+        """Begin a cheap undo step for a layer-only edit."""
+        return self.structure_state()
+
+    def commit_structure(self, before):
+        """Commit a layer-only edit without copying every bitmap."""
+        # Materialize older structure states first if this operation itself
+        # needs pixels; layer insertion does not, so this is normally free.
+        self.limit_pixels()
+        self.dirty = True
+        return self.undo.push(before, self.structure_state())
+
+    def state_like(self, state):
+        """Capture a current snapshot with the same scope as `state`."""
+        if isinstance(state, dict):
+            kind = state.get("__kind__")
+            if kind == "graph":
+                return self.graph_state()
+            if kind == "structure":
+                return self.structure_state()
+        return self.state()
+
     def restore(self, state):
+        if isinstance(state, dict) and state.get("__kind__") == "structure":
+            self.layers = list(state.get("layers") or ())
+            if not self.layers:
+                self.layers = [Layer(state.get("width", 1),
+                                     state.get("height", 1))]
+            try:
+                self.layer_index = clamp(int(state.get("layer_index", 0)),
+                                         0, len(self.layers) - 1)
+            except (TypeError, ValueError):
+                self.layer_index = 0
+            self.groups = [LayerGroup.from_state(entry)
+                           for entry in state.get("groups") or []]
+            self.ppi = state.get("ppi", self.ppi)
+            self.color_mode = state.get("color_mode", self.color_mode)
+            self.alpha = state.get("alpha", self.alpha)
+            return
+        if isinstance(state, dict) and state.get("__kind__") == "graph":
+            for index, graph_state in state.get("graphs", {}).items():
+                try:
+                    index = int(index)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(self.layers):
+                    self.layers[index].graph = NodeGraph.from_state(
+                        graph_state)
+            try:
+                self.layer_index = clamp(int(state.get("layer_index", 0)), 0,
+                                         len(self.layers) - 1)
+            except (TypeError, ValueError):
+                pass
+            return
         width, height = state["width"], state["height"]
         if state.get("layers"):
             self.layers = [Layer.from_state(entry, width, height)
@@ -3199,6 +3679,9 @@ class Document(object):
         self.limit_pixels()
 
     def begin(self):
+        # A structural undo entry references live layer objects.  Snapshot
+        # their pixels before this edit mutates any of them.
+        self.undo.materialize(self)
         return self.state()
 
     def commit(self, before):

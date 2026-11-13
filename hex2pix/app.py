@@ -6,6 +6,7 @@ placement, byte operations, recolor, byte dump, export). Everything edits the
 """
 
 import colorsys
+import copy
 import io
 import json
 import math
@@ -14,7 +15,9 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
+import zlib
 import webbrowser
 from tkinter import (colorchooser, filedialog, font as tkfont, messagebox,
                      simpledialog, ttk)
@@ -50,6 +53,7 @@ from .model import (
     apply_hue, apply_map, apply_op,
     apply_ramp, block_from_bitmap, clear_region, extract_selection,
     flip_horizontal, flip_vertical, flood_fill, format_dump, hex_code, hex_str,
+    composite_layers,
     clean_path, invert_colors, paint_brush, paint_line, parse_block,
     opaque_bounds, parse_hex, parse_hex_map, pick_related, piece_mask,
     place_block, rotate90,
@@ -62,14 +66,17 @@ from .model import (
     selection_polygon_mask,
     selection_rect_mask, stamp_bitmap, transform_block,
 )
-from .nodes import (COLOR, GRADIENT_PRESETS, MICRO_GATES, MICRO_GATE_LABELS,
-                    NODE_ORDER, NODE_TYPES, NodeGraph, RENDER_BY_LABEL,
+from .nodes import (COLOR, GATE_COLOR_DEFAULT, GRADIENT_PRESETS, MICRO_GATES,
+                    MICRO_GATE_LABELS, NODE_ORDER, NODE_TYPES, NodeGraph,
+                    WIRE,
+                    RENDER_BY_LABEL,
                     RENDER_COMPLEX, RENDER_LABELS, RENDER_MODES, RENDER_QUICK,
                     color_text, gate_input_info, gate_input_name,
-                    gradient_color, gradient_text, is_gate_input,
+                    gradient_color, gradient_text,
+                    is_gate_input,
                     node_all_inputs, node_inputs, node_micro_gates,
-                    node_outputs, parse_color, parse_gradient,
-                    reverse_gradient)
+                    bitmap_digest, node_outputs, node_reversed, param_epoch,
+                    parse_color, parse_gradient, reverse_gradient)
 
 TOOLS = (
     ("pencil", "Pencil", "p", "Paint with the foreground color"),
@@ -134,6 +141,10 @@ TOOL_GROUPS = (
 
 # Dockers hidden on startup; the View menu shows them again.
 DEFAULT_HIDDEN_DOCKERS = ("block", "bytes", "dump")
+
+# Selection overlays are binary masks: this lookup table turns any set byte
+# into 255 without a Python call per pixel (`point` with a lambda is slow).
+_SELECTION_LUT = bytes([0] + [255] * 255)
 
 EXPORT_SOURCES = ("Whole image", "Current layer", "Selection",
                   "Each visible layer")
@@ -1453,6 +1464,9 @@ class hex2pixApp(tk.Tk):
         self._checker = None
         self._checker_key = None
         self._checker_tile = None
+        self._checker_plate = None
+        self._dump_stale = False
+        self._status_title = None
         self._dirty_cells = set()
         self._hex_incremental_ok = False
         self._hex_geom = None
@@ -1460,6 +1474,38 @@ class hex2pixApp(tk.Tk):
         self._hex_cursor = None
         self._pan = None
         self._redraw_pending = False
+        self._node_redraw_job = None
+        self._graph_redraw_job = None
+        self._graph_redraw_nodes = None
+        self._node_editor_job = None
+        self._props_refresh_job = None
+        self._tile_render = None
+        self._tile_render_job = None
+        # The finished whole-document preview and the signature of the content
+        # it shows: scrolling and zooming crop it instead of re-rendering.
+        self._doc_image = None
+        self._doc_area = (0, 0, 0, 0)
+        self._doc_key = None
+        self._image_linked = False
+        self._doc_tiles = []
+        self._doc_rows = None
+        self._doc_structure = None
+        self._doc_side = 0
+        self._tile_side = None
+        self._tile_cost = 0.0
+        self._view_geometry = (0, 0, 1, 1, 1, 1, 1.0, 0.0, 0.0)
+        # Complex Render preview: a staged thumbnail in the node editor and a
+        # manual Apply for renders too slow to run on every edit.
+        self.preview_live = tk.BooleanVar(value=True)
+        self._preview_pending = False
+        self._mini_preview_job = None
+        self._mini_preview_gen = 0
+        self._mini_state = None
+        self._mini_photo = None
+        self._loading_panel = None
+        self._loading_label = None
+        self._loading_bar = None
+        self._idle_fill_job = None
         self.kb_anchor = None
         self.kb_before = None
         self.recorder = Recorder()
@@ -1491,6 +1537,8 @@ class hex2pixApp(tk.Tk):
         self.colors = THEMES["dark"]
         self.update_auto_var = tk.BooleanVar(
             value=bool(self.settings.get("check_updates")))
+        self.debug_tools_var = tk.BooleanVar(
+            value=bool(self.settings.get("debug_tools")))
         self.docker_vars = {}
         self.docker_tabs = {}
         self.docker_labels = {}
@@ -1522,6 +1570,13 @@ class hex2pixApp(tk.Tk):
             bg=self.colors["status_bg"], fg=self.colors["status_hint"],
             padx=12, font=("Segoe UI", 8))
         self.status_hint.pack(side="right")
+        self.debug_info = tk.StringVar(value="")
+        self.debug_label = tk.Label(
+            self.status_bar, textvariable=self.debug_info,
+            bg=self.colors["status_bg"], fg="#d9c27a",
+            padx=8, font=("Consolas", 8))
+        if self.debug_enabled():
+            self.debug_label.pack(side="right", padx=(0, 4))
 
         self.container = ttk.Frame(self)
         self.container.pack(side="top", fill="both", expand=True)
@@ -1800,6 +1855,8 @@ class hex2pixApp(tk.Tk):
                                         fg=colours["status_fg"])
             self.status_hint.configure(bg=colours["status_bg"],
                                        fg=colours["status_hint"])
+        if getattr(self, "debug_label", None) is not None:
+            self.debug_label.configure(bg=colours["status_bg"])
         if getattr(self, "options_canvas", None) is not None:
             self.options_canvas.configure(bg=colours["bg"])
         if getattr(self, "filters_canvas", None) is not None:
@@ -1992,6 +2049,9 @@ class hex2pixApp(tk.Tk):
         self.grid_var = tk.BooleanVar(value=self.grid)
         view_menu.add_checkbutton(label="Pixel grid", variable=self.grid_var,
                                   command=self.toggle_grid)
+        view_menu.add_checkbutton(label="Debug tools",
+                                  variable=self.debug_tools_var,
+                                  command=self.toggle_debug_tools)
         view_menu.add_separator()
         view_menu.add_command(label="Fullscreen", accelerator="F11",
                               command=self.toggle_fullscreen)
@@ -2439,6 +2499,7 @@ class hex2pixApp(tk.Tk):
         self.right_card.pack(fill="both", expand=True)
         self.notebook = ttk.Notebook(self.right_card)
         self.notebook.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._docker_tab_changed)
 
         # ---- block placement
         block = ttk.Frame(self.notebook, padding=6)
@@ -3390,6 +3451,10 @@ class hex2pixApp(tk.Tk):
         vbar.grid(row=3, column=1, sticky="ns")
         hbar.grid(row=4, column=0, sticky="ew")
         self.view_image = self.view.create_image(0, 0, anchor="nw")
+        # The brush cursor is a canvas overlay, not part of the pixels.  Hover
+        # can then move it without rebuilding a complex graph preview.
+        self.view_cursor = self.view.create_rectangle(
+            0, 0, 0, 0, outline="#ff40c0", width=1, state="hidden")
 
         self.view.bind("<Button-1>", lambda e: self.on_press(e, False))
         self.view.bind("<Button-3>", lambda e: self.on_press(e, True))
@@ -3969,11 +4034,73 @@ class hex2pixApp(tk.Tk):
         cw = max(1, int(round(bw * zoom)))
         ch = max(1, int(round(bh * zoom)))
 
+        self._view_geometry = (bx, by, bw, bh, cw, ch, zoom, ox, oy)
+        # A whole-document render only pays off while it stays short: a slow
+        # graph over a big canvas would spend seconds on pixels nobody is
+        # looking at, so such a document renders its viewport only and keeps
+        # no document image.  While a finished image does exist its key is
+        # still worth computing, because that turns redraws into crops and
+        # dabs into patches; the idle fill rebuilds such an image in the
+        # background once the view is quiet.
+        capped = self._document_pass_estimate() > 1.0
+        key = None
+        if not capped or self._doc_image is not None:
+            key = self._document_key()
+        session = self._tile_render
+        # A pass is already filling this view.  Let it finish rather than
+        # starting again on every dab: its tiles come from the same grid, so
+        # the untouched ones are cache hits.  A whole-document pass, including
+        # the idle fill, covers every viewport while the document it started
+        # from is unchanged; a capped document skipped its key, so ask for one
+        # now that it is needed.  A viewport pass only covers its own area.
+        if session is not None:
+            if session["key"] is None:
+                reusable = session["area"] == (bx, by, bw, bh)
+            else:
+                live = key if key is not None else self._document_key()
+                reusable = live == session["key"]
+            if reusable:
+                if session["key"] is not None:
+                    self._reprioritise_tiles(session)
+                self._paint_tiled_preview(session, overlays=True)
+                self.draw_transform_overlay()
+                self._update_view_cursor(True)
+                return
+            # Show what the last pass managed before starting the next one.
+            self._paint_tiled_preview(session, overlays=True)
+        self._cancel_tiled_redraw()
+        if (key is not None and self._doc_key == key
+                and self._doc_image is not None):
+            # Nothing changed since the document was rendered whole, so a
+            # scroll or zoom is just a crop of the stored image.
+            self._show_cached_image()
+            return
+        if (key is not None and self._doc_key is not None
+                and self._update_dirty_tiles(key)):
+            # Only a few tiles differ, so a dab costs those tiles instead of
+            # walking the whole document again.
+            self._show_cached_image()
+            return
+        if capped:
+            key = None
+        self._doc_image = None
+        self._doc_key = None
+        self._doc_structure = None
+        area = ((0, 0, width, height) if key is not None
+                else (bx, by, bw, bh))
+        work = self._preview_graph_work(area[2] * area[3])
+        # A graph that measured expensive must not be flattened in one go even
+        # when its node count looks modest.  A cacheable document with a
+        # node-graph layer always goes through the tiled pass, which stores the
+        # whole picture: later redraws are then a crop and a dab patches a
+        # handful of tiles, instead of flattening the viewport through the
+        # graph again on every event.
+        if (work >= 50000 or self._preview_cost() * area[2] * area[3] > 0.020
+                or (key is not None and self._has_graph_layer())):
+            self._start_tiled_redraw(key, area)
+            return
         part = self.doc.flatten((bx, by, bw, bh))
-        stride = bw * 4
-        lines = [bytes(part.data[row * stride:(row + 1) * stride])
-                 for row in range(bh)]
-        base = Image.frombytes("RGBA", (bw, bh), b"".join(lines))
+        base = Image.frombytes("RGBA", (bw, bh), bytes(part.data))
         image = Image.alpha_composite(self.checker_plate(bx, by, bw, bh),
                                       base)
         if zoom != 1:
@@ -3985,16 +4112,625 @@ class hex2pixApp(tk.Tk):
             image = self.grid_overlay(image, cw, ch, zoom)
         image = self.polygon_overlay(image, zoom, (ox, oy))
         image = self.keyboard_overlay(image, zoom, (ox, oy))
-        image = self.cursor_overlay(image, zoom, (ox, oy))
+        self._show_preview_image(image, ox, oy)
+        self.draw_transform_overlay()
+        self._update_view_cursor(True)
+        self._clear_preview_pending()
+
+    def _show_preview_image(self, image, ox, oy):
+        """Attach a finished RGBA image to the canvas."""
+        cw, ch = image.size
         photo = getattr(self, "_photo", None)
         if photo is None or photo.width() != cw or photo.height() != ch:
             self._photo = ImageTk.PhotoImage(image)
+            photo = None
         else:
             photo.paste(image)
-        # Switching from hex clears the item, so re-attach it on every draw.
-        self.view.itemconfig(self.view_image, image=self._photo)
-        self.view.coords(self.view_image, ox, oy)
+        # Every Tk call is a round trip, so only re-attach and move the item
+        # when something actually changed.  A dab repeats neither.
+        if photo is None or not self._image_linked:
+            self.view.itemconfig(self.view_image, image=self._photo)
+            self._image_linked = True
+        if getattr(self, "_image_origin", None) != (ox, oy):
+            self.view.coords(self.view_image, ox, oy)
+            self._image_origin = (ox, oy)
+        self._update_view_cursor()
+
+    def _update_view_cursor(self, raise_item=False):
+        """Position the brush overlay without rebuilding the preview image."""
+        item = getattr(self, "view_cursor", None)
+        if item is None:
+            return
+        if self.view_mode != "image":
+            self.view.itemconfig(item, state="hidden")
+            return
+        zoom = max(self.min_zoom(), float(self.zoom))
+        ox, oy = getattr(self, "_image_origin", (0, 0))
+        x, y = self.cursor
+        half = self.brush // 2
+        size = max(1.0, self.brush * zoom)
+        left = (x - half) * zoom - ox
+        top = (y - half) * zoom - oy
+        right = left + size - 1
+        bottom = top + size - 1
+        self.view.coords(item, left, top,
+                         max(left, right), max(top, bottom))
+        self.view.itemconfig(item, state="normal")
+        if raise_item:
+            try:
+                self.view.tag_raise(item)
+            except tk.TclError:
+                pass
+
+    def _preview_graph_work(self, pixels):
+        """Estimate reachable graph nodes evaluated for this viewport."""
+        work = 0
+        for layer in self.doc.layers:
+            if not layer.visible or layer.render_mode != RENDER_COMPLEX:
+                continue
+            graph = getattr(layer, "graph", None)
+            if graph is None or not graph.nodes or not graph.is_active():
+                continue
+            try:
+                graph._compile()
+            except Exception:
+                continue
+            nodes = max(1, len(graph._order))
+            if graph._fast_chain is not None:
+                if not graph._fast_spatial:
+                    # Palette mapped: only the distinct colours are evaluated.
+                    continue
+                # Noise depends on each pixel's position, so no colour is
+                # ever reused; charge the full pixel count for it.
+                work = max(work, pixels * nodes * 4)
+                continue
+            if graph._fast_dag is not None:
+                work = max(work, pixels * nodes * 4)
+                continue
+            # The general evaluator builds a dictionary per node per pixel,
+            # which is an order of magnitude dearer than a compiled chain.
+            work = max(work, pixels * nodes * 30)
+        return work
+
+    def _cancel_tiled_redraw(self):
+        job = getattr(self, "_tile_render_job", None)
+        self._tile_render_job = None
+        self._tile_render = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        # Painting interrupts the background fill; it resumes once the view
+        # has been still for a moment again.
+        fill = getattr(self, "_idle_fill_job", None)
+        if fill is not None:
+            self._idle_fill_job = None
+            try:
+                self.after_cancel(fill)
+            except tk.TclError:
+                pass
+        self._hide_loading()
+
+    def _reprioritise_tiles(self, session):
+        """Point a running pass at whatever the user is looking at now."""
+        bx, by, bw, bh = self._view_geometry[:4]
+        centre = (bx + bw / 2.0, by + bh / 2.0)
+        if session.get("centre") == centre:
+            return
+        session["centre"] = centre
+        index = session["index"]
+        if index >= len(session["rects"]):
+            return
+        pending = session["rects"][index:]
+        pending.sort(key=lambda rect: (
+            (rect[0] + rect[2] / 2.0 - centre[0]) ** 2
+            + (rect[1] + rect[3] / 2.0 - centre[1]) ** 2))
+        session["rects"][index:] = pending
+
+    def _schedule_idle_fill(self, delay=500):
+        """Queue filling the off-screen part of a capped document."""
+        if getattr(self, "_idle_fill_job", None) is not None:
+            return
+        try:
+            self._idle_fill_job = self.after(delay, self._start_idle_fill)
+        except tk.TclError:
+            self._idle_fill_job = None
+
+    def _start_idle_fill(self):
+        """Render the rest of the document in the background.
+
+        A document too slow for a whole-document pass paints its viewport
+        first, so the canvas comes up quickly.  Once nothing has happened for
+        a moment, the remaining tiles are filled in and the finished image is
+        published, which turns later redraws into crops.  Any interaction
+        cancels this and starts over after the next viewport pass.
+        """
+        self._idle_fill_job = None
+        if self._closing or self._destroyed or self._tile_render is not None:
+            return
+        if self.view_mode != "image" or self._preview_pending:
+            return
+        if self._doc_image is not None or not self._has_graph_layer():
+            return
+        key = self._document_key()
+        if key is None or self._doc_key == key:
+            return
+        self._start_tiled_redraw(key, (0, 0, self.doc.width, self.doc.height),
+                                 idle=True)
+
+    def _loading_widgets(self):
+        """The progress plate that floats over the preview."""
+        panel = self._loading_panel
+        if panel is not None:
+            try:
+                if panel.winfo_exists():
+                    return panel, self._loading_label, self._loading_bar
+            except tk.TclError:
+                pass
+        panel = tk.Frame(self.view, bg=self.colors["card"],
+                         highlightthickness=1,
+                         highlightbackground=self.colors["border"], bd=0)
+        label = tk.Label(panel, text="", bg=self.colors["card"],
+                         fg=self.colors["fg"], anchor="w", padx=10, pady=1)
+        label.pack(fill="x")
+        bar = ttk.Progressbar(panel, mode="determinate", maximum=100.0,
+                             length=150)
+        bar.pack(fill="x", padx=10, pady=(0, 7))
+        self._loading_panel = panel
+        self._loading_label = label
+        self._loading_bar = bar
+        return panel, label, bar
+
+    def _show_loading(self, text, fraction=None):
+        """Show render progress over the preview.
+
+        `fraction` is 0..1, or None for a plain notice with no bar, which is
+        what a paused preview shows until its changes are applied.
+        """
+        try:
+            panel, label, bar = self._loading_widgets()
+            label.configure(text=text)
+            if fraction is None:
+                bar.pack_forget()
+            else:
+                if not bar.winfo_manager():
+                    bar.pack(fill="x", padx=10, pady=(0, 7))
+                bar.configure(value=max(0.0, min(100.0, fraction * 100.0)))
+            if not panel.winfo_manager():
+                panel.place(relx=1.0, x=-14, y=12, anchor="ne")
+            panel.lift()
+        except tk.TclError:
+            pass
+
+    def _hide_loading(self):
+        panel = self._loading_panel
+        try:
+            if panel is not None and panel.winfo_exists():
+                panel.place_forget()
+        except tk.TclError:
+            pass
+        if self._preview_pending:
+            # The paused notice stays up until the graph is applied.
+            self._show_loading("Preview paused - press Apply", None)
+
+    def _preview_cost(self):
+        """Seconds per pixel the visible complex layers last rendered at."""
+        cost = 0.0
+        for layer in self.doc.layers:
+            if not layer.visible or layer.render_mode != RENDER_COMPLEX:
+                continue
+            graph = getattr(layer, "graph", None)
+            if graph is not None:
+                cost = max(cost, getattr(graph, "last_render_cost", 0.0))
+        return cost
+
+    def _document_pass_estimate(self):
+        """Seconds a whole-document render is likely to take.
+
+        The measured per-pixel cost of the slowest visible graph is used once
+        a pass has timed one; before that the node-count guess behind
+        `_preview_graph_work` stands in.  That guess is zero for graphs that
+        render through a compiled, colour-reusing chain, so cheap layers are
+        never mistaken for expensive ones.  Quick layers still cost a plain
+        composite over the same pixels.
+        """
+        pixels = self.doc.width * self.doc.height
+        if pixels <= 0:
+            return 0.0
+        cost = self._preview_cost()
+        if cost <= 0.0:
+            cost = (self._preview_graph_work(pixels) / float(pixels)) * 0.9e-6
+        return pixels * (cost + 0.25e-6)
+
+    def _has_graph_layer(self):
+        """True when a visible layer draws through a node graph."""
+        for layer in self.doc.layers:
+            if not layer.visible or layer.render_mode != RENDER_COMPLEX:
+                continue
+            graph = getattr(layer, "graph", None)
+            if graph is not None and graph.nodes:
+                return True
+        return False
+
+    def _layer_mode(self, layer):
+        """The render mode that describes how this layer actually draws.
+
+        Switching to Complex Render installs the starter Layer -> Output
+        graph, which hands back the layer's own pixels.  With a neutral
+        operation, gate and blend that is exactly what Quick Render draws, so
+        flipping between the two modes must not re-render a whole document
+        that has not changed yet.
+        """
+        mode = layer.render_mode
+        if mode != RENDER_COMPLEX:
+            return mode
+        if (layer.op not in ("none", "", None)
+                or layer.gate not in ("none", "", None)
+                or layer.blend not in ("none", "", None)):
+            return mode
+        graph = getattr(layer, "graph", None)
+        if graph is not None and graph.is_passthrough():
+            return RENDER_QUICK
+        return mode
+
+    def _structure_signature(self):
+        """Everything besides pixels that changes how the layers draw.
+
+        A node, wire, node parameter or layer setting changes the whole
+        picture, so these are compared as one value: when it moves, a preview
+        tile's pixels can all differ and only a full render will do.
+        """
+        signature = [param_epoch()]
+        for layer in self.doc.layers:
+            graph = getattr(layer, "graph", None)
+            signature.append((
+                layer.visible, self._layer_mode(layer), layer.alpha,
+                layer.op, layer.gate, layer.blend, layer.group,
+                # Undo can swap in a different graph object whose revision
+                # counter starts over, so identity is part of the signature.
+                graph if graph is not None else None,
+                getattr(graph, "revision", 0) if graph is not None else 0,
+            ))
+        return tuple(signature)
+
+    def _document_key(self, rows=None):
+        """A cheap signature of everything the preview pixels depend on.
+
+        Scrolling and zooming leave it alone, so a finished document image
+        stays valid and the viewport is simply cropped out of it, while any
+        pixel, layer or graph edit changes it.  The row digests carry the
+        pixels, so they double as the image's signature and a redraw only
+        hashes each layer's bytes once.  Very large documents return None:
+        caching one whole image would cost more memory than it saves.
+        """
+        width, height = self.doc.width, self.doc.height
+        pixels = width * height
+        # Keep the signature to a fraction of a millisecond, and the stored
+        # image to a few megabytes, or none of this pays for itself.
+        if pixels > 1048576 or pixels * len(self.doc.layers) > 8388608:
+            return None
+        if rows is None:
+            rows = self._row_digests()
+        return (width, height, self._structure_signature(), rows)
+
+    def _tile_digest(self, rect, structure=None):
+        """What one preview tile's pixels depend on.
+
+        Per-layer rectangle CRCs plus every property that changes how a layer
+        draws, so a tile can tell whether it needs rendering again without
+        rendering a single pixel.
+        """
+        if structure is None:
+            structure = self._structure_signature()
+        signature = [structure]
+        for layer in self.doc.layers:
+            signature.append(bitmap_digest(layer.bitmap, rect)
+                             if layer.visible else 0)
+        return tuple(signature)
+
+    def _row_digests(self):
+        """A CRC per visible layer per row; None for a hidden layer.
+
+        Row CRCs are a few hundred C-level calls for a whole document, and
+        they say exactly which rows a stroke touched without any per-tile
+        scanning.  Hidden layers depend only on their own flag, so None marks
+        them and a change of visibility forces a rebuild.
+        """
+        rows = []
+        for layer in self.doc.layers:
+            if not layer.visible:
+                rows.append(None)
+                continue
+            width = layer.bitmap.width
+            stride = width * 4
+            view = memoryview(layer.bitmap.data)
+            rows.append(tuple(zlib.crc32(view[row * stride:(row + 1) * stride])
+                              for row in range(layer.bitmap.height)))
+        return tuple(rows)
+
+    def _update_dirty_tiles(self, key):
+        """Render only the pixels that changed; False to rebuild.
+
+        Row CRCs narrow the work to the rows a stroke touched, then only the
+        tiles in those rows are checked, and only the changed band inside each
+        of them is rendered.  Returns True when the stored document image is
+        current again, which also covers edits that changed nothing visible.
+        """
+        # The row digests are the key's pixel part, so they are already here.
+        rows = key[3]
+        if self._doc_image is None or not self._doc_tiles:
+            return False
+        if self._doc_area != (0, 0, self.doc.width, self.doc.height):
+            return False
+        side = self._tile_step(self.doc.width * self.doc.height)
+        if side != self._doc_side:
+            return False
+        structure = self._structure_signature()
+        if structure != self._doc_structure:
+            # A node, wire, parameter or layer setting moved, so every pixel
+            # may have changed and patching tiles is not enough.
+            return False
+        previous = self._doc_rows
+        if previous is None or len(previous) != len(rows):
+            return False
+        changed = set()
+        for old_rows, new_rows in zip(previous, rows):
+            if old_rows is None or new_rows is None:
+                if old_rows is not new_rows:
+                    return False
+                continue
+            if len(old_rows) != len(new_rows):
+                return False
+            if old_rows == new_rows:
+                continue
+            for row, (before, after) in enumerate(zip(old_rows, new_rows)):
+                if before != after:
+                    changed.add(row)
+        if not changed:
+            # Something hidden changed, such as an invisible layer.
+            self._doc_rows = rows
+            self._doc_key = key
+            return True
+        dirty = []
+        for index, (rect, digest) in enumerate(self._doc_tiles):
+            x, y, width, height = rect
+            if not any(row in changed
+                       for row in range(y, min(y + height, self.doc.height))):
+                continue
+            current = self._tile_digest(rect, structure)
+            if current != digest:
+                dirty.append((index, current))
+        if not dirty:
+            self._doc_rows = rows
+            self._doc_key = key
+            return True
+        # Patching happens inside this callback, so only do it while the work
+        # is short.  A wider change is cheaper and smoother as a tiled pass,
+        # which renders the same pixels but yields between slices.
+        cost = self._preview_cost()
+        if cost > 0.0:
+            pixels = 0
+            for index, _digest in dirty:
+                x, y, width, height = self._doc_tiles[index][0]
+                band = min(y + height, self.doc.height) - y
+                pixels += width * band
+            if pixels * cost > 0.035:
+                return False
+        ax, ay = self._doc_area[:2]
+        for index, digest in dirty:
+            x, y, width, height = self._doc_tiles[index][0]
+            top = min(row for row in range(y, min(y + height,
+                                                 self.doc.height))
+                      if row in changed)
+            bottom = max(row for row in range(y, min(y + height,
+                                                     self.doc.height))
+                         if row in changed)
+            part = self.doc.flatten((x, top, width, bottom - top + 1))
+            self._doc_image.paste(
+                Image.frombytes("RGBA", (width, bottom - top + 1),
+                                bytes(part.data)),
+                (x - ax, top - ay))
+            self._doc_tiles[index] = ((x, y, width, height), digest)
+        self._doc_rows = rows
+        self._doc_key = key
+        return True
+
+    def _tile_step(self, pixels):
+        """Coarse preview tile size for the measured render cost.
+
+        Tiles snap to a document-wide grid of this size, so a pass asks for
+        exactly the rectangles the previous one used and the complex layer's
+        render cache keeps hitting wherever the pixels did not change.  The
+        size only changes when the cost estimate moves by more than a rung,
+        because every change makes the previous grid's rectangles useless.
+        """
+        cost = self._preview_cost()
+        if cost <= 0.0 and pixels > 0:
+            # Nothing has been timed yet: the node count is a coarse guess, but
+            # it usually lands within one rung, which saves re-rendering the
+            # whole document once the first tiles have really been timed.
+            cost = (self._preview_graph_work(pixels) / float(pixels)) * 0.9e-6
+        if cost <= 0.0:
+            return 32
+        if (self._tile_side and self._tile_cost
+                and self._tile_cost * 0.5 <= cost <= self._tile_cost * 2.0):
+            return self._tile_side
+        target = int(math.sqrt(0.020 / cost))
+        side = 8
+        for size in (128, 64, 32, 16):
+            if target >= size:
+                side = size
+                break
+        self._tile_cost = cost
+        self._tile_side = side
+        return side
+
+    def _start_tiled_redraw(self, key, area, idle=False):
+        """Render an area in coarse tiles, one time slice at a time.
+
+        The area is the whole document when it can be held as one image, so the
+        tiles keep the same rectangles across scrolls and zooms: the complex
+        layer's render cache then still hits and a finished pass serves every
+        view without rendering anything again.  Slices return to the event loop
+        between tiles, so the window stays responsive while the preview fills.
+        """
+        ax, ay, aw, ah = area
+        side = self._tile_step(aw * ah)
+        rects = []
+        x = ax
+        while x < ax + aw:
+            tw = min((x // side + 1) * side, ax + aw) - x
+            y = ay
+            while y < ay + ah:
+                th = min((y // side + 1) * side, ay + ah) - y
+                rects.append((x, y, tw, th))
+                y += th
+            x += tw
+        bx, by, bw, bh = self._view_geometry[:4]
+        centre_x = bx + bw / 2.0
+        centre_y = by + bh / 2.0
+        # Fill what the user is looking at first, then the rest of the area.
+        rects.sort(key=lambda rect: ((rect[0] + rect[2] / 2.0 - centre_x) ** 2
+                                     + (rect[1] + rect[3] / 2.0
+                                        - centre_y) ** 2))
+        session = {
+            "key": key, "area": area, "rects": rects, "idle": idle,
+            "centre": (centre_x, centre_y),
+            "digests": [None] * len(rects), "index": 0, "side": side,
+            "width": self.doc.width, "height": self.doc.height,
+            "base": Image.new("RGBA", (aw, ah)),
+            "last": time.monotonic(),
+        }
+        self._tile_render = session
+        # The progress plate appears with the first timer tick, so a pass that
+        # finishes in a moment never flashes a loading screen at the user.
+        self._tile_render_job = self.after(0, self._tile_render_step)
+
+    def _tile_render_step(self):
+        self._tile_render_job = None
+        session = self._tile_render
+        if session is None or self._closing or self._destroyed:
+            return
+        if (self.doc.width != session["width"]
+                or self.doc.height != session["height"]):
+            self._tile_render = None
+            return
+        ax, ay, aw, ah = session["area"]
+        rects = session["rects"]
+        base = session["base"]
+        # Keep filling tiles until the callback has spent its slice.  One tile
+        # per callback cost a whole Tk timer tick (about 15.6 ms on Windows)
+        # even when the tile itself was nearly free, so a viewport needed
+        # seconds of wall time to fill and felt frozen while it did.
+        deadline = time.perf_counter() + 0.020
+        # Tiles are digested only when the pass will publish a document image;
+        # a viewport-only pass never looks at them.
+        structure = (self._structure_signature()
+                     if session["key"] is not None else None)
+        while session["index"] < len(rects):
+            index = session["index"]
+            tx, ty, tw, th = rects[index]
+            try:
+                part = self.doc.flatten((tx, ty, tw, th))
+                tile = Image.frombytes("RGBA", (tw, th), bytes(part.data))
+                base.alpha_composite(tile, (tx - ax, ty - ay))
+                if structure is not None:
+                    session["digests"][index] = self._tile_digest(
+                        (tx, ty, tw, th), structure)
+            except Exception as exc:  # noqa: BLE001 - keep the window usable
+                self._tile_render = None
+                status = getattr(self, "node_status", None)
+                if status is not None:
+                    status.set("Preview stopped: %s" % exc)
+                return
+            session["index"] += 1
+            if session["index"] >= len(rects):
+                break
+            if time.perf_counter() >= deadline:
+                break
+        if session["index"] >= len(rects):
+            self._finish_tiled_redraw(session)
+            return
+        now = time.monotonic()
+        if now - session["last"] > 0.30:
+            # Rebuilding the preview image is a full-viewport copy, so show
+            # progress on a timer instead of after every tile.
+            if not session.get("idle"):
+                # A background fill leaves the finished viewport on screen.
+                self._paint_tiled_preview(session, overlays=False)
+            self._show_loading(
+                "Finishing preview..." if session.get("idle") else "Rendering...",
+                session["index"] / float(len(rects)))
+            session["last"] = now
+        self._tile_render_job = self.after(0, self._tile_render_step)
+
+    def _paint_tiled_preview(self, session, overlays):
+        """Show the visible part of a rendered area, finished or in progress."""
+        bx, by, bw, bh, cw, ch, zoom, ox, oy = self._view_geometry
+        ax, ay, aw, ah = session["area"]
+        image = self.checker_plate(bx, by, bw, bh).copy()
+        left = max(bx, ax)
+        top = max(by, ay)
+        right = min(bx + bw, ax + aw)
+        bottom = min(by + bh, ay + ah)
+        if right > left and bottom > top:
+            patch = session["base"].crop((left - ax, top - ay,
+                                           right - ax, bottom - ay))
+            image.alpha_composite(patch, (left - bx, top - by))
+        if zoom != 1:
+            image = image.resize((cw, ch), Image.NEAREST)
+        if overlays:
+            if self.doc.selection.active:
+                image = self.selection_overlay(
+                    image, self.doc.width, self.doc.height, zoom,
+                    (bx, by, bw, bh))
+            if self.grid and zoom >= 6:
+                image = self.grid_overlay(image, cw, ch, zoom)
+            image = self.polygon_overlay(image, zoom, (ox, oy))
+            image = self.keyboard_overlay(image, zoom, (ox, oy))
+        self._show_preview_image(image, ox, oy)
+
+    def _show_cached_image(self):
+        """Draw the viewport from the finished whole-document image."""
+        self._paint_tiled_preview({"base": self._doc_image,
+                                   "area": self._doc_area}, overlays=True)
         self.draw_transform_overlay()
+        self._update_view_cursor(True)
+        self._clear_preview_pending()
+
+    def _finish_tiled_redraw(self, session):
+        self._tile_render = None
+        self._tile_render_job = None
+        self._hide_loading()
+        self._clear_preview_pending()
+        restart = session.get("stale")
+        if session["key"] is not None and not restart:
+            rows = self._row_digests()
+            if self._document_key(rows) != session["key"]:
+                restart = True
+            else:
+                self._doc_image = session["base"]
+                self._doc_area = session["area"]
+                self._doc_key = session["key"]
+                self._doc_side = session["side"]
+                self._doc_tiles = list(zip(session["rects"],
+                                           session["digests"]))
+                self._doc_rows = rows
+                self._doc_structure = self._structure_signature()
+        if restart:
+            # The canvas changed while this pass ran, so show the newer pixels
+            # instead of leaving the old ones on screen.
+            if not (self._closing or self._destroyed):
+                self.redraw()
+            return
+        self._paint_tiled_preview(session, overlays=True)
+        self.draw_transform_overlay()
+        self._update_view_cursor(True)
+        if session["key"] is None and self._doc_image is None:
+            # A capped document painted its viewport only; the rest can follow
+            # once the view has been quiet for a moment.
+            self._schedule_idle_fill()
 
     def _fit_scrollregion(self, width, height):
         """Centre the canvas and leave room to drag the camera anywhere."""
@@ -4022,12 +4758,19 @@ class hex2pixApp(tk.Tk):
             draw.rectangle([0, 0, 3, 3], fill=(76, 76, 84, 255))
             draw.rectangle([4, 4, 7, 7], fill=(76, 76, 84, 255))
             self._checker_tile = tile
+        # Panning by whole checks, or repainting the same viewport, asks for
+        # the same plate again; tiling it is thousands of pastes.
+        key = (width, height, x % 8, y % 8)
+        cached = self._checker_plate
+        if cached is not None and cached[0] == key:
+            return cached[1]
         plate = Image.new("RGBA", (width, height))
         start_x = x - (x % 8)
         start_y = y - (y % 8)
         for py in range(start_y, y + height, 8):
             for px in range(start_x, x + width, 8):
                 plate.paste(self._checker_tile, (px - x, py - y))
+        self._checker_plate = (key, plate)
         return plate
 
     def _update_hex_metrics(self):
@@ -4059,6 +4802,12 @@ class hex2pixApp(tk.Tk):
 
     def hex_pixel(self, x, y):
         """The color a hex cell shows: the result once layers are stacked."""
+        part = getattr(self, "_hex_composite", None)
+        rect = getattr(self, "_hex_rect", None)
+        if part is not None and rect is not None:
+            left, top, width, height = rect
+            if left <= x < left + width and top <= y < top + height:
+                return part.rgba(x - left, y - top)
         if self.doc.layer_count > 1:
             return self.doc.flatten((x, y, 1, 1)).rgba(0, 0)
         return self.doc.bitmap.rgba(x, y)
@@ -4081,10 +4830,12 @@ class hex2pixApp(tk.Tk):
         Only the visible cells are drawn, so the view stays usable on large
         canvases without building a giant bitmap.
         """
+        self._cancel_tiled_redraw()
         view = self.view
         view.delete("hex")
         view.delete("transform")
         view.itemconfig(self.view_image, image="")
+        self._image_linked = False
         bitmap = self.doc.bitmap
         cols, rows = bitmap.width, bitmap.height
         cell_w, cell_h = self.hex_cell
@@ -4098,6 +4849,15 @@ class hex2pixApp(tk.Tk):
         first_row = max(0, min(rows - 1, int(top // cell_h)))
         last_col = max(first_col, min(cols - 1, int((right - 1) // cell_w)))
         last_row = max(first_row, min(rows - 1, int((bottom - 1) // cell_h)))
+        self._hex_composite = None
+        self._hex_rect = None
+        if self.doc.layer_count > 1:
+            # One composite for the visible cells. Calling flatten() once per
+            # cell re-ran the whole complex graph for every hex code.
+            self._hex_rect = (first_col, first_row,
+                              last_col - first_col + 1,
+                              last_row - first_row + 1)
+            self._hex_composite = self.doc.flatten(self._hex_rect)
         font = ("Consolas", self.hex_font)
         text_x = pad
         middle = cell_h // 2
@@ -4151,6 +4911,7 @@ class hex2pixApp(tk.Tk):
                 view.create_rectangle(coords[index] - 3, coords[index + 1] - 3,
                                       coords[index] + 3, coords[index + 1] + 3,
                                       outline="#ffec00", tags="hex")
+        self._update_view_cursor()
         self.draw_transform_overlay()
 
     def request_redraw(self):
@@ -4200,6 +4961,19 @@ class hex2pixApp(tk.Tk):
             return
         cell_w, cell_h = geom[0], geom[1]
         view = self.view
+        # A stroke changed the composite, so the full-view cache is stale.
+        # Composite just the touched rectangle once for the incremental cells.
+        self._hex_composite = None
+        self._hex_rect = None
+        dirty = self._dirty_cells or set()
+        if dirty and self.doc.layer_count > 1:
+            d_left = min(c for c, _r in dirty)
+            d_top = min(r for _c, r in dirty)
+            d_right = max(c for c, _r in dirty)
+            d_bottom = max(r for _c, r in dirty)
+            self._hex_rect = (d_left, d_top, d_right - d_left + 1,
+                              d_bottom - d_top + 1)
+            self._hex_composite = self.doc.flatten(self._hex_rect)
         for col, row in list(self._dirty_cells or ()):
             ids = self._hex_items.get((col, row))
             if ids is None:
@@ -4224,17 +4998,21 @@ class hex2pixApp(tk.Tk):
         if box is None:
             box = (0, 0, width, height)
         x0, y0, bw, bh = box
-        mask = Image.frombytes("L", (width, height),
-                               bytes(self.doc.selection.mask))
         # One pixel of halo keeps the crop border from looking like an edge.
         hx0, hy0 = max(0, x0 - 1), max(0, y0 - 1)
         hx1, hy1 = min(width, x0 + bw + 1), min(height, y0 + bh + 1)
-        halo = mask.crop((hx0, hy0, hx1, hy1))
+        # Build the mask image for the halo only: turning the whole canvas
+        # into an image copies the whole selection on every redraw.
+        mask = self.doc.selection.mask
+        halo_w, halo_h = max(1, hx1 - hx0), max(1, hy1 - hy0)
+        rows = [bytes(mask[yy * width + hx0:yy * width + hx1])
+                for yy in range(hy0, hy1)]
+        halo = Image.frombytes("L", (halo_w, halo_h), b"".join(rows))
         if zoom != 1:
             halo = halo.resize((max(1, int(round((hx1 - hx0) * zoom))),
                                 max(1, int(round((hy1 - hy0) * zoom)))),
                                Image.NEAREST)
-        halo = halo.point(lambda v: 255 if v > 0 else 0)
+        halo = halo.point(_SELECTION_LUT)
         trim = (int(round((x0 - hx0) * zoom)),
                 int(round((y0 - hy0) * zoom)),
                 int(round((x0 - hx0 + bw) * zoom)),
@@ -4247,7 +5025,7 @@ class hex2pixApp(tk.Tk):
         tint = Image.new("RGBA", image.size, (0, 190, 255, 70))
         image = Image.composite(Image.alpha_composite(image, tint), image, solid)
         edges = halo.filter(ImageFilter.FIND_EDGES).crop(trim).point(
-            lambda v: 255 if v > 0 else 0)
+            _SELECTION_LUT)
         if edges.size != image.size:
             edges = edges.resize(image.size, Image.NEAREST)
         accent = Image.new("RGBA", image.size, (0, 235, 255, 235))
@@ -4760,7 +5538,17 @@ class hex2pixApp(tk.Tk):
                 self.stroke_before is None and self.shape_anchor is None
                 and self.gradient_anchor is None and self.drag_anchor is None
                 and self.transform_base is None and not self.poly_points)
-            self.request_redraw()
+            # Hover only moves the cursor overlay.  Rebuilding the whole
+            # preview here restarted complex tiled renders on every mouse
+            # sample, so the canvas appeared to redraw forever.
+            if self.view_mode == "image":
+                self._update_view_cursor()
+                # These tools draw a live rubber band from the cursor, so
+                # they still need the preview refreshed on hover.
+                if self.poly_points or self.kb_anchor is not None:
+                    self.request_redraw()
+            else:
+                self.request_redraw()
 
     def on_wheel(self, event):
         self.cursor = self.clamped(event)
@@ -4795,6 +5583,7 @@ class hex2pixApp(tk.Tk):
         self.view_mode_var.set(self.view_mode)
         self.view.delete("hex")
         self.view.itemconfig(self.view_image, image="")
+        self._image_linked = False
         self.refresh_status()
         self.redraw()
         if self.view_mode == "image":
@@ -5834,7 +6623,7 @@ class hex2pixApp(tk.Tk):
         if not rgb:
             return
         self.palette[index] = (int(rgb[0]), int(rgb[1]), int(rgb[2]),
-                               color[3])
+                               color[3] if len(color) > 3 else 255)
         self.palette_selected = index
         self.palette_var.set("Custom")
         self.draw_palette()
@@ -6425,9 +7214,34 @@ class hex2pixApp(tk.Tk):
         self.grid = bool(self.grid_var.get())
         self.redraw()
 
+    def debug_enabled(self):
+        return bool(getattr(self, "debug_tools_var", None)
+                    and self.debug_tools_var.get())
+
+    def toggle_debug_tools(self):
+        """Show or hide extra diagnostics without changing the document."""
+        enabled = self.debug_enabled()
+        self.settings.set("debug_tools", enabled)
+        if not enabled:
+            self.debug_info.set("")
+        if getattr(self, "debug_label", None) is not None:
+            if enabled:
+                self.debug_label.pack(side="right", padx=(0, 4))
+            else:
+                self.debug_label.pack_forget()
+        self.refresh_status()
+        self.refresh_node_editor()
+
     # -------------------------------------------------------------- colors
     def set_fg(self, color):
-        self.fg = tuple(color)
+        try:
+            channels = tuple(max(0, min(255, int(value)))
+                             for value in color[:3])
+            alpha = (max(0, min(255, int(color[3])))
+                     if len(color) > 3 else 255)
+        except (TypeError, ValueError, IndexError):
+            return
+        self.fg = channels + (alpha,)
         self.draw_swatches()
         self.push_recent(self.fg)
         self.alpha_var.set(float(self.fg[3]))
@@ -6846,7 +7660,14 @@ class hex2pixApp(tk.Tk):
         self.redraw()
 
     # ---------------------------------------------------------------- bytes
-    def refresh_bytes(self):
+    def refresh_bytes(self, force=False):
+        """Update the byte panels.
+
+        The dump text is rebuilt only when the Dump docker is on screen, or
+        when a caller asks for it explicitly: rebuilding a thousand lines
+        for a hidden widget on every drag event is what made selections
+        feel sticky.
+        """
         selection = self.doc.selection
         if selection.active:
             bounds = selection.bounds() or (0, 0, 0, 0)
@@ -6861,11 +7682,33 @@ class hex2pixApp(tk.Tk):
                               % (total, total * 4))
             self.dump_info.set("whole image: %d px, %d bytes"
                                % (total, total * 4))
+        if not force and not self._dump_visible():
+            # The Dump docker is hidden: remember the text is stale instead of
+            # rebuilding a thousand lines nobody can see, on every dab.
+            self._dump_stale = True
+            return
         text = format_dump(self.doc.bitmap, self.doc.mask(), max_rows=1200)
         self.dump_text.configure(state="normal")
         self.dump_text.delete("1.0", "end")
         self.dump_text.insert("1.0", text)
         self.dump_text.configure(state="disabled")
+        self._dump_stale = False
+
+    def _dump_visible(self):
+        """Whether the Dump docker is the tab on screen."""
+        tab = getattr(self, "docker_tabs", {}).get("dump")
+        notebook = getattr(self, "notebook", None)
+        if tab is None or notebook is None or not hasattr(self, "dump_text"):
+            return True
+        try:
+            return notebook.select() == str(tab)
+        except tk.TclError:
+            return True
+
+    def _docker_tab_changed(self, event=None):
+        """Catch the Dump tab up after edits made while it was hidden."""
+        if getattr(self, "_dump_stale", False) and self._dump_visible():
+            self.refresh_bytes()
 
     def copy_dump(self):
         self.clipboard_clear()
@@ -8001,12 +8844,12 @@ class hex2pixApp(tk.Tk):
         except (OSError, HexError) as exc:
             self.report_error(str(exc))
             return False
-        before = self.doc.begin()
+        before = self.doc.begin_structure()
         layer = self.doc.add_layer(os.path.basename(path))
         self.paste_bitmap(layer.bitmap, bitmap,
                           (self.doc.width - bitmap.width) // 2,
                           (self.doc.height - bitmap.height) // 2)
-        self.doc.commit(before)
+        self.doc.commit_structure(before)
         self.layers_changed()
         self.refresh_tabs()
         return True
@@ -8094,23 +8937,25 @@ class hex2pixApp(tk.Tk):
 
     def apply_project_extras(self, extras):
         """Restore palette, pattern, colours, mirror and view from a project."""
-        if not extras:
+        if not isinstance(extras, dict):
             return
         foreground = extras.get("foreground")
         if isinstance(foreground, (list, tuple)) and len(foreground) == 4:
-            self.set_fg(tuple(int(v) for v in foreground))
+            self.set_fg(tuple(_bounded(v, 0, 255, 0) for v in foreground))
         background = extras.get("background")
         if isinstance(background, (list, tuple)) and len(background) == 4:
-            self.bg = tuple(int(v) for v in background)
+            self.bg = tuple(_bounded(v, 0, 255, 0) for v in background)
         palette = extras.get("palette")
         if isinstance(palette, list) and palette:
             colors = []
             for color in palette:
                 if isinstance(color, (list, tuple)) and len(color) in (3, 4):
-                    colors.append(tuple(_bounded(int(v), 0, 255, 0)
-                                        for v in color))
+                    values = tuple(_bounded(v, 0, 255, 0) for v in color)
+                    if len(values) == 3:
+                        values += (255,)
+                    colors.append(values)
             if colors:
-                self.palette = colors
+                self.palette = colors[:MAX_PALETTE_COLORS]
                 self.draw_palette()
         palette_name = getattr(self, "palette_var", None)
         if palette_name is not None and extras.get("palette_name"):
@@ -8126,7 +8971,7 @@ class hex2pixApp(tk.Tk):
             for index, color in enumerate(pattern[:size * size]):
                 if isinstance(color, (list, tuple)) and len(color) == 4:
                     cells[index // size][index % size] = tuple(
-                        _bounded(int(v), 0, 255, 0) for v in color)
+                        _bounded(v, 0, 255, 0) for v in color)
             self.pattern_cells = cells
             if hasattr(self, "pattern_size_var"):
                 self.pattern_size_var.set(size)
@@ -8599,7 +9444,7 @@ class hex2pixApp(tk.Tk):
         self.refresh_layer_info()
         self.refresh_nodes_tab()
         if getattr(self, "node_window", None) is not None:
-            self.refresh_node_editor()
+            self._refresh_node_editor_soon()
 
     def refresh_layer_info(self):
         layer = self.doc.active_layer
@@ -8622,6 +9467,7 @@ class hex2pixApp(tk.Tk):
         self.refresh_layers()
         self.refresh_bytes()
         self.refresh_status()
+        self.request_mini_preview()
         self.redraw()
 
     def selected_layer_row(self):
@@ -8735,7 +9581,6 @@ class hex2pixApp(tk.Tk):
         self.layers_changed()
         if mode == RENDER_COMPLEX and hasattr(self, "nodes_tab"):
             self.notebook.select(self.nodes_tab)
-        self.refresh_node_editor()
 
     def create_starter_graph(self):
         layer = self.doc.active_layer
@@ -8763,6 +9608,13 @@ class hex2pixApp(tk.Tk):
         self.nodes_render_box.pack(fill="x", pady=(2, 4))
         self.nodes_render_box.bind("<<ComboboxSelected>>",
                                    self.on_layer_render)
+        ttk.Checkbutton(tab, text="Live preview of node changes",
+                        variable=self.preview_live,
+                        command=self.preview_toggled).pack(anchor="w")
+        self.nodes_apply_button = ttk.Button(
+            tab, text="Apply preview", command=self.apply_graph_preview,
+            state="disabled")
+        self.nodes_apply_button.pack(fill="x", pady=1)
         ttk.Button(tab, text="Open node editor...",
                    command=self.open_node_editor).pack(fill="x", pady=1)
         ttk.Button(tab, text="Use starter graph",
@@ -8780,7 +9632,10 @@ class hex2pixApp(tk.Tk):
                        "and B is the stack below; any output can feed any "
                        "input, and colours and numbers convert. Number "
                        "sockets add their wires; colour sockets average "
-                       "them. The Output node becomes the layer. The Layer "
+                       "them. The Output node becomes the layer when one of "
+                       "its inputs is connected; its RGB channel sockets "
+                       "compose, and a value wired to one fills that "
+                       "channel. The Layer "
                        "node also outputs its channels, opacity, hue, "
                        "saturation, brightness, lightness, luminance, "
                        "gamma and chroma; Value adds an unbounded base "
@@ -8816,12 +9671,309 @@ class hex2pixApp(tk.Tk):
                 len(layer.graph.links),
                 "" if len(layer.graph.links) == 1 else "s")
             if not layer.graph.is_active():
-                text += " - no Output connection, so Quick Render is used"
+                text += (" - no connected Output input, so this layer is "
+                         "transparent")
             if layer.graph.last_error:
                 text += " - " + layer.graph.last_error
         self.nodes_info.set(text)
 
     # ---------------------------------------------------------- node editor
+    # ---------------------------------------------------------------- preview
+    MINI_PREVIEW_BOX = (168, 132)
+
+    def _auto_preview(self):
+        """True when a graph edit may re-render the document by itself.
+
+        A graph that needs more than a moment to draw would stall the canvas
+        on every slider step, so those changes wait for Apply and only the
+        staged thumbnail follows them live.
+        """
+        try:
+            if not bool(self.preview_live.get()):
+                return False
+        except (AttributeError, tk.TclError):
+            return True
+        return self._document_pass_estimate() <= 1.0
+
+    def _update_preview_controls(self):
+        state = "normal" if self._preview_pending else "disabled"
+        for name in ("apply_button", "nodes_apply_button"):
+            button = getattr(self, name, None)
+            if button is not None:
+                try:
+                    button.configure(state=state)
+                except tk.TclError:
+                    pass
+
+    def _clear_preview_pending(self):
+        """The canvas now shows the current graph, so nothing is pending."""
+        if not self._preview_pending:
+            return
+        self._preview_pending = False
+        self._update_preview_controls()
+        self._hide_loading()
+
+    def _mark_preview_pending(self, message=None):
+        """The document no longer matches the graph; Apply renders it."""
+        self._preview_pending = True
+        self._update_preview_controls()
+        notice = message or "Preview paused - press Apply"
+        self._show_loading(notice, None)
+        status = getattr(self, "node_status", None)
+        if status is not None:
+            try:
+                status.set(notice)
+            except tk.TclError:
+                pass
+
+    def preview_toggled(self):
+        """The Live preview box was ticked or cleared."""
+        if self._auto_preview():
+            if self._preview_pending:
+                self.apply_graph_preview()
+            else:
+                self._hide_loading()
+        elif bool(self.preview_live.get()) and self._preview_pending:
+            self._mark_preview_pending("Slow render: press Apply")
+        self._update_preview_controls()
+
+    def apply_graph_preview(self):
+        """Render the current graph at full document resolution."""
+        self._preview_pending = False
+        self._update_preview_controls()
+        self._hide_loading()
+        if self._closing or self._destroyed:
+            return
+        try:
+            self.redraw()
+        except tk.TclError:
+            return
+        status = getattr(self, "node_status", None)
+        if status is not None:
+            try:
+                status.set("Applied the graph at full resolution.")
+            except tk.TclError:
+                pass
+
+    def mini_preview_size(self):
+        """Thumbnail size that fits the preview panel, keeping the aspect."""
+        limit_w, limit_h = self.MINI_PREVIEW_BOX
+        width = max(1, self.doc.width)
+        height = max(1, self.doc.height)
+        scale = min(limit_w / float(width), limit_h / float(height))
+        return (max(1, int(round(width * scale))),
+                max(1, int(round(height * scale))))
+
+    def _mini_scale(self, bitmap, width, height):
+        """Point-sampled copy of a bitmap at thumbnail size."""
+        if bitmap.width == width and bitmap.height == height:
+            return Bitmap(width, height, bytearray(bitmap.data))
+        image = Image.frombytes("RGBA", (bitmap.width, bitmap.height),
+                                bytes(bitmap.data))
+        image = image.resize((width, height), Image.NEAREST)
+        return Bitmap(width, height, bytearray(image.tobytes()))
+
+    def _mini_below(self, layer, width, height):
+        """The stack under this layer, composited at thumbnail size."""
+        stack = []
+        for candidate in self.doc.layers:
+            if candidate is layer:
+                break
+            stack.append(candidate)
+        if not stack:
+            return Bitmap(width, height)
+        copies = []
+        for candidate in stack:
+            small = copy.copy(candidate)
+            small.bitmap = self._mini_scale(candidate.bitmap, width, height)
+            small.render_mode = RENDER_QUICK
+            copies.append(small)
+        return composite_layers(copies, frame=(width, height),
+                                groups=self.doc.groups)
+
+    def request_mini_preview(self, delay=35):
+        """Queue the staged thumbnail of the active layer's graph."""
+        if getattr(self, "node_window", None) is None:
+            return
+        job = getattr(self, "_mini_preview_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._mini_preview_job = None
+        try:
+            self._mini_preview_job = self.after(delay,
+                                               self._start_mini_preview)
+        except tk.TclError:
+            self._mini_preview_job = None
+
+    def _mini_status(self, text):
+        var = getattr(self, "mini_status", None)
+        if var is None:
+            return
+        try:
+            var.set(text)
+        except tk.TclError:
+            pass
+
+    def _mini_progress(self, fraction):
+        bar = getattr(self, "mini_bar", None)
+        if bar is not None:
+            try:
+                bar.configure(value=max(0.0, min(100.0, fraction * 100.0)))
+            except tk.TclError:
+                pass
+        self._mini_status("Rendering %d%%" % int(round(fraction * 100)))
+
+    def _start_mini_preview(self):
+        """Begin a staged thumbnail: quarter, half, then full size."""
+        self._mini_preview_job = None
+        canvas = getattr(self, "mini_canvas", None)
+        if canvas is None or self._closing or self._destroyed:
+            return
+        self._mini_preview_gen += 1
+        self._mini_state = None
+        layer = self.doc.active_layer
+        graph = getattr(layer, "graph", None)
+        if (getattr(layer, "render_mode", RENDER_QUICK) != RENDER_COMPLEX
+                or graph is None or not graph.nodes):
+            self._mini_panel_message("No node graph")
+            return
+        if not graph.is_active():
+            self._mini_panel_message("Output not connected")
+            return
+        width, height = self.mini_preview_size()
+        state = {
+            "gen": self._mini_preview_gen,
+            "layer": layer,
+            "stage": 0,
+            "width": width,
+            "height": height,
+            "sizes": [(max(2, width // 4), max(2, height // 4)),
+                      (max(2, width // 2), max(2, height // 2)),
+                      (width, height)],
+            "index": 0,
+            "data": None,
+        }
+        self._mini_state = state
+        self._mini_progress(0.0)
+        self._mini_stage_setup(state, layer)
+        self._mini_preview_job = self.after(0, self._mini_preview_step)
+
+    def _mini_panel_message(self, text):
+        canvas = getattr(self, "mini_canvas", None)
+        self._mini_state = None
+        self._mini_photo = None
+        self._mini_status(text)
+        self._mini_progress(0.0)
+        if canvas is None:
+            return
+        try:
+            canvas.delete("all")
+            canvas.configure(width=168, height=64)
+            canvas.create_text(84, 32, text=text, fill=self.colors["muted"])
+        except tk.TclError:
+            pass
+
+    def _mini_stage_setup(self, state, layer):
+        width, height = state["sizes"][state["stage"]]
+        state["tw"] = width
+        state["th"] = height
+        state["index"] = 0
+        state["data"] = bytearray(width * height * 4)
+        state["map_x"] = [min(self.doc.width - 1,
+                              int((column + 0.5) * self.doc.width / width))
+                          for column in range(width)]
+        state["map_y"] = [min(self.doc.height - 1,
+                              int((row + 0.5) * self.doc.height / height))
+                          for row in range(height)]
+        state["above"] = self._mini_scale(layer.bitmap, width, height)
+        state["below"] = self._mini_below(layer, width, height)
+        layer.graph.begin_frame(self.doc.layers, self.doc.groups, layer)
+
+    def _mini_preview_step(self):
+        """Render one slice of the current thumbnail stage."""
+        self._mini_preview_job = None
+        state = getattr(self, "_mini_state", None)
+        canvas = getattr(self, "mini_canvas", None)
+        if state is None or canvas is None or self._closing or self._destroyed:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if state["gen"] != self._mini_preview_gen:
+            return
+        layer = state["layer"]
+        graph = getattr(layer, "graph", None)
+        if (graph is None or layer is not self.doc.active_layer
+                or getattr(layer, "render_mode", RENDER_QUICK)
+                != RENDER_COMPLEX):
+            self._mini_state = None
+            return
+        width = state["tw"]
+        height = state["th"]
+        total = width * height
+        data = state["data"]
+        above_bitmap = state["above"]
+        below_bitmap = state["below"]
+        map_x = state["map_x"]
+        map_y = state["map_y"]
+        deadline = time.perf_counter() + 0.020
+        index = state["index"]
+        try:
+            while index < total:
+                row, column = divmod(index, width)
+                colour = graph.eval_pixel(
+                    map_x[column], map_y[row],
+                    above_bitmap.rgba(column, row),
+                    below_bitmap.rgba(column, row),
+                    self.doc.width, self.doc.height)
+                offset = index * 4
+                data[offset] = colour[0]
+                data[offset + 1] = colour[1]
+                data[offset + 2] = colour[2]
+                data[offset + 3] = colour[3]
+                index += 1
+                if not (index & 63) and time.perf_counter() >= deadline:
+                    break
+        except Exception as exc:  # noqa: BLE001 - a broken graph stays usable
+            self._mini_state = None
+            self._mini_panel_message("Preview failed: %s" % exc)
+            return
+        state["index"] = index
+        stages = len(state["sizes"])
+        self._mini_progress((state["stage"] + index / float(total)) / stages)
+        if index < total:
+            self._mini_preview_job = self.after(0, self._mini_preview_step)
+            return
+        self._show_mini_stage(width, height, data)
+        state["stage"] += 1
+        if state["stage"] >= stages:
+            self._mini_state = None
+            self._mini_status("Changes not applied"
+                              if self._preview_pending else "Preview ready")
+            return
+        self._mini_stage_setup(state, layer)
+        self._mini_preview_job = self.after(0, self._mini_preview_step)
+
+    def _show_mini_stage(self, width, height, data):
+        canvas = getattr(self, "mini_canvas", None)
+        if canvas is None:
+            return
+        image = Image.frombytes("RGBA", (width, height), bytes(data))
+        plate = Image.new("RGBA", (width, height), (28, 31, 38, 255))
+        plate.alpha_composite(image)
+        try:
+            self._mini_photo = ImageTk.PhotoImage(plate)
+            canvas.delete("all")
+            canvas.configure(width=width, height=height)
+            canvas.create_image(0, 0, anchor="nw", image=self._mini_photo)
+        except tk.TclError:
+            self._mini_photo = None
+
     def open_node_editor(self):
         window = getattr(self, "node_window", None)
         if window is not None:
@@ -8864,6 +10016,10 @@ class hex2pixApp(tk.Tk):
                                                                  padx=4)
         ttk.Button(toolbar, text="Frame",
                    command=self.frame_graph).pack(side="left")
+        ttk.Checkbutton(toolbar, text="Debug tools",
+                        variable=self.debug_tools_var,
+                        command=self.toggle_debug_tools).pack(
+                            side="left", padx=(8, 0))
         self.node_mode_label = ttk.Label(toolbar, text="")
         self.node_mode_label.pack(side="right")
         ttk.Button(toolbar, text="Quick Render",
@@ -8872,6 +10028,31 @@ class hex2pixApp(tk.Tk):
 
         body = ttk.Frame(window)
         body.pack(fill="both", expand=True)
+        sources = ttk.Frame(body, padding=(8, 6), width=190)
+        sources.pack(side="left", fill="y")
+        sources.pack_propagate(False)
+        ttk.Label(sources, text="Document sources").pack(anchor="w")
+        source_list_frame = ttk.Frame(sources)
+        source_list_frame.pack(fill="both", expand=True, pady=(3, 3))
+        self.node_source_list = tk.Listbox(
+            source_list_frame, exportselection=False, height=16,
+            bg="#20242c", fg="#d6dcea", selectbackground="#3b4a63",
+            selectforeground="#ffffff", highlightthickness=0, bd=0)
+        source_scroll = ttk.Scrollbar(source_list_frame, orient="vertical",
+                                      command=self.node_source_list.yview)
+        self.node_source_list.configure(yscrollcommand=source_scroll.set)
+        self.node_source_list.pack(side="left", fill="both", expand=True)
+        source_scroll.pack(side="right", fill="y")
+        self.node_source_list.bind("<Double-Button-1>",
+                                   self.add_selected_source)
+        self.node_source_list.bind("<Return>", self.add_selected_source)
+        ttk.Button(sources, text="Add selected source",
+                   command=self.add_selected_source).pack(fill="x")
+        ttk.Label(sources, text="Layers and groups are read directly; "
+                                "their own graphs are not run recursively.",
+                  foreground="#8a94a8", wraplength=174,
+                  justify="left", padding=(0, 4, 0, 0)).pack(anchor="w")
+        self.node_source_entries = []
         canvas_frame = ttk.Frame(body)
         canvas_frame.pack(side="left", fill="both", expand=True)
         self.node_canvas = tk.Canvas(canvas_frame, bg="#171a20",
@@ -8891,6 +10072,30 @@ class hex2pixApp(tk.Tk):
         props = ttk.Frame(body, padding=(8, 6), width=250)
         props.pack(side="right", fill="y")
         props.pack_propagate(False)
+        self.mini_status = tk.StringVar(value="")
+        preview = ttk.Frame(props)
+        preview.pack(fill="x", pady=(0, 6))
+        head = ttk.Frame(preview)
+        head.pack(fill="x")
+        ttk.Label(head, text="Preview").pack(side="left")
+        ttk.Checkbutton(head, text="Live", variable=self.preview_live,
+                        command=self.preview_toggled).pack(side="right")
+        self.mini_canvas = tk.Canvas(preview, width=168, height=96,
+                                     bg=self.colors["bg"],
+                                     highlightthickness=1,
+                                     highlightbackground=self.colors["border"],
+                                     bd=0)
+        self.mini_canvas.pack(pady=(3, 3))
+        self.mini_bar = ttk.Progressbar(preview, mode="determinate",
+                                       maximum=100.0)
+        self.mini_bar.pack(fill="x")
+        ttk.Label(preview, textvariable=self.mini_status,
+                  foreground=self.colors["muted"]).pack(anchor="w")
+        self.apply_button = ttk.Button(preview, text="Apply to document",
+                                       command=self.apply_graph_preview,
+                                       state="disabled")
+        self.apply_button.pack(fill="x", pady=(3, 0))
+        ttk.Separator(preview).pack(fill="x", pady=(7, 0))
         ttk.Label(props, text="Selected node").pack(anchor="w")
         self.node_props = ttk.Frame(props)
         self.node_props.pack(fill="both", expand=True)
@@ -8913,6 +10118,21 @@ class hex2pixApp(tk.Tk):
         self.node_drag = None
         self.node_link = None
         self.node_before = None
+        redraw_job = getattr(self, "_node_redraw_job", None)
+        self._mini_state = None
+        for name in ("_node_redraw_job", "_graph_redraw_job",
+                     "_node_editor_job", "_props_refresh_job",
+                     "_mini_preview_job"):
+            job = getattr(self, name, None)
+            if job is not None:
+                setattr(self, name, None)
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+        if redraw_job is not None:
+            if not self._closing and not self._destroyed:
+                self.redraw()
         if window is not None:
             try:
                 window.destroy()
@@ -8934,12 +10154,91 @@ class hex2pixApp(tk.Tk):
         except tk.TclError:
             self.node_window = None
             return
+        job = getattr(self, "_graph_redraw_job", None)
+        if job is not None:
+            self._graph_redraw_job = None
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
         layer = self.doc.active_layer
         window.title("Node Editor - %s" % layer.name)
         self.node_mode_label.config(
             text=RENDER_LABELS.get(layer.render_mode, ""))
+        self.refresh_node_sources()
         self._draw_graph()
-        self.refresh_node_props()
+        self._refresh_props_soon()
+        self._update_preview_controls()
+        self.request_mini_preview()
+
+    def _refresh_node_editor_soon(self):
+        """Refresh the whole editor once, after the current Tk event."""
+        if getattr(self, "node_window", None) is None:
+            return
+        if getattr(self, "_node_editor_job", None) is not None:
+            return
+        try:
+            self._node_editor_job = self.after_idle(
+                self._flush_node_editor)
+        except tk.TclError:
+            self._node_editor_job = None
+
+    def _flush_node_editor(self):
+        self._node_editor_job = None
+        if self._closing or self._destroyed:
+            return
+        try:
+            self.refresh_node_editor()
+        except tk.TclError:
+            pass
+
+    def refresh_node_sources(self):
+        """List every document layer and group beside the node canvas."""
+        source_list = getattr(self, "node_source_list", None)
+        if source_list is None:
+            return
+        selected = source_list.curselection()
+        keep = selected[0] if selected else None
+        source_list.delete(0, "end")
+        entries = []
+        for index, layer in enumerate(self.doc.layers):
+            entries.append(("layer_source", "layer", layer.name,
+                            "Layer %d: %s" % (index + 1, layer.name)))
+        for group in self.doc.groups:
+            entries.append(("group_source", "group", group.name,
+                            "Group: %s (%d layers)" % (
+                                group.name,
+                                len(self.doc.group_members(group.name)))))
+        for entry in entries:
+            source_list.insert("end", entry[3])
+        self.node_source_entries = entries
+        if keep is not None and keep < len(entries):
+            source_list.selection_set(keep)
+            source_list.see(keep)
+
+    def add_selected_source(self, event=None):
+        """Add or select the source node selected in the Sources list."""
+        source_list = getattr(self, "node_source_list", None)
+        if source_list is None:
+            return None
+        picked = source_list.curselection()
+        if not picked:
+            return None
+        index = picked[0]
+        if index >= len(self.node_source_entries):
+            return None
+        node_type, param_name, source_name, _label = \
+            self.node_source_entries[index]
+        graph = self.doc.active_layer.graph
+        for node in graph.nodes.values():
+            if (node.type == node_type
+                    and node.params.get(param_name) == source_name):
+                self.node_selected = node.id
+                self._draw_graph()
+                self._refresh_props_soon()
+                return node
+        node = self.add_graph_node(node_type, {param_name: source_name})
+        return node
 
     def _draw_graph(self):
         canvas = getattr(self, "node_canvas", None)
@@ -8947,6 +10246,8 @@ class hex2pixApp(tk.Tk):
             return
         graph = self.doc.active_layer.graph
         canvas.delete("all")
+        self.node_link_indices = {}
+        self._node_port_cache = {}
         if not graph.nodes:
             canvas.create_text(
                 50, 50, anchor="nw", fill="#9aa3b2",
@@ -8955,20 +10256,30 @@ class hex2pixApp(tk.Tk):
                      "Complex Render for a starter graph.")
             canvas.configure(scrollregion=(0, 0, 640, 360))
             return
+        link_counts = {}
+        incident = {}
+        for index, link in enumerate(graph.links):
+            key = (link["to"], link["to_port"])
+            link_counts[key] = link_counts.get(key, 0) + 1
+            incident.setdefault(link["from"], []).append(index)
+            if link["to"] != link["from"]:
+                incident.setdefault(link["to"], []).append(index)
+        self.node_link_indices = incident
         for index, link in enumerate(graph.links):
             source = graph.nodes.get(link["from"])
             target = graph.nodes.get(link["to"])
             if source is None or target is None:
                 continue
-            sx, sy = self.node_port_pos(source, "out", link["from_port"])
-            tx, ty = self.node_port_pos(target, "in", link["to_port"])
-            span = max(50, abs(tx - sx) * 0.45)
-            canvas.create_line(sx, sy, sx + span, sy, tx - span, ty, tx, ty,
-                               smooth=True, splinesteps=18, width=2,
-                               fill="#6f9cf5",
+            coords = self._link_coords(source, link["from_port"],
+                                       target, link["to_port"])
+            canvas.create_line(*coords, smooth=True, splinesteps=18, width=2,
+                               fill=self._wire_colour(
+                                   source, link["from_port"]),
                                tags=("graph_link", "link:%d" % index))
         for node in sorted(graph.nodes.values(), key=lambda item: item.id):
-            self._draw_graph_node(node)
+            self._draw_graph_node(node, link_counts)
+        # _draw_graph_node caches each socket centre as it paints it, so hover
+        # and drop hit-testing never has to re-derive the whole layout.
         box = canvas.bbox("all") or (0, 0, 640, 360)
         # Redrawing after a click must not jump the view: a socket press
         # redraws the selection, and a moving release would then miss.
@@ -8990,38 +10301,116 @@ class hex2pixApp(tk.Tk):
             self.node_status.set(graph.last_error)
         else:
             self.node_status.set(
-                "Drag any socket onto another to connect. Right-click a "
-                "node to duplicate it, a socket for its micro logic gate, "
-                "or a wire to delete it. Binary gates show a B input.")
+                "Drag any socket onto another to connect, including the "
+                "same node. Right-click a node to duplicate or reverse it, "
+                "a socket for its micro logic gate, or a wire to delete it.")
 
     def node_layout(self, node):
         spec = NODE_TYPES[node.type]
         rows = max(1, len(node_inputs(node)), len(node_outputs(node)))
         return (node.x, node.y, 190, 34 + rows * 22 + 16)
 
+    def _link_coords(self, source, from_port, target, to_port):
+        """The smooth curve for one output-to-input connection."""
+        sx, sy = self.node_port_pos(source, "out", from_port)
+        tx, ty = self.node_port_pos(target, "in", to_port)
+        span = max(50, abs(tx - sx) * 0.45)
+        sdir = 1 if self._visual_side(source, "out") == "right" else -1
+        tdir = 1 if self._visual_side(target, "in") == "right" else -1
+        # Only a source and target that face each other get the direct curve.
+        # Same-side sockets, or a source on the far side of the target, need a
+        # lane above or below both nodes; otherwise the wire runs behind a node
+        # and looks attached to the socket on the opposite edge.
+        facing = ((sdir == 1 and tdir == -1 and sx < tx - 2)
+                  or (sdir == -1 and tdir == 1 and sx > tx + 2))
+        if source is not target and not facing:
+            t_x, t_y, t_width, t_height = self.node_layout(target)
+            s_x, s_y, _s_width, s_height = self.node_layout(source)
+            lane_y = min(t_y, s_y) - 24
+            if lane_y < 4:
+                lane_y = max(t_y + t_height, s_y + s_height) + 24
+            if tdir == 1:
+                edge_x = t_x + t_width + 18
+            else:
+                edge_x = t_x - 18
+            exit_x = (max(sx + 18, edge_x) if tdir == 1
+                      else min(sx - 18, edge_x))
+            return (sx, sy, sx + 18 * sdir, sy,
+                    exit_x, lane_y, edge_x, lane_y,
+                    edge_x, ty, tx, ty)
+        return (sx, sy, sx + span * sdir, sy,
+                tx + span * tdir, ty, tx, ty)
+
+    def _update_node_links(self, node_id):
+        """Move only the wires touching a node during a drag."""
+        canvas = getattr(self, "node_canvas", None)
+        if canvas is None:
+            return
+        graph = self.doc.active_layer.graph
+        indices = getattr(self, "node_link_indices", {}).get(node_id)
+        if indices is None:
+            indices = range(len(graph.links))
+        for index in indices:
+            if index >= len(graph.links):
+                continue
+            link = graph.links[index]
+            source = graph.nodes.get(link["from"])
+            target = graph.nodes.get(link["to"])
+            if source is None or target is None:
+                continue
+            coords = self._link_coords(source, link["from_port"],
+                                       target, link["to_port"])
+            for item in canvas.find_withtag("link:%d" % index):
+                canvas.coords(item, *coords)
+
+    def _visual_side(self, node, side):
+        """The screen side for a semantic input or output socket.
+
+        A Gate always reads left to right: its single Color input is on the
+        left and its A/B outputs are on the right, reversed or not.  Other
+        reversed nodes mirror their sockets instead.
+        """
+        if node.type == "gate" or not node_reversed(node):
+            return "left" if side == "in" else "right"
+        return "right" if side == "in" else "left"
+
+    def _port_y(self, node, side, count, index):
+        """Vertical centre of one visible socket row."""
+        if node.type == "gate":
+            single = (side == "out" and not node_reversed(node))
+            single = single or (side == "in" and node_reversed(node))
+            if count == 1 and single:
+                return node.y + 50
+        return node.y + 36 + index * 22
+
     def _gate_geometry(self, node, side, name):
         """Canvas positions for a micro gate's body and patch sockets."""
-        x, y, width, _height = self.node_layout(node)
+        x, _y, width, _height = self.node_layout(node)
         ports = node_inputs(node) if side == "in" else node_outputs(node)
         names = [port_name for port_name, _kind in ports]
         try:
             index = names.index(name)
         except ValueError:
             index = 0
-        py = y + 36 + index * 22
-        if side == "out":
+        py = self._port_y(node, side, len(ports), index)
+        visual = self._visual_side(node, side)
+        if visual == "right":
             left = x + width + 10
             right = left + 22
-            return {"left": left, "right": right, "y": py,
-                    "a": (x + width, py),
-                    "b": (left + 2, py - 12),
-                    "out": (right + 14, py)}
-        right = x - 10
-        left = right - 22
+            node_side = (x + width, py)
+            outer = (right + 14, py)
+        else:
+            right = x - 10
+            left = right - 22
+            node_side = (x, py)
+            outer = (left - 8, py)
+        flows_left = ((side == "in" and visual == "right")
+                      or (side == "out" and visual == "left"))
+        a, out = (outer, node_side) if side == "in" else (node_side, outer)
         return {"left": left, "right": right, "y": py,
-                "a": (left - 8, py),
-                "b": (left + 2, py - 12),
-                "out": (x, py)}
+                "a": a, "b": ((right - 2) if flows_left else (left + 2),
+                               py - 12),
+                "out": out}
 
     def node_port_pos(self, node, side, port_name):
         info = gate_input_info(port_name)
@@ -9041,10 +10430,16 @@ class hex2pixApp(tk.Tk):
             index = names.index(port_name)
         except ValueError:
             index = 0
-        x, y, width, _height = self.node_layout(node)
-        return (x if side == "in" else x + width, y + 36 + index * 22)
+        x, _y, width, _height = self.node_layout(node)
+        py = self._port_y(node, side, len(ports), index)
+        return (x if self._visual_side(node, side) == "left"
+                else x + width, py)
 
     def node_summary(self, node):
+        if node.type == "layer_source":
+            return str(node.params.get("layer") or "no layer")
+        if node.type == "group_source":
+            return str(node.params.get("group") or "no group")
         spec = NODE_TYPES[node.type]
         for param in spec["params"]:
             if param["kind"] == "choice":
@@ -9065,7 +10460,104 @@ class hex2pixApp(tk.Tk):
                 return "code"
         return ""
 
-    def _draw_graph_node(self, node):
+    def _gate_colour(self, node):
+        """The chosen colour for a full Gate node and its outgoing wires."""
+        fallback = parse_color(GATE_COLOR_DEFAULT)
+        colour = parse_color(node.params.get("color", GATE_COLOR_DEFAULT),
+                             fallback)
+        return "#%02X%02X%02X" % colour[:3]
+
+    def _port_colour(self, kind):
+        """Socket colour for a value kind."""
+        if kind == COLOR:
+            return "#f0b45c"
+        if kind == WIRE:
+            return "#c7a6ff"
+        return "#78d6a0"
+
+    def _wire_colour(self, source, port):
+        """Colour a wire by its gate, or by the kind of value it carries."""
+        if source is None:
+            return "#8a94a8"
+        if source.type == "gate":
+            return self._gate_colour(source)
+        kind = dict(node_outputs(source)).get(port, COLOR)
+        return self._port_colour(kind)
+
+    def _draw_large_gate(self, canvas, node, x, y, width, tags, selected):
+        """Draw a full Gate node's body as its logic symbol."""
+        mode = str(node.params.get("mode") or "nand")
+        colour = self._gate_colour(node)
+        red, green, blue, _alpha = parse_color(
+            node.params.get("color", GATE_COLOR_DEFAULT),
+            parse_color(GATE_COLOR_DEFAULT))
+        ink = "#1a1020" if red + green + blue > 360 else "#ffffff"
+        outline = "#f6eaff" if selected else "#2b1740"
+        reverse = node_reversed(node)
+        inputs = node_inputs(node)
+        outputs = node_outputs(node)
+        left, right = x + 56, x + width - 56
+        top, bottom = y + 31, y + 69
+        mid = (top + bottom) // 2
+
+        # Color always enters from the left and A/B always leave from the
+        # right.  Reversal only mirrors the body; it never moves the sockets.
+        for index, _port in enumerate(inputs):
+            iy = (mid if reverse and len(inputs) == 1
+                  else y + 36 + index * 22)
+            canvas.create_line(x, iy, left, iy, fill=colour, width=2,
+                               tags=tags + ("gate_input",))
+        curved = mode in ("or", "nor", "xor", "xnor")
+        if mode == "not":
+            body = ([(right, top), (right, bottom), (left, mid)]
+                    if reverse
+                    else [(left, top), (left, bottom), (right, mid)])
+        elif curved:
+            body = ([(right, top), (right - 12, top), (left, mid),
+                     (right - 12, bottom), (right, bottom),
+                     (right - 8, mid)]
+                    if reverse
+                    else [(left, top), (left + 12, top), (right, mid),
+                          (left + 12, bottom), (left, bottom),
+                          (left + 8, mid)])
+        else:
+            body = ([(right, top), (left + 14, top), (left, mid),
+                     (left + 14, bottom), (right, bottom)]
+                    if reverse
+                    else [(left, top), (right - 14, top), (right, mid),
+                          (right - 14, bottom), (left, bottom)])
+        canvas.create_polygon(body, fill=colour, outline=outline,
+                              width=2, tags=tags + ("gate_symbol",))
+        if mode in ("xor", "xnor"):
+            xor_x = ([right + 4, right - 5, right + 4]
+                     if reverse else [left - 4, left + 5, left - 4])
+            canvas.create_line(xor_x[0], top - 3, xor_x[1], mid,
+                               xor_x[2], bottom + 3, smooth=True,
+                               fill=colour, width=2, tags=tags)
+        symbol = {"and": "&", "nand": "&", "or": ">=1", "nor": ">=1",
+                  "xor": "=1", "xnor": "=1", "not": "1"}.get(mode, "&")
+        canvas.create_text((left + right) // 2, mid, text=symbol, fill=ink,
+                           font=("Segoe UI", 10, "bold"), tags=tags)
+        line_start = right
+        if mode in ("nand", "nor", "xnor"):
+            canvas.create_oval(right, mid - 4, right + 8, mid + 4,
+                               fill=colour, outline=outline, width=1,
+                               tags=tags + ("gate_bubble",))
+            line_start = right + 8
+        output_x = x + width
+        if len(outputs) == 1:
+            canvas.create_line(line_start, mid, output_x, y + 50,
+                               fill=colour, width=2,
+                               tags=tags + ("gate_output",))
+        else:
+            # One branch per socket keeps the two-output Gate legible.
+            for index in range(len(outputs)):
+                output_y = y + 36 + index * 22
+                canvas.create_line(line_start, mid, output_x, output_y,
+                                   fill=colour, width=2,
+                                   tags=tags + ("gate_output",))
+
+    def _draw_graph_node(self, node, link_counts=None):
         canvas = self.node_canvas
         spec = NODE_TYPES[node.type]
         x, y, width, height = self.node_layout(node)
@@ -9074,10 +10566,14 @@ class hex2pixApp(tk.Tk):
         tags = ("graph_node", "node:%d" % node.id)
         canvas.create_rectangle(x, y, x + width, y + height,
                                 fill="#242833", outline=outline,
-                                width=2 if selected else 1, tags=tags)
+                                width=2 if selected else 1,
+                                tags=tags + ("node_body",))
         canvas.create_rectangle(x, y, x + width, y + 27,
                                 fill="#313747", outline="", tags=tags)
-        canvas.create_text(x + 9, y + 14, anchor="w", text=spec["label"],
+        title = spec["label"]
+        if self.debug_enabled():
+            title = "%s  #%d" % (title, node.id)
+        canvas.create_text(x + 9, y + 14, anchor="w", text=title,
                            fill="#f0f3ff", font=("Segoe UI", 9, "bold"),
                            tags=tags)
         summary = self.node_summary(node)
@@ -9085,37 +10581,49 @@ class hex2pixApp(tk.Tk):
             canvas.create_text(x + width - 9, y + 14, anchor="e",
                                text=summary, fill="#aab6d4",
                                font=("Segoe UI", 8), tags=tags)
+        if node.type == "gate":
+            self._draw_large_gate(canvas, node, x, y, width, tags, selected)
         graph = self.doc.active_layer.graph
-        for index, (name, kind) in enumerate(node_inputs(node)):
-            py = y + 36 + index * 22
-            colour = "#f0b45c" if kind == COLOR else "#78d6a0"
-            gate = node.params.get("@gate:in:" + name)
-            if gate in MICRO_GATES:
-                self._draw_micro_gate(canvas, node, "in", name, kind, gate)
+        inputs = node_inputs(node)
+        outputs = node_outputs(node)
+        cache = self._node_port_cache
+        # Resolve each side once per node.  Re-checking every port's side was
+        # one of the largest costs in a large graph's redraw.
+        for side, ports in (("in", inputs), ("out", outputs)):
+            visual = self._visual_side(node, side)
+            if visual == "right":
+                port_x = x + width
+                label_x = x + width - 10
+                label_anchor = "e"
             else:
-                canvas.create_oval(x - 5, py - 5, x + 5, py + 5,
-                                   fill=colour, outline="",
-                                   tags=("graph_port",
-                                         "port:%d:in:%s" % (node.id, name)))
-            wires = len(graph.links_into(node.id, name))
-            label = name if wires < 2 else "%s (%d)" % (name, wires)
-            canvas.create_text(x + 10, py, anchor="w", text=label,
-                               fill="#d6dcea", font=("Segoe UI", 8),
-                               tags=tags)
-        for index, (name, kind) in enumerate(node_outputs(node)):
-            py = y + 36 + index * 22
-            colour = "#f0b45c" if kind == COLOR else "#78d6a0"
-            gate = node.params.get("@gate:out:" + name)
-            if gate in MICRO_GATES:
-                self._draw_micro_gate(canvas, node, "out", name, kind, gate)
-            else:
-                canvas.create_oval(x + width - 5, py - 5, x + width + 5,
-                                   py + 5, fill=colour, outline="",
-                                   tags=("graph_port",
-                                         "port:%d:out:%s" % (node.id, name)))
-            canvas.create_text(x + width - 10, py, anchor="e", text=name,
-                               fill="#d6dcea", font=("Segoe UI", 8),
-                               tags=tags)
+                port_x = x
+                label_x = x + 10
+                label_anchor = "w"
+            for index, (name, kind) in enumerate(ports):
+                py = self._port_y(node, side, len(ports), index)
+                colour = self._port_colour(kind)
+                gate = node.params.get("@gate:%s:%s" % (side, name))
+                if gate in MICRO_GATES:
+                    self._draw_micro_gate(canvas, node, side, name, kind, gate)
+                else:
+                    cache[(node.id, side, name)] = (port_x, py)
+                    canvas.create_oval(
+                        port_x - 5, py - 5, port_x + 5, py + 5,
+                        fill=colour, outline="",
+                        tags=("graph_port", "node:%d" % node.id,
+                              "port:%d:%s:%s" % (node.id, side, name)))
+                if side == "in":
+                    if link_counts is None:
+                        wires = len(graph.links_into(node.id, name))
+                    else:
+                        wires = link_counts.get((node.id, name), 0)
+                    label = (name if wires < 2
+                             else "%s (%d)" % (name, wires))
+                else:
+                    label = name
+                canvas.create_text(label_x, py, anchor=label_anchor,
+                                   text=label, fill="#d6dcea",
+                                   font=("Segoe UI", 8), tags=tags)
         canvas.create_text(x + 9, y + height - 9, anchor="w",
                            text=spec["hint"], fill="#6f7890",
                            font=("Segoe UI", 7), tags=tags)
@@ -9129,76 +10637,103 @@ class hex2pixApp(tk.Tk):
 
         Output gates have a patch socket after the gate; input gates feed the
         node through their own output socket.  Binary gates expose a small B
-        input above the body, so every gate type has both operands.
+        input above the body, so every gate type has both operands.  The body
+        faces the patch socket's outer edge so its pins meet the wire.
         """
         geometry = self._gate_geometry(node, side, name)
         left, right, py = (geometry["left"], geometry["right"],
                            geometry["y"])
-        colour = "#f0b45c" if kind == COLOR else "#78d6a0"
+        visual = self._visual_side(node, side)
+        flows_left = ((side == "in" and visual == "right")
+                      or (side == "out" and visual == "left"))
+        input_edge = right if flows_left else left
+        output_edge = left if flows_left else right
+
+        def mirror(px):
+            return left + right - px
+
+        node_tag = ("node:%d" % node.id,)
+        colour = self._port_colour(kind)
         highlight = "#e5b0ff"
         outline = "#2b1740"
-        negated = mode in ("nand", "nor", "xnor")
+        negated = mode in ("nand", "nor", "xor", "xnor")
         curved = mode in ("or", "nor", "xor", "xnor")
-        if side == "out":
-            canvas.create_line(geometry["a"][0], py, left, py,
-                               fill="#d18cff", width=1)
-        else:
-            canvas.create_line(geometry["a"][0], py, left, py,
-                               fill="#d18cff", width=1)
-            canvas.create_line(right, py, geometry["out"][0], py,
-                               fill="#d18cff", width=1)
+        canvas.create_line(geometry["a"][0], py, input_edge, py,
+                           fill="#d18cff", width=1, tags=node_tag)
         if mode == "not":
             body = [(left, py - 8), (left, py + 8), (right - 2, py)]
+            if flows_left:
+                body = [(mirror(px), py2) for px, py2 in body]
             canvas.create_polygon(body, fill=highlight, outline=outline,
-                                  width=1)
+                                  width=1, tags=node_tag)
         elif curved:
             body = [(left, py - 8), (left + 10, py - 8), (right, py),
                     (left + 10, py + 8), (left, py + 8), (left + 7, py)]
+            if flows_left:
+                body = [(mirror(px), py2) for px, py2 in body]
             canvas.create_polygon(body, fill=highlight, outline=outline,
-                                  width=1)
+                                  width=1, tags=node_tag)
             if mode in ("xor", "xnor"):
-                canvas.create_line(left - 3, py - 10, left + 4, py,
-                                   left - 3, py + 10, smooth=True,
-                                   fill=highlight, width=1)
+                xor = [(left - 3, py - 10), (left + 4, py), (left - 3, py + 10)]
+                if flows_left:
+                    xor = [(mirror(px), py2) for px, py2 in xor]
+                canvas.create_line(xor[0][0], xor[0][1],
+                                   xor[1][0], xor[1][1],
+                                   xor[2][0], xor[2][1], smooth=True,
+                                   fill=highlight, width=1, tags=node_tag)
         else:
             body = [(left, py - 8), (left + 13, py - 8), (right, py),
                     (left + 13, py + 8), (left, py + 8)]
+            if flows_left:
+                body = [(mirror(px), py2) for px, py2 in body]
             canvas.create_polygon(body, fill=highlight, outline=outline,
-                                  width=1)
+                                  width=1, tags=node_tag)
         symbol = {"and": "&", "nand": "&", "or": ">=1",
                   "nor": ">=1", "xor": "=1", "xnor": "=1",
                   "not": "1"}[mode]
-        canvas.create_text(left + 10, py, text=symbol, fill="#1a1020",
-                           font=("Segoe UI", 5, "bold"))
-        output_x = right
+        canvas.create_text(right - 10 if flows_left else left + 10, py,
+                           text=symbol, fill="#1a1020",
+                           font=("Segoe UI", 5, "bold"), tags=node_tag)
+        output_x = output_edge
         if negated:
-            canvas.create_oval(right, py - 3, right + 6, py + 3,
-                               fill=highlight, outline=outline, width=1)
-            output_x = right + 6
+            if flows_left:
+                canvas.create_oval(left - 6, py - 3, left, py + 3,
+                                   fill=highlight, outline=outline, width=1,
+                                   tags=node_tag)
+                output_x = left - 6
+            else:
+                canvas.create_oval(right, py - 3, right + 6, py + 3,
+                                   fill=highlight, outline=outline, width=1,
+                                   tags=node_tag)
+                output_x = right + 6
+        out_x, out_y = geometry["out"]
+        canvas.create_line(output_x, py, out_x, out_y,
+                           fill="#d18cff", width=1, tags=node_tag)
+        port_tags = ("graph_port", "node:%d" % node.id,
+                     "port:%d:%s:%s" % (node.id, side, name))
+        cache = self._node_port_cache
         if side == "out":
-            out_x, out_y = geometry["out"]
-            canvas.create_line(output_x, py, out_x - 5, out_y,
-                               fill="#d18cff", width=1)
+            cache[(node.id, side, name)] = (out_x, out_y)
             canvas.create_oval(out_x - 5, out_y - 5, out_x + 5, out_y + 5,
-                               fill=colour, outline="",
-                               tags=("graph_port",
-                                     "port:%d:out:%s" % (node.id, name)))
+                               fill=colour, outline="", tags=port_tags)
         else:
-            out_x, out_y = geometry["out"]
-            canvas.create_oval(out_x - 5, out_y - 5, out_x + 5, out_y + 5,
-                               fill=colour, outline="")
-            ax, ay = geometry["a"]
-            canvas.create_oval(ax - 5, ay - 5, ax + 5, ay + 5,
-                               fill=colour, outline="",
-                               tags=("graph_port",
-                                     "port:%d:in:%s" % (node.id, name)))
+            # Both circles are the same input: the outer patch socket and the
+            # node-edge socket where the gate feeds the node.  Accept a wire on
+            # either so a reversed micro-gated input is never a dead target.
+            cache[(node.id, side, name)] = geometry["a"]
+            for ox, oy in (geometry["out"], geometry["a"]):
+                canvas.create_oval(ox - 5, oy - 5, ox + 5, oy + 5,
+                                   fill=colour, outline="", tags=port_tags)
         if mode != "not":
             bx, by = geometry["b"]
-            canvas.create_line(bx, by + 3, left + 2, py - 8,
-                               fill="#d18cff", width=1)
+            cache[(node.id, "in", gate_input_name(side, name))] = (bx, by)
+            canvas.create_line(bx, by + 3,
+                               input_edge + (-2 if flows_left else 2),
+                               py - 8, fill="#d18cff", width=1,
+                               tags=node_tag)
             canvas.create_oval(bx - 4, by - 4, bx + 4, by + 4,
                                fill=colour, outline="",
-                               tags=("graph_port",
+                               tags=("graph_port", "node:%d" % node.id,
                                      "port:%d:in:%s" % (
                                          node.id, gate_input_name(side,
                                                                   name))))
@@ -9217,7 +10752,29 @@ class hex2pixApp(tk.Tk):
             if tag.startswith("port:"):
                 _prefix, node_id, side, name = tag.split(":", 3)
                 return int(node_id), side, name
-        return None
+        # Canvas hit testing can miss when a label, wire or another node sits
+        # over a small socket.  The centres were cached with the last graph
+        # draw, so this stays cheap even with hundreds of sockets.
+        x, y = self._event_xy(event)
+        best = None
+        best_distance = 81.0
+        cache = getattr(self, "_node_port_cache", None)
+        if cache is not None:
+            entries = cache.items()
+        else:
+            graph = self.doc.active_layer.graph
+            entries = (((node.id, side, name),
+                        self.node_port_pos(node, side, name))
+                       for node in graph.nodes.values()
+                       for side, ports in (("in", node_all_inputs(node)),
+                                           ("out", node_outputs(node)))
+                       for name, _kind in ports)
+        for (node_id, side, name), (px, py) in entries:
+            distance = (px - x) ** 2 + (py - y) ** 2
+            if distance < best_distance:
+                best_distance = distance
+                best = (node_id, side, name)
+        return best
 
     def _segment_distance(self, px, py, x1, y1, x2, y2):
         dx, dy = x2 - x1, y2 - y1
@@ -9234,8 +10791,12 @@ class hex2pixApp(tk.Tk):
         canvas = self.node_canvas
         x, y = self._event_xy(event)
         best_index, best = None, 12.0
-        for item in canvas.find_withtag("graph_link"):
+        # Ask the canvas for candidates near the pointer first.  Scanning
+        # every wire is noticeable once a graph has hundreds of links.
+        for item in canvas.find_overlapping(x - 12, y - 12, x + 12, y + 12):
             tags = canvas.gettags(item)
+            if "graph_link" not in tags:
+                continue
             tag = next((entry for entry in tags
                         if entry.startswith("link:")), None)
             coords = canvas.coords(item)
@@ -9265,7 +10826,7 @@ class hex2pixApp(tk.Tk):
         if target_port is not None:
             target_id, target_side, port = target_port
             target = graph.nodes.get(target_id)
-            if target is None or target_id == node.id:
+            if target is None:
                 return None
             target_ports = (node_all_inputs(target)
                             if target_side == "in" else node_outputs(target))
@@ -9284,7 +10845,7 @@ class hex2pixApp(tk.Tk):
             return None
         target_id = int(node_tag.split(":", 1)[1])
         target = graph.nodes.get(target_id)
-        if target is None or target_id == node.id:
+        if target is None:
             return None
         target_ports = (node_all_inputs(target) if side == "out"
                         else node_outputs(target))
@@ -9304,6 +10865,24 @@ class hex2pixApp(tk.Tk):
         if self.node_canvas["cursor"] != wanted:
             self.node_canvas.configure(cursor=wanted)
 
+    def _select_node(self, node_id):
+        """Change the selected outline without rebuilding the whole graph."""
+        previous = getattr(self, "node_selected", None)
+        if previous == node_id:
+            return
+        canvas = getattr(self, "node_canvas", None)
+        if canvas is not None:
+            for old_id, selected in ((previous, False), (node_id, True)):
+                if old_id is None:
+                    continue
+                for item in canvas.find_withtag("node:%d" % old_id):
+                    if "node_body" in canvas.gettags(item):
+                        canvas.itemconfigure(
+                            item,
+                            outline="#7fb2ff" if selected else "#3a4150",
+                            width=2 if selected else 1)
+        self.node_selected = node_id
+
     def on_node_press(self, event):
         canvas = self.node_canvas
         canvas.focus_set()
@@ -9314,9 +10893,8 @@ class hex2pixApp(tk.Tk):
             if node is not None:
                 side, name = port[1], port[2]
                 px, py = self.node_port_pos(node, side, name)
-                self.node_selected = port[0]
-                self._draw_graph()
-                self.refresh_node_props()
+                self._select_node(port[0])
+                self._refresh_props_soon()
                 self.node_link = {"id": port[0], "side": side,
                                   "port": name, "sx": px, "sy": py}
                 self.node_temp_line = canvas.create_line(
@@ -9327,17 +10905,15 @@ class hex2pixApp(tk.Tk):
         if node_tag is not None:
             node_id = int(node_tag.split(":", 1)[1])
             node = self.doc.active_layer.graph.nodes.get(node_id)
-            self.node_selected = node_id
+            self._select_node(node_id)
             if node is not None:
                 self.node_drag = {"id": node_id, "dx": x - node.x,
                                   "dy": y - node.y, "moved": False}
-                self.node_before = self.doc.begin()
-            self._draw_graph()
-            self.refresh_node_props()
+                self.node_before = self.doc.begin_graph()
+            self._refresh_props_soon()
             return
-        self.node_selected = None
-        self._draw_graph()
-        self.refresh_node_props()
+        self._select_node(None)
+        self._refresh_props_soon()
 
     def on_node_motion(self, event):
         canvas = self.node_canvas
@@ -9350,10 +10926,23 @@ class hex2pixApp(tk.Tk):
             node = self.doc.active_layer.graph.nodes.get(self.node_drag["id"])
             if node is None:
                 return
-            node.x = max(0.0, x - self.node_drag["dx"])
-            node.y = max(0.0, y - self.node_drag["dy"])
+            new_x = max(0.0, x - self.node_drag["dx"])
+            new_y = max(0.0, y - self.node_drag["dy"])
+            dx, dy = new_x - node.x, new_y - node.y
+            if not dx and not dy:
+                return
+            node.x, node.y = new_x, new_y
             self.node_drag["moved"] = True
-            self._draw_graph()
+            # Moving every canvas item by its node tag keeps dragging cheap
+            # on large graphs; linked curves are the only other items that
+            # need updating.  A full redraw still happens on release.
+            canvas.move("node:%d" % node.id, dx, dy)
+            self._update_node_links(node.id)
+            cache = getattr(self, "_node_port_cache", None)
+            if cache is not None:
+                for key, (px, py) in list(cache.items()):
+                    if key[0] == node.id:
+                        cache[key] = (px + dx, py + dy)
 
     def on_node_release(self, event):
         if self.node_link is not None:
@@ -9367,22 +10956,24 @@ class hex2pixApp(tk.Tk):
                 self.refresh_node_editor()
                 self.node_status.set(
                     "Those sockets cannot be connected. Drop an output on "
-                    "an input, or an input on an output, without a cycle.")
+                    "an input, or an input on an output.")
                 return
             if not self.connect_graph_ports(*connection):
                 self.refresh_node_editor()
-                self.node_status.set(
-                    "That connection would create a cycle.")
+                self.node_status.set("That connection is not valid.")
                 return
-            self.refresh_node_editor()
             return
         if self.node_drag is not None:
             drag = self.node_drag
             self.node_drag = None
             if drag["moved"] and self.node_before is not None:
-                self.doc.commit(self.node_before)
+                self.doc.commit_graph(self.node_before)
             self.node_before = None
-            self._draw_graph()
+            self._schedule_graph_redraw()
+            if drag["moved"]:
+                self._schedule_node_redraw()
+                if self.debug_enabled():
+                    self._refresh_props_soon()
 
     def on_node_context(self, event):
         port = self._node_port_at(event)
@@ -9393,9 +10984,16 @@ class hex2pixApp(tk.Tk):
                          if tag.startswith("node:")), None)
         if node_tag is not None:
             node_id = int(node_tag.split(":", 1)[1])
+            node = self.doc.active_layer.graph.nodes.get(node_id)
             menu = tk.Menu(self.node_window, tearoff=False)
             menu.add_command(label="Duplicate node",
                              command=lambda: self.duplicate_graph_node(node_id))
+            if node is not None:
+                reverse = tk.BooleanVar(value=node_reversed(node))
+                menu.add_checkbutton(
+                    label="Reverse inputs/outputs", variable=reverse,
+                    command=lambda node=node, reverse=reverse:
+                    self.set_node_reversed(node, reverse.get()))
             menu.add_separator()
             menu.add_command(label="Delete node",
                              command=lambda: self.delete_graph_node(node_id))
@@ -9466,7 +11064,7 @@ class hex2pixApp(tk.Tk):
         name = parts[2] if len(parts) == 3 else ""
         if is_gate_input(name):
             return
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         if wanted is None:
             node.params.pop(key, None)
         else:
@@ -9478,13 +11076,13 @@ class hex2pixApp(tk.Tk):
             if wanted in (None, "not"):
                 graph.unlink_input(node.id, gate_input_name(side, name))
             graph._invalidate()
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         self._node_changed()
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def disconnect_graph_socket(self, node_id, side, name):
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         changed = False
         if side == "in":
             changed = graph.unlink_input(node_id, name)
@@ -9499,9 +11097,9 @@ class hex2pixApp(tk.Tk):
             changed = graph.unlink_input(
                 node_id, gate_input_name(side, name)) or changed
         if changed:
-            self.doc.commit(before)
-            self.layers_changed()
-            self.refresh_node_editor()
+            self.doc.commit_graph(before)
+            self._node_changed()
+            self._refresh_props_soon()
 
     def frame_graph(self):
         canvas = getattr(self, "node_canvas", None)
@@ -9512,7 +11110,7 @@ class hex2pixApp(tk.Tk):
             canvas.xview_moveto(0.0)
             canvas.yview_moveto(0.0)
 
-    def add_graph_node(self, node_type):
+    def add_graph_node(self, node_type, params=None):
         if node_type not in NODE_TYPES:
             return None
         layer = self.doc.active_layer
@@ -9535,8 +11133,13 @@ class hex2pixApp(tk.Tk):
         count = len(graph.nodes)
         x += (count % 5) * 26
         y += (count % 4) * 26
-        before = self.doc.begin()
-        node = graph.add_node(node_type, x, y)
+        before = self.doc.begin_graph()
+        node = graph.add_node(node_type, x, y, params)
+        if node_type == "layer_source" and not node.param("layer"):
+            node.params["layer"] = self.doc.active_layer.name
+        elif node_type == "group_source" and not node.param("group"):
+            if self.doc.groups:
+                node.params["group"] = self.doc.groups[0].name
         if starter and node_type == "hue":
             layer_node = next((item for item in graph.nodes.values()
                                if item.type == "layer"), None)
@@ -9548,9 +11151,10 @@ class hex2pixApp(tk.Tk):
                 graph.link(node.id, "Color", output_node.id, "Color")
                 node.x, node.y = 250.0, 70.0
                 output_node.x = max(output_node.x, 500.0)
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         self.node_selected = node.id
-        self.layers_changed()
+        self._node_changed()
+        self._refresh_props_soon()
         return node
 
     def duplicate_selected_graph_node(self):
@@ -9559,14 +11163,14 @@ class hex2pixApp(tk.Tk):
 
     def duplicate_graph_node(self, node_id):
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         copy = graph.duplicate_node(node_id)
         if copy is None:
             return None
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         self.node_selected = copy.id
-        self.layers_changed()
-        self.refresh_node_editor()
+        self._node_changed()
+        self._refresh_props_soon()
         return copy
 
     def delete_selected_graph_node(self):
@@ -9575,24 +11179,25 @@ class hex2pixApp(tk.Tk):
 
     def delete_graph_node(self, node_id):
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         if not graph.remove_node(node_id):
             return
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         if getattr(self, "node_selected", None) == node_id:
             self.node_selected = None
-        self.layers_changed()
+        self._node_changed()
+        self._refresh_props_soon()
 
     def connect_graph_ports(self, from_id, from_port, to_id, to_port):
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         if not graph.link(from_id, from_port, to_id, to_port):
             if hasattr(self, "node_status"):
-                self.node_status.set(
-                    "That connection would create a cycle.")
+                self.node_status.set("That connection is not valid.")
             return False
-        self.doc.commit(before)
-        self.layers_changed()
+        self.doc.commit_graph(before)
+        self._node_changed()
+        self._refresh_props_soon()
         return True
 
     def delete_graph_link(self, index):
@@ -9600,23 +11205,25 @@ class hex2pixApp(tk.Tk):
         if index < 0 or index >= len(graph.links):
             return
         link = graph.links[index]
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         if not graph.unlink(link["from"], link["from_port"],
                             link["to"], link["to_port"]):
             return
-        self.doc.commit(before)
-        self.layers_changed()
+        self.doc.commit_graph(before)
+        self._node_changed()
+        self._refresh_props_soon()
 
     def disconnect_graph_node(self, node_id):
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         changed = False
         for link in list(graph.links):
             if link["to"] == node_id:
                 changed = graph.unlink_input(node_id, link["to_port"]) or changed
         if changed:
-            self.doc.commit(before)
-            self.layers_changed()
+            self.doc.commit_graph(before)
+            self._node_changed()
+            self._refresh_props_soon()
 
     def refresh_node_props(self):
         frame = getattr(self, "node_props", None)
@@ -9631,13 +11238,22 @@ class hex2pixApp(tk.Tk):
             ttk.Label(frame, text="Select a node to edit its parameters.",
                       foreground="#777", wraplength=220,
                       justify="left").pack(anchor="w")
+            self._build_graph_debug(frame, graph)
             return
         spec = NODE_TYPES[node.type]
-        ttk.Label(frame, text=spec["label"],
+        title = spec["label"]
+        if self.debug_enabled():
+            title = "%s  #%d" % (title, node.id)
+        ttk.Label(frame, text=title,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
         ttk.Label(frame, text=spec["hint"], foreground="#777",
                   wraplength=220, justify="left").pack(anchor="w",
                                                        pady=(0, 6))
+        reverse = tk.BooleanVar(value=node_reversed(node))
+        ttk.Checkbutton(
+            frame, text="Reverse inputs/outputs", variable=reverse,
+            command=lambda node=node, reverse=reverse: self.set_node_reversed(
+                node, reverse.get())).pack(anchor="w", pady=(0, 4))
         for param in spec["params"]:
             self._build_node_param(frame, node, param)
         ttk.Separator(frame).pack(fill="x", pady=6)
@@ -9667,11 +11283,45 @@ class hex2pixApp(tk.Tk):
             ttk.Label(frame, text=text, wraplength=220,
                       justify="left").pack(anchor="w")
         self._build_micro_gates(frame, node)
-        if spec["outputs"]:
+        if spec["outputs"] and not node_reversed(node):
             ttk.Separator(frame).pack(fill="x", pady=6)
             ttk.Label(frame, text="Outputs", foreground="#777").pack(
                 anchor="w")
             self._build_output_count(frame, node)
+        self._build_graph_debug(frame, graph, node)
+
+    def _build_graph_debug(self, frame, graph, node=None):
+        """Show node and graph internals only while Debug tools is on."""
+        if not self.debug_enabled():
+            return
+        ttk.Separator(frame).pack(fill="x", pady=6)
+        ttk.Label(frame, text="Debug", foreground="#d9a441",
+                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        lines = []
+        if node is not None:
+            inputs = node_inputs(node)
+            outputs = node_outputs(node)
+            in_wires = sum(len(graph.links_into(node.id, name))
+                           for name, _kind in inputs)
+            out_wires = sum(1 for link in graph.links
+                            if link["from"] == node.id)
+            lines.extend([
+                "node #%d  type %s" % (node.id, node.type),
+                "position %.0f, %.0f" % (node.x, node.y),
+                "ports %d in / %d out" % (len(inputs), len(outputs)),
+                "wires %d in / %d out" % (in_wires, out_wires),
+            ])
+            if node_reversed(node):
+                if node.type == "gate":
+                    lines.append("layout Color left / A+B right")
+                else:
+                    lines.append("layout inputs right / outputs left")
+        lines.append("graph %d nodes / %d links" % (len(graph.nodes),
+                                                    len(graph.links)))
+        if graph.last_error:
+            lines.append("error: %s" % graph.last_error)
+        ttk.Label(frame, text="\n".join(lines), foreground="#8a94a8",
+                  wraplength=220, justify="left").pack(anchor="w")
 
     def _build_micro_gates(self, frame, node):
         """List configured socket gates with type and B-wire controls."""
@@ -9740,12 +11390,12 @@ class hex2pixApp(tk.Tk):
     def disconnect_micro_gate_b(self, node, side, name):
         """Drop the B wire from one micro gate without removing the gate."""
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         if not graph.unlink_input(node.id, gate_input_name(side, name)):
             return False
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         self._node_changed()
-        self.refresh_node_props()
+        self._refresh_props_soon()
         return True
 
     def _build_node_param(self, frame, node, param):
@@ -9754,21 +11404,41 @@ class hex2pixApp(tk.Tk):
         ttk.Label(row, text=param["label"]).pack(anchor="w")
         name = param["name"]
         if param["kind"] == "choice":
-            labels = [param["labels"][key] for key in param["choices"]]
-            var = tk.StringVar(
-                value=param["labels"].get(node.params.get(name),
-                                          labels[0] if labels else ""))
+            choices = tuple(param["choices"])
+            choice_labels = dict(param["labels"])
+            if node.type == "layer_source" and name == "layer":
+                choices = tuple(layer.name for layer in self.doc.layers)
+                choice_labels = {
+                    layer.name: "Layer %d: %s" % (index + 1, layer.name)
+                    for index, layer in enumerate(self.doc.layers)}
+            elif node.type == "group_source" and name == "group":
+                choices = tuple(group.name for group in self.doc.groups)
+                choice_labels = {
+                    group.name: "Group: %s (%d layers)" % (
+                        group.name, len(self.doc.group_members(group.name)))
+                    for group in self.doc.groups}
+            current = node.params.get(name, param["default"])
+            if current and current not in choice_labels:
+                choices = (current,) + choices
+                choice_labels[current] = "%s (missing)" % current
+            labels = [choice_labels[key] for key in choices]
+            selected = choice_labels.get(
+                current, labels[0] if labels else "")
+            var = tk.StringVar(value=selected)
             box = ttk.Combobox(row, textvariable=var, values=labels,
-                               state="readonly")
+                               state="readonly" if choices else "disabled")
             box.pack(fill="x")
 
-            def apply_choice(event=None, var=var, param=param, node=node):
-                value = next((key for key in param["choices"]
-                              if param["labels"].get(key) == var.get()),
-                             param["default"])
-                self.set_node_param(node, param["name"], value)
-                if param["name"] == "interpolation":
-                    self.refresh_node_props()
+            def apply_choice(event=None, var=var, node=node,
+                             keys=choices, labels=choice_labels,
+                             param_name=name):
+                value = next((key for key in keys
+                              if labels.get(key) == var.get()), None)
+                if value is None:
+                    return
+                self.set_node_param(node, param_name, value)
+                if param_name == "interpolation":
+                    self._refresh_props_soon()
             box.bind("<<ComboboxSelected>>", apply_choice)
         elif param["kind"] == "number":
             var = tk.StringVar(value=str(node.params.get(name,
@@ -9812,7 +11482,7 @@ class hex2pixApp(tk.Tk):
 
     def _build_output_count(self, frame, node):
         base = NODE_TYPES[node.type]["outputs"]
-        if not base:
+        if not base or node_reversed(node):
             return
         maximum = len(base) if len(base) > 1 else 8
         count = len(node_outputs(node))
@@ -9831,14 +11501,14 @@ class hex2pixApp(tk.Tk):
 
     def _set_node_outputs(self, node, count):
         base = NODE_TYPES[node.type]["outputs"]
-        if not base:
+        if not base or node_reversed(node):
             return
         maximum = len(base) if len(base) > 1 else 8
         count = max(1, min(maximum, int(count)))
         if count == len(node_outputs(node)):
             return
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         node.params["outputs"] = count
         visible = set(name for name, _kind in node_outputs(node))
         for link in list(graph.links):
@@ -9846,9 +11516,9 @@ class hex2pixApp(tk.Tk):
                     and link["from_port"] not in visible):
                 graph.unlink(link["from"], link["from_port"],
                              link["to"], link["to_port"])
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         self._node_changed()
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def _build_count_param(self, frame, node, param):
         try:
@@ -9861,32 +11531,33 @@ class hex2pixApp(tk.Tk):
         line.pack(fill="x")
         ttk.Button(line, text="-", width=2,
                    state="normal" if count > param["min"] else "disabled",
-                   command=lambda: self._set_value_inputs(
-                       node, count - 1)).pack(side="left")
+                   command=lambda: self._set_node_inputs(
+                       node, param, count - 1)).pack(side="left")
         ttk.Label(line, text="%d of %d" % (count, param["max"])).pack(
             side="left", padx=6)
         ttk.Button(line, text="+ Add input",
                    state="normal" if count < param["max"] else "disabled",
-                   command=lambda: self._set_value_inputs(
-                       node, count + 1)).pack(side="left")
+                   command=lambda: self._set_node_inputs(
+                       node, param, count + 1)).pack(side="left")
 
-    def _set_value_inputs(self, node, count):
-        names = [name for name, _kind in NODE_TYPES["value"]["inputs"]]
-        count = max(0, min(len(names), int(count)))
+    def _set_node_inputs(self, node, param, count):
+        names = [name for name, _kind in NODE_TYPES[node.type]["inputs"]]
+        count = max(param["min"], min(param["max"], len(names),
+                                       int(count)))
         try:
-            current = int(node.params.get("inputs", 0))
+            current = int(node.params.get(param["name"], param["default"]))
         except (TypeError, ValueError):
-            current = 0
+            current = param["default"]
         if count == current:
             return
         graph = self.doc.active_layer.graph
-        before = self.doc.begin()
-        node.params["inputs"] = count
+        before = self.doc.begin_graph()
+        node.params[param["name"]] = count
         for name in names[count:]:
             graph.unlink_input(node.id, name)
-        self.doc.commit(before)
+        self.doc.commit_graph(before)
         self._node_changed()
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def _build_gradient_param(self, frame, node, param):
         text = node.params.get(param["name"], param["default"])
@@ -9919,7 +11590,7 @@ class hex2pixApp(tk.Tk):
             if value is None:
                 return
             self.set_node_param(node, param["name"], value)
-            self.refresh_node_props()
+            self._refresh_props_soon()
         preset_box.bind("<<ComboboxSelected>>", apply_preset)
         ttk.Button(preset_line, text="Reverse",
                    command=lambda: self._reverse_gradient(
@@ -9983,7 +11654,7 @@ class hex2pixApp(tk.Tk):
     def _reverse_gradient(self, node, param):
         text = node.params.get(param["name"], param["default"])
         self.set_node_param(node, param["name"], reverse_gradient(text))
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def _pick_gradient_stop(self, node, param, index):
         stops = list(parse_gradient(node.params.get(param["name"],
@@ -9999,7 +11670,7 @@ class hex2pixApp(tk.Tk):
         stops[index] = (stops[index][0],
                         parse_color(chosen.lstrip("#") + "FF"))
         self._set_gradient_stops(node, param, stops)
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def _add_gradient_stop(self, node, param):
         stops = list(parse_gradient(node.params.get(param["name"],
@@ -10014,7 +11685,7 @@ class hex2pixApp(tk.Tk):
         stops.append((position, gradient_color(
             gradient_text(stops), position, node.param("interpolation"))))
         self._set_gradient_stops(node, param, stops)
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def _remove_gradient_stop(self, node, param, index):
         stops = list(parse_gradient(node.params.get(param["name"],
@@ -10023,7 +11694,7 @@ class hex2pixApp(tk.Tk):
             return
         del stops[index]
         self._set_gradient_stops(node, param, stops)
-        self.refresh_node_props()
+        self._refresh_props_soon()
 
     def _node_number(self, text, param):
         try:
@@ -10052,17 +11723,211 @@ class hex2pixApp(tk.Tk):
     def set_node_param(self, node, name, value):
         if node.params.get(name) == value:
             return
-        before = self.doc.begin()
+        before = self.doc.begin_graph()
         node.params[name] = value
-        self.doc.commit(before)
-        self._node_changed()
+        graph = getattr(self.doc.active_layer, "graph", None)
+        if graph is not None:
+            graph.param_changed()
+        self.doc.commit_graph(before)
+        self._node_changed(node.id)
 
-    def _node_changed(self):
-        self.redraw()
+    def set_node_reversed(self, node, enabled):
+        """Swap one node's input and output sockets, saving it."""
+        enabled = bool(enabled)
+        if node_reversed(node) == enabled:
+            return
+        before = self.doc.begin_graph()
+        if enabled:
+            node.params["@reverse"] = True
+        else:
+            node.params.pop("@reverse", None)
+        graph = getattr(self.doc.active_layer, "graph", None)
+        if graph is not None:
+            # Socket gates belong to their sockets, so follow each gate when
+            # its socket changes side instead of leaving it on a hidden name.
+            for key in list(node.params):
+                if not key.startswith("@gate:"):
+                    continue
+                if key.endswith(":invert"):
+                    node.params.pop(key, None)
+                    continue
+                parts = key.split(":", 2)
+                if len(parts) != 3:
+                    continue
+                side, name = parts[1], parts[2]
+                if side not in ("in", "out"):
+                    continue
+                moved = "@gate:%s:%s" % (
+                    "out" if side == "in" else "in", name)
+                node.params[moved] = node.params.pop(key)
+            if node.type in ("gate", "operation", "blend"):
+                for link in graph.links:
+                    if link["to"] == node.id:
+                        if enabled and link["to_port"] in ("A", "B"):
+                            link["to_port"] = "Color"
+                        elif not enabled and link["to_port"] == "Color":
+                            link["to_port"] = "A"
+                    if link["from"] == node.id:
+                        if enabled and link["from_port"] == "Color":
+                            link["from_port"] = "A"
+                        elif (not enabled
+                              and link["from_port"] in ("A", "B")):
+                            link["from_port"] = "Color"
+            for link in graph.links:
+                port = link["to_port"]
+                if link["to"] != node.id or not is_gate_input(port):
+                    continue
+                info = gate_input_info(port)
+                if info is None:
+                    continue
+                side, name = info
+                link["to_port"] = gate_input_name(
+                    "out" if side == "in" else "in", name)
+            graph.param_changed()
+        self.doc.commit_graph(before)
+        self._node_changed(node.id)
+        # Reversing changes socket sides, so recompute the document preview as
+        # well as redrawing the graph.  This also prevents a stale preview if
+        # the node editor's normal redraw was already queued.
+        self.request_redraw()
+        self._refresh_props_soon()
+
+    def _node_changed(self, node_id=None):
+        """Refresh cheap labels, then coalesce the expensive redraws.
+
+        Rebuilding the whole editor canvas and compositing the document from
+        inside a menu, checkbox or spinbox callback made complex graphs stall.
+        Both redraws now run once per burst instead of once per callback.  A
+        node-local change redraws just that node and its wires; structural
+        changes still rebuild the whole graph.
+        """
         self.refresh_status()
         self.refresh_nodes_tab()
-        if getattr(self, "node_window", None) is not None:
+        self._schedule_graph_redraw(node_id=node_id)
+        self._schedule_node_redraw()
+
+    def _schedule_node_redraw(self):
+        if getattr(self, "_node_redraw_job", None) is not None:
+            return
+        try:
+            self._node_redraw_job = self.after(110,
+                                               self._flush_node_redraw)
+        except tk.TclError:
+            self._node_redraw_job = None
+
+    def _schedule_graph_redraw(self, delay=24, node_id=None):
+        if getattr(self, "node_window", None) is None:
+            return
+        job = getattr(self, "_graph_redraw_job", None)
+        if job is not None:
+            if node_id is None:
+                self._graph_redraw_nodes = None
+            elif getattr(self, "_graph_redraw_nodes", None) is not None:
+                self._graph_redraw_nodes.add(node_id)
+            return
+        self._graph_redraw_nodes = (None if node_id is None
+                                    else {node_id})
+        try:
+            self._graph_redraw_job = self.after(
+                delay, self._flush_graph_redraw)
+        except tk.TclError:
+            self._graph_redraw_job = None
+            self._graph_redraw_nodes = None
+
+    def _flush_graph_redraw(self):
+        self._graph_redraw_job = None
+        if self._closing or self._destroyed:
+            return
+        if getattr(self, "node_window", None) is None:
+            return
+        node_ids = getattr(self, "_graph_redraw_nodes", None)
+        self._graph_redraw_nodes = None
+        try:
+            if node_ids is None:
+                self._draw_graph()
+            else:
+                self._redraw_graph_nodes(node_ids)
+        except tk.TclError:
+            pass
+
+    def _redraw_graph_nodes(self, node_ids):
+        """Rebuild only the given nodes and the wires touching them."""
+        canvas = getattr(self, "node_canvas", None)
+        if canvas is None:
+            return
+        graph = self.doc.active_layer.graph
+        if any(node_id not in graph.nodes for node_id in node_ids):
             self._draw_graph()
+            return
+        link_indices = set()
+        for node_id in node_ids:
+            link_indices.update(
+                getattr(self, "node_link_indices", {}).get(node_id, ()))
+            canvas.delete("node:%d" % node_id)
+        for index in link_indices:
+            canvas.delete("link:%d" % index)
+        cache = self._node_port_cache
+        for key in [key for key in cache if key[0] in node_ids]:
+            del cache[key]
+        link_counts = {}
+        for link in graph.links:
+            key = (link["to"], link["to_port"])
+            link_counts[key] = link_counts.get(key, 0) + 1
+        for index in sorted(link_indices):
+            if index >= len(graph.links):
+                continue
+            link = graph.links[index]
+            source = graph.nodes.get(link["from"])
+            target = graph.nodes.get(link["to"])
+            if source is None or target is None:
+                continue
+            coords = self._link_coords(source, link["from_port"],
+                                       target, link["to_port"])
+            item = canvas.create_line(
+                *coords, smooth=True, splinesteps=18, width=2,
+                fill=self._wire_colour(source, link["from_port"]),
+                tags=("graph_link", "link:%d" % index))
+            canvas.tag_lower(item)
+        for node_id in node_ids:
+            self._draw_graph_node(graph.nodes[node_id], link_counts)
+
+    def _refresh_props_soon(self):
+        """Rebuild the inspector after the current Tk event has returned.
+
+        Destroying a combo box or check button from inside its own command is
+        what made the node editor stop responding after some changes.
+        """
+        if getattr(self, "_props_refresh_job", None) is not None:
+            return
+        try:
+            self._props_refresh_job = self.after_idle(
+                self._flush_props_refresh)
+        except tk.TclError:
+            self._props_refresh_job = None
+
+    def _flush_props_refresh(self):
+        self._props_refresh_job = None
+        if self._closing or self._destroyed:
+            return
+        try:
+            self.refresh_node_props()
+        except tk.TclError:
+            pass
+
+    def _flush_node_redraw(self):
+        self._node_redraw_job = None
+        if self._closing or self._destroyed:
+            return
+        self.request_mini_preview()
+        if not self._auto_preview():
+            # Slow graphs and a paused preview both wait for Apply; the
+            # staged thumbnail already shows what the change looks like.
+            self._mark_preview_pending("Preview paused - press Apply")
+            return
+        try:
+            self.redraw()
+        except tk.TclError:
+            pass
 
     def toggle_layer_visible(self):
         before = self.doc.begin()
@@ -10354,6 +12219,11 @@ class hex2pixApp(tk.Tk):
 
     # ------------------------------------------------------------------ status
     def refresh_status(self):
+        """Rewrite the status line.
+
+        Every pointer move calls this, so it only does cheap work; a
+        selection count is a single C-level byte count.
+        """
         x, y = self.cursor
         color = self.doc.bitmap.rgba(x, y)
         if self.tabs and 0 <= self.tab_index < len(self.tabs):
@@ -10361,10 +12231,16 @@ class hex2pixApp(tk.Tk):
         else:
             name = (os.path.basename(self.doc.path) if self.doc.path
                     else "untitled")
-        self.title("hex2pix \u2014 %s" % name)
+        title = "hex2pix \u2014 %s" % name
+        if getattr(self, "_status_title", None) != title:
+            self._status_title = title
+            self.title(title)
         selection = self.doc.selection
-        selected = ("%d px / %d B" % (selection.count(), selection.bytes_count())
-                    if selection.active else "no selection")
+        if selection.active:
+            count = selection.count()
+            selected = "%d px / %d B" % (count, count * 4)
+        else:
+            selected = "no selection"
         typed = ("   hex[%s]" % self.typed) if self.typed else ""
         canvas = ("%dx%d @ %g ppi %s%s"
                   % (self.doc.width, self.doc.height, self.doc.ppi,
@@ -10404,6 +12280,21 @@ class hex2pixApp(tk.Tk):
             "|  %s%s"
             % (name, canvas, x, y, hex_str(*color), self.tool, view,
                self.brush, self.tolerance, selected, typed))
+        if self.debug_enabled():
+            layer = self.doc.active_layer
+            graph = layer.graph
+            detail = "DEBUG  %s  |  %s  |  %d nodes / %d links" % (
+                layer.name,
+                RENDER_LABELS.get(layer.render_mode, layer.render_mode),
+                len(graph.nodes), len(graph.links))
+            if graph.last_error:
+                error = graph.last_error
+                if len(error) > 70:
+                    error = error[:67] + "..."
+                detail += "  |  " + error
+            self.debug_info.set(detail)
+        elif getattr(self, "debug_info", None) is not None:
+            self.debug_info.set("")
 
     def report_error(self, message):
         if self.silent:
@@ -10596,6 +12487,15 @@ class hex2pixApp(tk.Tk):
             return
         self._destroyed = True
         self._closing = True
+        for attribute in ("_node_redraw_job", "_props_refresh_job"):
+            job = getattr(self, attribute, None)
+            if job is None:
+                continue
+            setattr(self, attribute, None)
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
         try:
             super().destroy()
         except tk.TclError:
@@ -10649,6 +12549,7 @@ class hex2pixApp(tk.Tk):
             "Colour wheel    click sets FG, right-click sets BG\n"
             "Palette         New/Set/Del build one; Map quantizes to it\n"
             "Dark mode       View > Dark mode; on by default\n"
+            "Debug tools     View > Debug tools; node IDs and graph stats\n"
             "Dockers         View menu hides or shows right-side tabs\n"
             "Help menu       GitHub update checks\n"
             "Shift+T         move / scale / rotate selection: drag to move,\n"
@@ -10676,7 +12577,8 @@ class hex2pixApp(tk.Tk):
             "                drag a row to restack, double-click shows/hides\n"
             "Nodes tab       Complex Render: open the graph editor and\n"
             "                wire Operation, Gate, Blend, Perlin, Hue,\n"
-            "                Color Ramp, Mask, Apply Mask and other nodes into Output\n"
+            "                Color Ramp, Mask, Apply Mask, Layer/Group Source,\n"
+            "                wire routing and other nodes into Output\n"
             "F9              record the keys you press\n"
             "F5              play the recording back (Escape stops)\n"
             "F11             toggle fullscreen (Escape leaves it)\n"
@@ -11422,7 +13324,7 @@ def run_selftest(out_path=None):
         export_ok = os.path.isfile(export_path) and os.path.getsize(export_path) > 0
 
         app.doc.selection.select_all()
-        app.refresh_bytes()
+        app.refresh_bytes(force=True)
         dump_ok = "112233FF" in app.dump_text.get("1.0", "end")
 
         app.new_canvas(CanvasSpec(24, 18, 144.0, "RGB", True,
@@ -11729,9 +13631,11 @@ def run_selftest(out_path=None):
         app.node_selected = value.id
         app.refresh_node_props()
         app._set_node_outputs(value, 2)
+        app._draw_graph()
         nodes_ok = nodes_ok and len(node_outputs(value)) == 2
         for gate in MICRO_GATES:
             app.set_socket_gate(value, "@gate:out:Value", gate)
+            app._draw_graph()
             b_tag = "port:%d:in:%s" % (value.id,
                                         gate_input_name("out", "Value"))
             b_sockets = len(app.node_canvas.find_withtag(b_tag))
@@ -11771,12 +13675,186 @@ def run_selftest(out_path=None):
         nodes_ok = (nodes_ok and "Micro gates" in props_text
                     and "Disconnect B wire" in props_text
                     and app.disconnect_micro_gate_b(value, "out", "Value"))
+        app.refresh_node_props()
         nodes_ok = (nodes_ok
                     and not graph.links_into(value.id, b_port)
                     and "Disconnect B wire" not in widget_texts(
                         app.node_props))
+        app.debug_tools_var.set(True)
+        app.toggle_debug_tools()
+        app.node_selected = value.id
+        app.refresh_node_props()
+        app._draw_graph()
+        debug_texts = widget_texts(app.node_props)
+        canvas_texts = [app.node_canvas.itemcget(item, "text")
+                        for item in app.node_canvas.find_all()
+                        if app.node_canvas.type(item) == "text"]
+        debug_ok = (app.debug_enabled()
+                    and any("#%d" % value.id in text
+                            for text in canvas_texts)
+                    and any(text.startswith("node #%d  type value" % value.id)
+                            for text in debug_texts)
+                    and any("graph " in text for text in debug_texts)
+                    and app.debug_info.get().startswith("DEBUG")
+                    and app.debug_label.winfo_manager() == "pack")
+        app.debug_tools_var.set(False)
+        app.toggle_debug_tools()
+        app.refresh_node_props()
+        debug_ok = (debug_ok
+                    and not app.debug_enabled()
+                    and not app.debug_label.winfo_manager()
+                    and app.debug_info.get() == ""
+                    and "Debug" not in widget_texts(app.node_props))
         app.set_socket_gate(value, "@gate:out:Value", "none")
         nodes_ok = nodes_ok and "@gate:out:Value" not in value.params
+
+        # A full Gate node draws its large symbol and owns the colour of its
+        # outgoing wire; ordinary wires follow the socket type.
+        gate_node = graph.add_node("gate", 40, 470, {"mode": "nand"})
+        app.node_selected = gate_node.id
+        app.layers_changed()
+        app._draw_graph()
+        app.refresh_node_props()
+        normal_in = app.node_port_pos(gate_node, "in", "A")
+        normal_out = app.node_port_pos(gate_node, "out", "Color")
+        normal_symbol = next(
+            item for item in app.node_canvas.find_withtag(
+                "node:%d" % gate_node.id)
+            if "gate_symbol" in app.node_canvas.gettags(item))
+        normal_apex = app.node_canvas.coords(normal_symbol)[4]
+        normal_input_edge = max(max(app.node_canvas.coords(item)[0::2])
+                                for item in app.node_canvas.find_withtag(
+                                    "node:%d" % gate_node.id)
+                                if "gate_input" in app.node_canvas.gettags(item))
+        normal_bubble = next(
+            item for item in app.node_canvas.find_withtag(
+                "node:%d" % gate_node.id)
+            if "gate_bubble" in app.node_canvas.gettags(item))
+        normal_bubble_x = sum(app.node_canvas.coords(
+            normal_bubble)[0::2]) / 2.0
+        app.set_node_reversed(gate_node, True)
+        app.refresh_node_props()
+        app._draw_graph()
+        reverse_in = app.node_port_pos(gate_node, "in", "Color")
+        reverse_out = app.node_port_pos(gate_node, "out", "A")
+        reverse_symbol = next(
+            item for item in app.node_canvas.find_withtag(
+                "node:%d" % gate_node.id)
+            if "gate_symbol" in app.node_canvas.gettags(item))
+        reverse_apex = app.node_canvas.coords(reverse_symbol)[4]
+        reverse_input_edge = min(min(app.node_canvas.coords(item)[0::2])
+                                 for item in app.node_canvas.find_withtag(
+                                     "node:%d" % gate_node.id)
+                                 if "gate_input" in app.node_canvas.gettags(item))
+        reverse_bubble = next(
+            item for item in app.node_canvas.find_withtag(
+                "node:%d" % gate_node.id)
+            if "gate_bubble" in app.node_canvas.gettags(item))
+        reverse_bubble_x = sum(app.node_canvas.coords(
+            reverse_bubble)[0::2]) / 2.0
+        reverse_ok = (reverse_in[0] == normal_in[0]
+                      and reverse_out[0] == normal_out[0]
+                      and reverse_apex < normal_apex
+                      and reverse_bubble_x == normal_bubble_x
+                      and normal_input_edge == gate_node.x + 56
+                      and reverse_input_edge == gate_node.x
+                      and [name for name, _kind in node_inputs(gate_node)]
+                      == ["Color"]
+                      and [name for name, _kind in node_outputs(gate_node)]
+                      == ["A", "B"]
+                      and node_reversed(gate_node)
+                      and "Reverse inputs/outputs" in widget_texts(
+                          app.node_props))
+        app.set_node_reversed(gate_node, False)
+        reverse_ok = (reverse_ok
+                      and not node_reversed(gate_node)
+                      and app.node_port_pos(gate_node, "in", "A")
+                      == normal_in)
+        # A micro gate on a reversed input must keep its own input on the
+        # outside edge; otherwise the visible socket is the gate's output and
+        # cannot be wired to a Layer's data socket.
+        layer_source = next(item for item in graph.nodes.values()
+                            if item.type == "layer")
+        app.set_node_reversed(gate_node, True)
+        app.set_socket_gate(gate_node, "@gate:in:Color", "nand")
+        app._draw_graph()
+        micro_x, micro_y = app.node_port_pos(gate_node, "in", "Color")
+        micro_drop = _Event(int(micro_x - app.node_canvas.canvasx(0)),
+                            int(micro_y - app.node_canvas.canvasy(0)))
+        micro_link = app._connection_for_release(
+            {"id": layer_source.id, "side": "out", "port": "Color"},
+            micro_drop)
+        route = app._link_coords(layer_source, "Color", gate_node, "Color")
+        inner_x, inner_y = app._gate_geometry(
+            gate_node, "in", "Color")["out"]
+        inner_drop = _Event(int(inner_x - app.node_canvas.canvasx(0)),
+                            int(inner_y - app.node_canvas.canvasy(0)))
+        micro_ok = (micro_x < gate_node.x
+                    and app._node_port_at(micro_drop)
+                    == (gate_node.id, "in", "Color")
+                    and app._node_port_at(inner_drop)
+                    == (gate_node.id, "in", "Color")
+                    and micro_link == (layer_source.id, "Color",
+                                       gate_node.id, "Color")
+                    and len(route) > 8
+                    and tuple(route[:2]) == app.node_port_pos(
+                        layer_source, "out", "Color")
+                    and tuple(route[-2:]) == app.node_port_pos(
+                        gate_node, "in", "Color"))
+        app.set_socket_gate(gate_node, "@gate:in:Color", "none")
+        app.set_node_reversed(gate_node, False)
+        app._draw_graph()
+        reverse_ok = reverse_ok and micro_ok
+        port_x, port_y = app.node_port_pos(gate_node, "in", "A")
+        drop = _Event(int(port_x - app.node_canvas.canvasx(0)),
+                      int(port_y - app.node_canvas.canvasy(0)))
+        self_link = app._connection_for_release(
+            {"id": gate_node.id, "side": "out", "port": "Color"}, drop)
+        self_link_ok = self_link == (gate_node.id, "Color",
+                                     gate_node.id, "A")
+        gate_body = next(
+            item for item in app.node_canvas.find_withtag(
+                "node:%d" % gate_node.id)
+            if "node_body" in app.node_canvas.gettags(item))
+        old_x, old_y = gate_node.x, gate_node.y
+        old_body = app.node_canvas.coords(gate_body)
+        app.node_drag = {"id": gate_node.id, "dx": 0.0, "dy": 0.0,
+                         "moved": False}
+        app.on_node_motion(_Event(
+            int(gate_node.x - app.node_canvas.canvasx(0)) + 10,
+            int(gate_node.y - app.node_canvas.canvasy(0))))
+        node_drag_ok = (gate_node.x > old_x
+                        and app.node_canvas.coords(gate_body)[0] > old_body[0])
+        app.node_drag = None
+        gate_node.x, gate_node.y = old_x, old_y
+        app._draw_graph()
+        gate_texts = [app.node_canvas.itemcget(item, "text")
+                      for item in app.node_canvas.find_all()
+                      if app.node_canvas.type(item) == "text"]
+        gate_props = widget_texts(app.node_props)
+        layer_node = next(item for item in graph.nodes.values()
+                          if item.type == "layer")
+        nodes_ok = (nodes_ok and "&" in gate_texts
+                    and "Gate / wire colour" in gate_props
+                    and app._wire_colour(gate_node, "Color") == "#E5B0FF"
+                    and app._wire_colour(layer_node, "Color") == "#f0b45c"
+                    and app._wire_colour(value, "Value") == "#78d6a0")
+        gate_node.params["color"] = "20C0FF"
+        nodes_ok = (nodes_ok
+                    and app._wire_colour(gate_node, "Color") == "#20C0FF")
+        if app.connect_graph_ports(gate_node.id, "Color", output_id, "Color"):
+            link_index = next(index for index, link in enumerate(graph.links)
+                              if link["from"] == gate_node.id
+                              and link["from_port"] == "Color")
+            app.layers_changed()
+            app._draw_graph()
+            wire_tags = "link:%d" % link_index
+            wire_items = app.node_canvas.find_withtag(wire_tags)
+            nodes_ok = (nodes_ok and bool(wire_items)
+                        and app.node_canvas.itemcget(
+                            wire_items[0], "fill") == "#20C0FF")
+        else:
+            nodes_ok = False
 
         # Adding Hue Shift to an untouched starter graph should insert it
         # into the Layer -> Output path, not leave the layer passthrough wire
@@ -11948,7 +14026,8 @@ def run_selftest(out_path=None):
                       gradient_ok, palette_ok, wheel_ok, quantize_ok,
                       dark_ok, light_ok, dockers_ok, overlay_ok,
                       layer_keys_ok, group_ok, merged_ok, layer_ops_ok,
-                      nodes_ok, mouse_ok))
+                      nodes_ok, debug_ok, reverse_ok, self_link_ok,
+                      node_drag_ok, mouse_ok))
         gui_ok = gui_ok and all((tabs_ok, dirty_ok, drop_ok, smear_ok,
                                  tips_ok, pattern_ok))
         lines.append("gui checks: rect=%s pixel=%s undo=%s wand=%s block=%s "
@@ -11961,7 +14040,8 @@ def run_selftest(out_path=None):
                      "left_scroll=%s symmetry=%s shape=%s gradient=%s "
                      "palette=%s wheel=%s quantize=%s dark=%s light=%s "
                      "dockers=%s overlay=%s layer_keys=%s groups=%s "
-                     "merge=%s layer_options=%s nodes=%s mouse=%s"
+                     "merge=%s layer_options=%s nodes=%s debug=%s reverse=%s "
+                     "selflink=%s dragview=%s mouse=%s"
                      % (rect_ok, pixel_ok, undo_ok, wand_ok, block_ok, drag_ok,
                         erase_ok, export_ok, dump_ok, canvas_ok, props_ok,
                         undo_canvas_ok, dialog_ok, default_view_ok, hex_view_ok,
@@ -11973,7 +14053,8 @@ def run_selftest(out_path=None):
                         gradient_ok, palette_ok, wheel_ok, quantize_ok,
                         dark_ok, light_ok, dockers_ok, overlay_ok,
                         layer_keys_ok, group_ok, merged_ok, layer_ops_ok,
-                        nodes_ok, mouse_ok))
+                        nodes_ok, debug_ok, reverse_ok, self_link_ok,
+                        node_drag_ok, mouse_ok))
     except Exception as exc:  # noqa: BLE001 - reported below
         import traceback
         lines.append("gui checks crashed: %s: %s" % (type(exc).__name__, exc))

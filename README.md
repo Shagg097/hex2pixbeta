@@ -378,10 +378,15 @@ active layer, and `Alt+Up` / `Alt+Down` restack it.
 **Quick Render** is the default: the Operation, Nandgate and Blend dropdowns.
 Set **Render** to **Complex Render** to drive the layer from a node graph, then
 open the editor from the **Nodes** tab. Layer, Below, Output, Operation, Gate,
-Blend, Perlin Noise, Hue Shift, Color Ramp, Mask, Apply Mask, Color, Value
-and Math nodes have input and output sockets; drag any socket onto any socket, edit the selected
-node on the right, and the Output node becomes the layer's contribution. Right-click a
-node to duplicate it, or use the Duplicate node button.
+Blend, Perlin Noise, Hue Shift, Color Ramp, Mask, Apply Mask, Layer Source,
+Group Source, Wire Splitter, Wire Joiner, Wire Router, Color, Value and Math
+nodes have input and output sockets; drag any socket onto any socket, edit the selected
+node on the right, and the Output node becomes the layer's contribution. The
+Output node accepts Color, Value, or any of the Layer node's channel and
+measurement sockets; its Red, Green and Blue sockets compose into one colour,
+and a value wired into one of them fills that channel. It contributes nothing
+until at least one input is connected. Right-click a node to duplicate it, or use the Duplicate node
+button.
 Numbers and colours convert automatically when a graph mixes them; Layer
 `Red`, `Green` and `Blue` outputs become channel-only colours with the layer's
 alpha when wired into colour inputs. Several wires into one input add on
@@ -390,18 +395,50 @@ deletes just that wire. Layer nodes expose channels and
 measurements (red/green/blue, alpha, opacity, hue, both saturations,
 brightness, lightness, luminance, gamma and chroma), and Value nodes have an
 unbounded base with up to eight adding inputs you reveal in the inspector.
+The node editor's **Document sources** list shows every layer and layer group.
+Double-click an entry (or select it and press **Add selected source**) to add a
+**Layer Source** or **Group Source** node; selecting an entry again reuses its
+existing node. Layer Source exposes a layer's colour, channels and
+measurements. Group Source exposes the composited group pixel and measurements.
+These sources read the document's bitmap data directly and do not recursively
+run the selected layer's own graph; hidden layers and groups remain available.
+Wire Splitter, Wire Joiner and Wire Router pass colours or numbers without
+forcing a conversion. Splitter merges its connected inputs and copies the
+result to every output; Joiner merges its inputs into one output; Router maps
+`A` to `Out 1`, `B` to `Out 2`, and so on. Their Inputs control reveals
+up to eight sockets, and their Outputs control adds or trims outputs.
 Color Ramp nodes map luminance, hue or another layer measurement through an
 editable multi-stop gradient with Linear, Constant or Smooth interpolation,
 ready-made presets and a Reverse button.
 Output sockets can be trimmed or duplicated, and right-clicking any socket
 opens a micro gate menu with AND, OR, XOR, NOT, NAND, NOR and XNOR. A gate is
 drawn as an extension of the node with its logic symbol and its own output
-socket; binary gates also get a B input socket for their second operand. The
-inspector's **Micro gates** section lists the gates on the selected node, lets
-you change their type, and disconnects their B wires. `A` is the layer and
+socket; binary gates also get a B input socket for their second operand. A
+NAND gate inverts its output. The inspector's **Micro gates** section lists the
+gates on the selected node, lets you change their type and B wires. `A` is the
+layer and
 `B` is the stack below, so a single Operation node works before you wire
 anything. Graphs are saved in `.h2p` projects and undo states, and **Merge
 down** bakes the graph into pixels.
+
+Every node has a **Reverse inputs/outputs** checkbox in its inspector and
+right-click menu. Reversing mirrors the node and swaps its socket roles. A
+reversed Gate keeps its reversed body but has one Color input on the left and
+A/B outputs on the right; its gate mode still runs, using Color as the A
+operand. Existing Gate, Operation and Blend wires are re-pointed to the new
+sockets. Wiring is
+intentionally
+unrestricted: inputs accept any number of wires, duplicate wires are allowed,
+and a node can connect to itself or form a cycle. Cyclic wires whose source
+has not been evaluated yet use the same implicit defaults as an unconnected
+socket, so a hostile graph still renders instead of locking up or failing.
+
+Turn on **View > Debug tools** (or the **Debug tools** checkbox in the node
+editor toolbar) to diagnose a graph. Node headers and the inspector gain their
+node IDs, the inspector reports the selected node's type, position, port and
+wire counts plus graph totals and the last graph error, and the status bar
+shows a live summary of the active layer's render mode, node and link counts
+and error. The setting is remembered between sessions.
 
 ## Canvas and documents
 
@@ -597,7 +634,7 @@ py -3 -m unittest discover -s hex2pix/tests -t .
 py -3 run_hex2pix.py --selftest
 ```
 
-The first command runs **668 unit tests** covering the model, canvas geometry,
+The first command runs **701 unit tests** covering the model, canvas geometry,
 formats, colors, palettes, patterns, dithering, effects, filters, macros,
 projects and update checks. The second adds a headless GUI pass that builds the
 window and exercises painting, erasing, selections, canvas resizing, undo,
@@ -633,7 +670,7 @@ hex2pixmain/
 │  ├─ integrations.py      GitHub release update checks
 │  ├─ bitmapfont.py        built-in 5×7 text font
 │  ├─ assets/             16×16 BMP tool icons
-│  └─ tests/              668 unit tests
+│  └─ tests/              701 unit tests
 └─ docs/                   logo and editor screenshot; logo source in logo/
 ```
 
